@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SmoothFlow</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Header -->
+      <header class="app-header">
+        <div class="brand">
+          <span class="logo-dot"></span>
+          <h1>SmoothFlow</h1>
+        </div>
+        <button id="settings-toggle" class="icon-btn" aria-label="Settings">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+        </button>
+      </header>
+
+      <!-- Main Hub -->
+      <main class="main-content">
+        <div class="visualizer-container">
+          <div class="glow-ring" id="glow-ring"></div>
+          <button id="record-btn" class="record-button" aria-label="Toggle Recording">
+            <div class="btn-inner">
+              <svg id="mic-icon" xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v1a7 7 0 0 1-14 0v-1"></path><line x1="12" x2="12" y1="19" y2="22"></line></svg>
+            </div>
+          </button>
+        </div>
+
+        <div class="status-panel">
+          <span id="status-text">Idle</span>
+          <span class="status-tip">Hold <kbd>Space</kbd> to dictate (or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd> anywhere)</span>
+        </div>
+
+        <div class="transcript-card">
+          <div class="card-header">
+            <span>Transcript</span>
+            <button id="copy-btn" class="text-btn" style="display: none;">Copy</button>
+          </div>
+          <div id="transcript" class="transcript-text">Your dictated text will appear here. Press start to record.</div>
+        </div>
+      </main>
+
+      <div id="debug-bar">▶ App loaded</div>
+
+      <!-- Glassmorphic Settings Drawer -->
+      <div id="settings-drawer" class="drawer">
+        <div class="drawer-backdrop" id="drawer-backdrop"></div>
+        <div class="drawer-content">
+          <div class="drawer-header">
+            <h2>Settings</h2>
+            <button id="settings-close" class="icon-btn">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="6" y1="6" y2="18"></line><line x1="6" x2="18" y1="6" y2="18"></line></svg>
+            </button>
+          </div>
+          <div class="drawer-body">
+            <div class="settings-group">
+              <label for="api-url-input">API Base URL</label>
+              <div class="input-wrapper">
+                <input type="text" id="api-url-input" placeholder="https://api.groq.com/openai/v1" />
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <label for="model-input">Model</label>
+              <input type="text" id="model-input" placeholder="whisper-large-v3" />
+            </div>
+
+            <div class="settings-group">
+              <label for="api-key-input">API Key</label>
+              <div class="input-wrapper">
+                <input type="password" id="api-key-input" placeholder="gsk_..." />
+                <button id="toggle-key-visibility" class="icon-btn password-toggle">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="settings-group toggle-group">
+              <div class="toggle-label-desc">
+                <label>Auto Punctuation</label>
+                <span>Automatically add ending punctuation</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="punctuation-toggle" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="settings-group toggle-group">
+              <div class="toggle-label-desc">
+                <label>Remove Filler Words</label>
+                <span>Strip "um", "uh", "you know", etc.</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="fillers-toggle" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="settings-group toggle-group">
+              <div class="toggle-label-desc">
+                <label>Launch on Startup</label>
+                <span>Auto-start SmoothFlow when you log in</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="startup-toggle" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            
+            <div class="settings-footer">
+              <div id="settings-status">Settings saved automatically</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
+

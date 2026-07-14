@@ -1,0 +1,8 @@
+{
+  "api_base_url": "https://api.groq.com/openai/v1",
+  "api_key": "YOUR_API_KEY_HERE",
+  "model": "whisper-large-v3",
+  "auto_punctuation": true,
+  "remove_fillers": true,
+  "launch_on_startup": false
+}

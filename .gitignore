@@ -1,0 +1,7 @@
+node_modules/
+target_check/
+target_check_2/
+target_check_3/
+src-tauri/target/
+.vite/
+src-tauri/smoothflow.json

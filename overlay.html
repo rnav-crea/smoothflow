@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Recording Overlay</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@600&display=swap" rel="stylesheet">
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: transparent;
+        font-family: 'Outfit', sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        width: 100vw;
+      }
+      .overlay-pill {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: rgba(15, 23, 42, 0.85);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(244, 63, 94, 0.35);
+        padding: 8px 16px;
+        border-radius: 9999px;
+        color: #f43f5e;
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(244, 63, 94, 0.2);
+        user-select: none;
+        -webkit-app-region: drag; /* allows moving the window by dragging it */
+      }
+      .recording-dot {
+        width: 8px;
+        height: 8px;
+        background-color: #f43f5e;
+        border-radius: 50%;
+        animation: pulse 1.2s infinite ease-in-out;
+        box-shadow: 0 0 8px #f43f5e;
+      }
+      @keyframes pulse {
+        0%, 100% {
+          transform: scale(0.8);
+          opacity: 0.5;
+          box-shadow: 0 0 4px #f43f5e;
+        }
+        50% {
+          transform: scale(1.2);
+          opacity: 1;
+          box-shadow: 0 0 12px #f43f5e;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="overlay-pill">
+      <div class="recording-dot"></div>
+      <span>Recording...</span>
+    </div>
+  </body>
+</html>
