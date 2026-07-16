@@ -49,9 +49,13 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
     let _ = app.emit("transcript-result", text.clone());
     
     if !text.is_empty() {
-        println!("CMD: typing text...");
-        text_injection::type_text(&text)?;
-        println!("CMD: typed OK");
+        if config.auto_paste {
+            println!("CMD: typing text...");
+            text_injection::type_text(&text)?;
+            println!("CMD: typed OK");
+        } else {
+            println!("CMD: auto-paste disabled, showing in transcript only");
+        }
     }
     Ok(text)
 }
@@ -82,7 +86,7 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
                     use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
-                    if !shortcut.matches(Modifiers::CONTROL | Modifiers::SHIFT, Code::Space) {
+                    if !shortcut.matches(Modifiers::CONTROL, Code::Space) {
                         return;
                     }
                     let state = app.state::<AppState>();
@@ -125,8 +129,18 @@ pub fn run() {
                                     Ok(text) => {
                                         let text = postprocess::postprocess(&text, &config);
                                         let _ = app.emit("transcript-result", text.clone());
-                                        if !text.is_empty() {
-                                            text_injection::type_text(&text).unwrap_or_else(|e| eprintln!("type_text error: {e}"));
+                                        if config.auto_paste {
+                                            if !text.is_empty() {
+                                                println!("HOTKEY: auto-paste enabled, typing...");
+                                                if let Err(e) = text_injection::type_text(&text) {
+                                                    eprintln!("HOTKEY: type_text error: {e}");
+                                                    let _ = app.emit("transcription-error", format!("Auto-paste failed: {e}"));
+                                                }
+                                            } else {
+                                                println!("HOTKEY: auto-paste enabled but text is empty, skipping");
+                                            }
+                                        } else {
+                                            println!("HOTKEY: auto-paste disabled in config");
                                         }
                                     }
                                     Err(e) => {
@@ -154,12 +168,12 @@ pub fn run() {
             use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, GlobalShortcutExt};
             
             let shortcut = Shortcut::new(
-                Some(Modifiers::CONTROL | Modifiers::SHIFT),
+                Some(Modifiers::CONTROL),
                 Code::Space,
             );
             match app.global_shortcut().register(shortcut) {
-                Ok(_) => println!("SUCCESS: Registered Ctrl+Shift+Space global shortcut!"),
-                Err(e) => eprintln!("ERROR: Failed to register Ctrl+Shift+Space global shortcut: {e}"),
+                Ok(_) => println!("SUCCESS: Registered Ctrl+Space global shortcut!"),
+                Err(e) => eprintln!("ERROR: Failed to register Ctrl+Space global shortcut: {e}"),
             }
 
             let overlay = WebviewWindowBuilder::new(

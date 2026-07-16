@@ -23,3 +23,4 @@ hound = "3"
 enigo = { version = "0.2", features = ["serde"] }
 reqwest = { version = "0.12", features = ["json", "multipart", "blocking"] }
 nnnoiseless = "0.5"
+arboard = "3"

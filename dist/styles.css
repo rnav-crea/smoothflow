@@ -375,12 +375,6 @@ kbd {
   color: var(--text-secondary);
 }
 
-.settings-hint {
-  font-size: 0.7rem;
-  color: var(--text-secondary);
-  margin-top: -0.25rem;
-}
-
 /* Custom Select, Inputs, Switches */
 .select-wrapper {
   position: relative;
@@ -507,4 +501,19 @@ input:checked + .slider:before {
   font-size: 0.75rem;
   color: var(--text-secondary);
   font-style: italic;
+}
+
+#debug-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-family: monospace;
+  background: rgba(0,0,0,0.85);
+  color: #22c55e;
+  z-index: 999;
+  text-align: center;
+  pointer-events: none;
 }

@@ -6,8 +6,10 @@ pub struct Config {
     pub api_base_url: String,
     pub api_key: String,
     pub model: String,
+    pub cleanup_model: String,
     pub auto_punctuation: bool,
     pub remove_fillers: bool,
+    pub auto_paste: bool,
     pub launch_on_startup: bool,
 }
 
@@ -17,8 +19,10 @@ impl Default for Config {
             api_base_url: "https://api.groq.com/openai/v1".into(),
             api_key: String::new(),
             model: "whisper-large-v3".into(),
+            cleanup_model: "llama-3.1-8b-instant".into(),
             auto_punctuation: true,
             remove_fillers: true,
+            auto_paste: true,
             launch_on_startup: false,
         }
     }
@@ -56,8 +60,10 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.api_base_url, "https://api.groq.com/openai/v1");
         assert_eq!(c.model, "whisper-large-v3");
+        assert_eq!(c.cleanup_model, "llama-3.1-8b-instant");
         assert!(c.auto_punctuation);
         assert!(c.remove_fillers);
+        assert!(c.auto_paste);
         assert!(!c.launch_on_startup);
         assert!(c.api_key.is_empty());
     }
@@ -68,8 +74,10 @@ mod tests {
             api_base_url: "https://example.com/api".into(),
             api_key: "sk-test".into(),
             model: "whisper-1".into(),
+            cleanup_model: "gpt-4o-mini".into(),
             auto_punctuation: false,
             remove_fillers: false,
+            auto_paste: false,
             launch_on_startup: true,
         };
         let json = serde_json::to_string(&c).unwrap();
@@ -114,8 +122,10 @@ mod tests {
             api_base_url: "https://custom.example.com".into(),
             api_key: "key-roundtrip".into(),
             model: "whisper-custom".into(),
+            cleanup_model: String::new(),
             auto_punctuation: false,
             remove_fillers: true,
+            auto_paste: true,
             launch_on_startup: false,
         };
         c.save();
@@ -125,5 +135,6 @@ mod tests {
         assert_eq!(loaded.model, "whisper-custom");
         assert!(!loaded.auto_punctuation);
         assert!(loaded.remove_fillers);
+        assert!(loaded.auto_paste);
     }
 }

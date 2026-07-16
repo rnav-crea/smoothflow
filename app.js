@@ -21,10 +21,12 @@ const drawerBackdrop = document.getElementById("drawer-backdrop");
 
 const apiUrlInput = document.getElementById("api-url-input");
 const modelInput = document.getElementById("model-input");
+const cleanupModelInput = document.getElementById("cleanup-model-input");
 const apiKeyInput = document.getElementById("api-key-input");
 const toggleKeyVisibility = document.getElementById("toggle-key-visibility");
 const punctuationToggle = document.getElementById("punctuation-toggle");
 const fillersToggle = document.getElementById("fillers-toggle");
+const autopasteToggle = document.getElementById("autopaste-toggle");
 const startupToggle = document.getElementById("startup-toggle");
 const settingsStatus = document.getElementById("settings-status");
 
@@ -160,9 +162,11 @@ async function loadConfig() {
     
     apiUrlInput.value = config.api_base_url;
     modelInput.value = config.model;
+    cleanupModelInput.value = config.cleanup_model;
     apiKeyInput.value = config.api_key;
     punctuationToggle.checked = config.auto_punctuation;
     fillersToggle.checked = config.remove_fillers;
+    autopasteToggle.checked = config.auto_paste;
     startupToggle.checked = config.launch_on_startup;
   } catch (err) {
     log(`Config load error: ${err}`);
@@ -175,9 +179,11 @@ async function saveConfig() {
   const updatedConfig = {
     api_base_url: apiUrlInput.value,
     model: modelInput.value,
+    cleanup_model: cleanupModelInput.value,
     api_key: apiKeyInput.value,
     auto_punctuation: punctuationToggle.checked,
     remove_fillers: fillersToggle.checked,
+    auto_paste: autopasteToggle.checked,
     launch_on_startup: startupToggle.checked,
   };
   
@@ -204,9 +210,11 @@ function showSaveStatus(text) {
 // Bind config events
 apiUrlInput.addEventListener("change", saveConfig);
 modelInput.addEventListener("change", saveConfig);
+cleanupModelInput.addEventListener("change", saveConfig);
 apiKeyInput.addEventListener("input", saveConfig);
 punctuationToggle.addEventListener("change", saveConfig);
 fillersToggle.addEventListener("change", saveConfig);
+autopasteToggle.addEventListener("change", saveConfig);
 startupToggle.addEventListener("change", saveConfig);
 
 // Initialize
