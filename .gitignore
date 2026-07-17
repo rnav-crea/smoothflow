@@ -4,4 +4,7 @@ target_check_2/
 target_check_3/
 src-tauri/target/
 .vite/
+dist/
+target/
+smoothflow.json
 src-tauri/smoothflow.json

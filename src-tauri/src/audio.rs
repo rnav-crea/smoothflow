@@ -1,13 +1,15 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use nnnoiseless::DenoiseState;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub struct AudioRecorder {
-    recording: Arc<Mutex<bool>>,
+    pub recording: Arc<Mutex<bool>>,
     samples: Arc<Mutex<Vec<f32>>>,
     stream: Option<cpal::Stream>,
     sample_rate: u32,
     channels: u16,
+    pub peak_level: Arc<AtomicU32>,
 }
 
 // ponytail: cpal::Stream is !Send on Windows (contains raw pointer).
@@ -22,6 +24,7 @@ impl AudioRecorder {
             stream: None,
             sample_rate: 0,
             channels: 0,
+            peak_level: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -50,8 +53,9 @@ impl AudioRecorder {
 
         let recording = self.recording.clone();
         let samples = self.samples.clone();
+        let peak_level = self.peak_level.clone();
 
-        let err_fn = move |err| eprintln!("audio error: {}", err);
+        let err_fn = move |err| println!("audio error: {}", err);
 
         let stream = device
             .build_input_stream(
@@ -59,6 +63,8 @@ impl AudioRecorder {
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     if *recording.lock().unwrap() {
                         samples.lock().unwrap().extend_from_slice(data);
+                        let rms = (data.iter().map(|s| s * s).sum::<f32>() / data.len() as f32).sqrt();
+                        peak_level.store((rms * 100000.0) as u32, Ordering::Relaxed);
                     }
                 },
                 err_fn,
@@ -87,7 +93,7 @@ impl AudioRecorder {
 }
 
 fn denoise(raw: Vec<f32>, channels: usize) -> Vec<f32> {
-    if raw.len() < 480 {
+    if channels == 0 || raw.len() < 480 {
         return raw;
     }
 
@@ -110,11 +116,8 @@ fn denoise(raw: Vec<f32>, channels: usize) -> Vec<f32> {
             denoiser.process_frame(&mut frame_buf, chunk);
             denoised.extend_from_slice(&frame_buf);
         } else {
-            // Pad the last partial frame with silence
-            let mut padded = [0.0f32; 480];
-            padded[..chunk.len()].copy_from_slice(chunk);
-            denoiser.process_frame(&mut frame_buf, &padded);
-            denoised.extend_from_slice(&frame_buf[..chunk.len()]);
+            // ponytail: skip RNNoise for partial frame to avoid padding artifact
+            denoised.extend_from_slice(chunk);
         }
     }
 
@@ -122,6 +125,10 @@ fn denoise(raw: Vec<f32>, channels: usize) -> Vec<f32> {
 }
 
 fn trim_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    if sample_rate == 0 || samples.is_empty() {
+        return samples.to_vec();
+    }
+
     if samples.len() < sample_rate as usize / 10 {
         return samples.to_vec();
     }

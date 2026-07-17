@@ -7,9 +7,10 @@ pub fn type_text(text: &str) -> Result<(), String> {
 }
 
 fn clipboard_paste(text: &str) -> Result<(), String> {
-    // ponytail: clipboard save/restore omitted for v1
     let mut clipboard =
         arboard::Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
+
+    let old = clipboard.get_text().ok();
 
     clipboard
         .set_text(text.to_owned())
@@ -31,6 +32,12 @@ fn clipboard_paste(text: &str) -> Result<(), String> {
     enigo
         .key(Key::Control, Direction::Release)
         .map_err(|e| format!("ctrl release: {e}"))?;
+
+    std::thread::sleep(Duration::from_millis(100));
+
+    if let Some(old_text) = old {
+        let _ = clipboard.set_text(old_text);
+    }
 
     Ok(())
 }

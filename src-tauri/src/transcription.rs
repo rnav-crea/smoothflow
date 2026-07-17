@@ -1,8 +1,23 @@
 use crate::config::Config;
 use hound::{WavSpec, WavWriter};
 use std::io::Cursor;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("failed to create reqwest client")
+    })
+}
 
 fn rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
     let sum: f32 = samples.iter().map(|s| s * s).sum();
     (sum / samples.len() as f32).sqrt()
 }
@@ -20,7 +35,7 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
     let wav_bytes = encode_wav(samples, sample_rate)?;
     let url = format!("{}/audio/transcriptions", config.api_base_url.trim_end_matches('/'));
 
-    let client = reqwest::blocking::Client::new();
+    let client = http_client();
     let part = reqwest::blocking::multipart::Part::bytes(wav_bytes)
         .file_name("audio.wav")
         .mime_str("audio/wav")
@@ -56,9 +71,12 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
 }
 
 fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
+    if samples.is_empty() {
+        return Err("no audio samples to encode".into());
+    }
     // Downsample to 16kHz (Whisper API expects 16kHz mono)
     let target_rate = 16000u32;
-    let step = (sample_rate / target_rate) as usize;
+    let step = (sample_rate / target_rate).max(1) as usize;
 
     let spec = WavSpec {
         channels: 1,

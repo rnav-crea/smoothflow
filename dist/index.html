@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/styles.css" />
-    <script type="module" crossorigin src="/assets/index-CUn8cluD.js"></script>
+    <script type="module" crossorigin src="/assets/index-BUKCuLCx.js"></script>
   </head>
   <body>
     <div id="app">
@@ -36,7 +36,7 @@
 
         <div class="status-panel">
           <span id="status-text">Idle</span>
-          <span class="status-tip">Hold <kbd>Space</kbd> to dictate (or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd> anywhere)</span>
+          <span class="status-tip">Hold <kbd>Space</kbd> to dictate (or <kbd>Ctrl</kbd>+<kbd>Space</kbd> anywhere)</span>
         </div>
 
         <div class="transcript-card">
@@ -74,6 +74,12 @@
             </div>
 
             <div class="settings-group">
+              <label for="cleanup-model-input">Cleanup Model</label>
+              <input type="text" id="cleanup-model-input" placeholder="llama-3.1-8b-instant" />
+              <span class="settings-hint">LLM that cleans up self-corrections &amp; formatting</span>
+            </div>
+
+            <div class="settings-group">
               <label for="api-key-input">API Key</label>
               <div class="input-wrapper">
                 <input type="password" id="api-key-input" placeholder="gsk_..." />
@@ -101,6 +107,17 @@
               </div>
               <label class="switch">
                 <input type="checkbox" id="fillers-toggle" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="settings-group toggle-group">
+              <div class="toggle-label-desc">
+                <label>Auto-Paste</label>
+                <span>Type transcript directly into active window</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="autopaste-toggle" checked />
                 <span class="slider"></span>
               </label>
             </div>

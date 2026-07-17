@@ -128,6 +128,27 @@ body {
   }
 }
 
+.vu-meter {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 120px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  z-index: 2;
+}
+
+.vu-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #22c55e, #eab308, #ef4444);
+  transition: width 60ms linear;
+}
+
 .record-button {
   width: 110px;
   height: 110px;

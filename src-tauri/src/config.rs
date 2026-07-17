@@ -1,6 +1,18 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+fn config_dir() -> PathBuf {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let mut p = PathBuf::from(appdata);
+        p.push("SmoothFlow");
+        let _ = std::fs::create_dir_all(&p);
+        p
+    } else {
+        // ponytail: fallback to cwd if APPDATA not set (unlikely on Windows)
+        std::env::current_dir().unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub api_base_url: String,
@@ -30,7 +42,7 @@ impl Default for Config {
 
 impl Config {
     pub fn path() -> PathBuf {
-        let mut p = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut p = config_dir();
         p.push("smoothflow.json");
         p
     }

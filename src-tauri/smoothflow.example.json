@@ -2,7 +2,9 @@
   "api_base_url": "https://api.groq.com/openai/v1",
   "api_key": "YOUR_API_KEY_HERE",
   "model": "whisper-large-v3",
+  "cleanup_model": "llama-3.1-8b-instant",
   "auto_punctuation": true,
   "remove_fillers": true,
+  "auto_paste": true,
   "launch_on_startup": false
 }

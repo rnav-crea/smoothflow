@@ -24,8 +24,30 @@ struct AppState {
 #[tauri::command]
 fn start_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<(), String> {
     println!("CMD: start_recording called");
-    state.recorder.lock().unwrap().start()?;
+    let mut recorder = state.recorder.lock().unwrap();
+    if recorder.is_recording() {
+        println!("CMD: already recording, ignoring");
+        return Ok(());
+    }
+    let peak_level = recorder.peak_level.clone();
+    let recording_flag = recorder.recording.clone();
+    recorder.start()?;
+    drop(recorder);
     let _ = app.emit("recording-state", true);
+
+    // ponytail: polling thread for live VU meter
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            if !*recording_flag.lock().unwrap() { break; }
+            let raw = peak_level.load(std::sync::atomic::Ordering::Relaxed);
+            let level = raw as f32 / 100000.0;
+            let _ = app_clone.emit("audio-level", level);
+        }
+        let _ = app_clone.emit("audio-level", 0.0f32);
+    });
+
     println!("CMD: start_recording done");
     Ok(())
 }
@@ -67,6 +89,12 @@ fn get_config(state: tauri::State<AppState>) -> Result<Config, ()> {
 
 #[tauri::command]
 fn update_config(app: tauri::AppHandle, state: tauri::State<AppState>, new_config: Config) -> Result<(), String> {
+    if new_config.api_key.is_empty() {
+        return Err("API key cannot be empty".into());
+    }
+    if new_config.model.is_empty() {
+        return Err("Model name cannot be empty".into());
+    }
     let launch_on_startup = new_config.launch_on_startup;
     *state.config.lock().unwrap() = new_config;
     state.config.lock().unwrap().save();
@@ -90,65 +118,85 @@ pub fn run() {
                         return;
                     }
                     let state = app.state::<AppState>();
-                    eprintln!("HOTKEY: event state={:?}", event.state);
+                    println!("HOTKEY: event state={:?}", event.state);
                     match event.state {
                         ShortcutState::Pressed => {
-                            if !state.recorder.lock().unwrap().is_recording() {
-                                if let Err(e) = state.recorder.lock().unwrap().start() {
-                                    eprintln!("start_recording error: {e}");
+                            let started = {
+                                let mut recorder = state.recorder.lock().unwrap();
+                                if recorder.is_recording() {
+                                    false
                                 } else {
-                                    let _ = app.emit("recording-state", true);
-                                    if let Some(overlay) = state.overlay.lock().unwrap().as_ref() {
-                                        match overlay.show() {
-                                            Ok(_) => println!("HOTKEY: overlay shown"),
-                                            Err(e) => eprintln!("HOTKEY: overlay show error: {e}"),
+                                    match recorder.start() {
+                                        Ok(_) => true,
+                                        Err(e) => {
+                                            println!("start_recording error: {e}");
+                                            false
                                         }
-                                    } else {
-                                        eprintln!("HOTKEY: overlay not available in state");
                                     }
+                                }
+                            };
+                            if started {
+                                let _ = app.emit("recording-state", true);
+                                if let Some(overlay) = state.overlay.lock().unwrap().as_ref() {
+                                    match overlay.show() {
+                                        Ok(_) => println!("HOTKEY: overlay shown"),
+                                        Err(e) => println!("HOTKEY: overlay show error: {e}"),
+                                    }
+                                } else {
+                                    println!("HOTKEY: overlay not available in state");
                                 }
                             }
                         }
                         ShortcutState::Released => {
                             let mut recorder = state.recorder.lock().unwrap();
-                            if recorder.is_recording() {
-                                let samples = recorder.stop();
-                                let sample_rate = recorder.sample_rate();
-                                drop(recorder);
-                                let _ = app.emit("recording-state", false);
+                            if !recorder.is_recording() {
+                                return;
+                            }
+                            let samples = recorder.stop();
+                            let sample_rate = recorder.sample_rate();
+                            drop(recorder);
+                            let _ = app.emit("recording-state", false);
 
-                                if let Some(overlay) = state.overlay.lock().unwrap().as_ref() {
-                                    match overlay.hide() {
-                                        Ok(_) => println!("HOTKEY: overlay hidden"),
-                                        Err(e) => eprintln!("HOTKEY: overlay hide error: {e}"),
-                                    }
-                                }
-
-                                let config = state.config.lock().unwrap();
-                                match transcription::transcribe(&samples, sample_rate, &config) {
-                                    Ok(text) => {
-                                        let text = postprocess::postprocess(&text, &config);
-                                        let _ = app.emit("transcript-result", text.clone());
-                                        if config.auto_paste {
-                                            if !text.is_empty() {
-                                                println!("HOTKEY: auto-paste enabled, typing...");
-                                                if let Err(e) = text_injection::type_text(&text) {
-                                                    eprintln!("HOTKEY: type_text error: {e}");
-                                                    let _ = app.emit("transcription-error", format!("Auto-paste failed: {e}"));
-                                                }
-                                            } else {
-                                                println!("HOTKEY: auto-paste enabled but text is empty, skipping");
-                                            }
-                                        } else {
-                                            println!("HOTKEY: auto-paste disabled in config");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("transcription error: {e}");
-                                        let _ = app.emit("transcription-error", e);
-                                    }
+                            if let Some(overlay) = state.overlay.lock().unwrap().as_ref() {
+                                match overlay.hide() {
+                                    Ok(_) => println!("HOTKEY: overlay hidden"),
+                                    Err(e) => println!("HOTKEY: overlay hide error: {e}"),
                                 }
                             }
+
+                            let config = state.config.lock().unwrap().clone();
+                            let app_clone = app.clone();
+
+                            // ponytail: spawn to unblock shortcut thread during HTTP calls
+                            std::thread::spawn(move || {
+                                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    let text = transcription::transcribe(&samples, sample_rate, &config)?;
+                                    let text = postprocess::postprocess(&text, &config);
+                                    let _ = app_clone.emit("transcript-result", text.clone());
+                                    if config.auto_paste {
+                                        if !text.is_empty() {
+                                            println!("HOTKEY: auto-paste enabled, typing...");
+                                            if let Err(e) = text_injection::type_text(&text) {
+                                                println!("HOTKEY: type_text error: {e}");
+                                                let _ = app_clone.emit("transcription-error", format!("Auto-paste failed: {e}"));
+                                            }
+                                        } else {
+                                            println!("HOTKEY: auto-paste enabled but text is empty, skipping");
+                                        }
+                                    } else {
+                                        println!("HOTKEY: auto-paste disabled in config");
+                                    }
+                                    Ok::<_, String>(())
+                                }));
+                                if let Err(e) = result {
+                                    let msg = match e.downcast::<String>() {
+                                        Ok(s) => s.to_string(),
+                                        Err(_) => "unknown panic in transcription thread".into(),
+                                    };
+                                    println!("TRANSCRIPTION PANIC: {msg}");
+                                    let _ = app_clone.emit("transcription-error", msg);
+                                }
+                            });
                         }
                     }
                 })
@@ -173,7 +221,7 @@ pub fn run() {
             );
             match app.global_shortcut().register(shortcut) {
                 Ok(_) => println!("SUCCESS: Registered Ctrl+Space global shortcut!"),
-                Err(e) => eprintln!("ERROR: Failed to register Ctrl+Space global shortcut: {e}"),
+                Err(e) => println!("ERROR: Failed to register Ctrl+Space global shortcut: {e}"),
             }
 
             let overlay = WebviewWindowBuilder::new(
@@ -193,7 +241,7 @@ pub fn run() {
             let state = app.state::<AppState>();
             match &overlay {
                 Ok(w) => { let _ = w.hide(); println!("SETUP: overlay created"); }
-                Err(e) => eprintln!("SETUP: overlay creation error: {e}"),
+                Err(e) => println!("SETUP: overlay creation error: {e}"),
             }
             *state.overlay.lock().unwrap() = overlay.ok();
 
@@ -234,6 +282,12 @@ pub fn run() {
                             }
                         }
                         "quit" => {
+                            if let Some(state) = app.try_state::<AppState>() {
+                                let mut recorder = state.recorder.lock().unwrap();
+                                if recorder.is_recording() {
+                                    recorder.stop();
+                                }
+                            }
                             app.exit(0);
                         }
                         _ => {}

@@ -26,6 +26,7 @@
       <main class="main-content">
         <div class="visualizer-container">
           <div class="glow-ring" id="glow-ring"></div>
+          <div class="vu-meter" id="vu-meter"><div class="vu-fill" id="vu-fill"></div></div>
           <button id="record-btn" class="record-button" aria-label="Toggle Recording">
             <div class="btn-inner">
               <svg id="mic-icon" xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v1a7 7 0 0 1-14 0v-1"></path><line x1="12" x2="12" y1="19" y2="22"></line></svg>
@@ -35,7 +36,7 @@
 
         <div class="status-panel">
           <span id="status-text">Idle</span>
-          <span class="status-tip">Hold <kbd>Space</kbd> to dictate (or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd> anywhere)</span>
+          <span class="status-tip">Hold <kbd>Space</kbd> to dictate (or <kbd>Ctrl</kbd>+<kbd>Space</kbd> anywhere)</span>
         </div>
 
         <div class="transcript-card">

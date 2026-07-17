@@ -83,6 +83,12 @@ listen("recording-error", (event) => {
   isRecording = false;
 }).catch(e => log(`listen error: ${e}`));
 
+const vuFill = document.getElementById("vu-fill");
+listen("audio-level", (event) => {
+  const level = Math.min(event.payload, 1.0);
+  vuFill.style.width = `${level * 100}%`;
+}).catch(e => log(`listen error audio-level: ${e}`));
+
 // Toggle Recording manually
 async function toggleRecording() {
   try {
@@ -104,6 +110,7 @@ recordBtn.addEventListener("click", toggleRecording);
 // Hold-to-record: Space keydown = start, Space keyup = stop
 document.addEventListener("keydown", (e) => {
   if (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "SELECT") return;
+  if (settingsDrawer.classList.contains("open")) return;
   if (e.code === "Space" && !e.repeat && !isRecording) {
     e.preventDefault();
     log("Hold: Space down → start");
@@ -123,11 +130,14 @@ document.addEventListener("keyup", (e) => {
 copyBtn.addEventListener("click", () => {
   const text = transcriptEl.textContent;
   if (text && text !== "Your dictated text will appear here. Press start to record." && text !== "(silence)") {
-    navigator.clipboard.writeText(text);
-    copyBtn.textContent = "Copied!";
-    setTimeout(() => {
-      copyBtn.textContent = "Copy";
-    }, 1500);
+    navigator.clipboard.writeText(text).then(() => {
+      copyBtn.textContent = "Copied!";
+      setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+    }).catch(e => {
+      log(`Clipboard error: ${e}`);
+      copyBtn.textContent = "Failed";
+      setTimeout(() => { copyBtn.textContent = "Copy"; }, 2000);
+    });
   }
 });
 
@@ -211,7 +221,7 @@ function showSaveStatus(text) {
 apiUrlInput.addEventListener("change", saveConfig);
 modelInput.addEventListener("change", saveConfig);
 cleanupModelInput.addEventListener("change", saveConfig);
-apiKeyInput.addEventListener("input", saveConfig);
+apiKeyInput.addEventListener("change", saveConfig);
 punctuationToggle.addEventListener("change", saveConfig);
 fillersToggle.addEventListener("change", saveConfig);
 autopasteToggle.addEventListener("change", saveConfig);

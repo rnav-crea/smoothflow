@@ -1,4 +1,16 @@
 use crate::config::Config;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("failed to create reqwest client")
+    })
+}
 
 const FILLERS: &[&str] = &[
     "um", "uh", "like", "you know", "actually", "basically",
@@ -41,7 +53,7 @@ pub fn postprocess(text: &str, config: &Config) -> String {
     if !config.cleanup_model.is_empty() {
         return cleanup_transcript(text, config)
             .unwrap_or_else(|e| {
-                eprintln!("CLEANUP ERROR: {e}");
+                println!("CLEANUP ERROR: {e}");
                 text.to_string()
             });
     }
@@ -62,7 +74,7 @@ pub fn postprocess(text: &str, config: &Config) -> String {
 fn cleanup_transcript(text: &str, config: &Config) -> Result<String, String> {
     let url = format!("{}/chat/completions", config.api_base_url.trim_end_matches('/'));
 
-    let client = reqwest::blocking::Client::new();
+    let client = http_client();
 
     #[derive(serde::Serialize, serde::Deserialize)]
     struct Message {
@@ -115,17 +127,11 @@ fn cleanup_transcript(text: &str, config: &Config) -> Result<String, String> {
 }
 
 fn remove_fillers(text: &str) -> String {
+    // ponytail: word-boundary replacement instead of naive substring
     let mut result = text.to_string();
-    for filler in FILLERS {
-        let pattern_lower = format!(" {} ", filler);
-        let pattern_upper = {
-            let mut c = filler.chars();
-            let first = c.next().unwrap().to_uppercase().to_string();
-            format!(" {} ", first + c.as_str())
-        };
-        result = result
-            .replace(&pattern_lower, " ")
-            .replace(&pattern_upper, " ");
+    for &filler in FILLERS {
+        let re = regex::Regex::new(&format!(r"\b{}\b", regex::escape(filler))).unwrap();
+        result = re.replace_all(&result, "").into_owned();
     }
     result.split_whitespace().collect::<Vec<_>>().join(" ")
 }
