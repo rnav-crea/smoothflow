@@ -1,8 +1,8 @@
 mod audio;
-mod config;
+pub mod config;
 mod postprocess;
 mod text_injection;
-mod transcription;
+pub mod transcription;
 
 use audio::AudioRecorder;
 use config::Config;
@@ -64,9 +64,10 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
     
     let config = state.config.lock().unwrap();
     println!("CMD: transcribing...");
-    let text = transcription::transcribe(&samples, sample_rate, &config)?;
-    println!("CMD: transcript received: {:?}", &text[..text.len().min(50)]);
-    let text = postprocess::postprocess(&text, &config);
+    let raw = transcription::transcribe(&samples, sample_rate, &config)?;
+    println!("CMD: transcript received: {:?}", &raw[..raw.len().min(50)]);
+    let _ = app.emit("raw-transcript", raw.clone());
+    let text = postprocess::postprocess(&raw, &config);
     
     let _ = app.emit("transcript-result", text.clone());
     
@@ -170,8 +171,9 @@ pub fn run() {
                             // ponytail: spawn to unblock shortcut thread during HTTP calls
                             std::thread::spawn(move || {
                                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    let text = transcription::transcribe(&samples, sample_rate, &config)?;
-                                    let text = postprocess::postprocess(&text, &config);
+                                    let raw = transcription::transcribe(&samples, sample_rate, &config)?;
+                                    let _ = app_clone.emit("raw-transcript", raw.clone());
+                                    let text = postprocess::postprocess(&raw, &config);
                                     let _ = app_clone.emit("transcript-result", text.clone());
                                     if config.auto_paste {
                                         if !text.is_empty() {

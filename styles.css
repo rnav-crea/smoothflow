@@ -529,3 +529,15 @@ input:checked + .slider:before {
   color: var(--text-secondary);
   font-style: italic;
 }
+
+/* Raw Transcript Card (smaller, muted) */
+.transcript-card.raw {
+  min-height: auto;
+  max-height: 120px;
+  opacity: 0.7;
+  font-size: 0.85rem;
+}
+.transcript-card.raw .transcript-text {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}

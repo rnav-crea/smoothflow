@@ -2,8 +2,7 @@ use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::time::Duration;
 
 pub fn type_text(text: &str) -> Result<(), String> {
-    // ponytail: .text() is faster (no clipboard, no delay), use as primary
-    enigo_text(text).or_else(|_| clipboard_paste(text))
+    clipboard_paste(text).or_else(|_| enigo_text(text))
 }
 
 fn clipboard_paste(text: &str) -> Result<(), String> {

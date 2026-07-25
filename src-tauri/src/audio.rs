@@ -138,7 +138,7 @@ fn trim_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
         return samples.to_vec();
     }
 
-    let threshold = 0.008;
+    let threshold = 0.003;
     let margin_frames = 3;
 
     let voice_frames: Vec<bool> = samples.chunks(frame_size).map(|chunk| {

@@ -17,24 +17,21 @@ const FILLERS: &[&str] = &[
     "literally", "sort of", "kind of", "i mean", "well",
 ];
 
-const CLEANUP_SYSTEM_PROMPT: &str = "You clean up raw dictation transcripts into polished natural text.\n\n\
+const CLEANUP_SYSTEM_PROMPT: &str = "You clean up raw dictation transcripts.\n\n\
 Rules:\n\
 1. RESOLVE SELF-CORRECTIONS: keep only the final intent.\n\
    \"I will meet at 6pm no wait 7pm\" -> \"I will meet at 7pm\"\n\
    \"today no tomorrow\" -> \"tomorrow\"\n\
-   \"Friday actually Saturday\" -> \"Saturday\"\n\
-   \"12345 but no its 54321\" -> \"54321\"\n\
 \n\
-2. FIX CLUNKY PHRASING: rewrite awkward literal speech into natural English.\n\
-   \"I will reach the office\" -> \"I will get to the office\" or \"I will arrive\"\n\
-   \"because traffic is heavy\" as a reason for a time -> separate into two sentences\n\
+2. Fix obvious grammar and spelling only. DO NOT change specific details (objects, actions, places).\n\
+   \"i hitted the bottle\" -> \"I hit the bottle\" (grammar fix, detail preserved)\n\
+   \"water fell on the divice\" -> \"water fell on the device\" (spelling fix, detail preserved)\n\
+   \"I will reach the office\" -> \"I will reach the office\" (leave it, detail preserved)\n\
 \n\
 3. EMAIL ADDRESSES: convert spoken \"at\" to @ when clearly an email.\n\
    \"navin at redmail.com\" -> \"navin@redmail.com\"\n\
 \n\
-4. PUNCTUATION: use natural speech punctuation, not formal writing.\n\
-   Avoid semicolons — use periods or \"and\" instead.\n\
-   \"send the report; join the meeting\" -> \"send the report and join the meeting\"\n\
+4. PUNCTUATION: add basic sentence-ending periods if missing. Avoid semicolons.\n\
 \n\
 5. TIMES: \"6pm\" -> \"6:00 PM\"\n\
 \n\
@@ -42,12 +39,8 @@ Rules:\n\
    \"cake or maybe pizza not sure\" -> \"pizza\"\n\
 \n\
 7. CORRECTIONS: \"X no it is Y\" -> keep Y.\n\
-   \"park no it is cafe\" -> \"cafe\"\n\
-\n\
-8. CONTRADICTIONS: \"X but also Y\" -> pick the more positive/definitive.\n\
-   \"happy but also sad\" -> \"happy\"\n\
-\n\
-9. Keep first-person perspective. Output ONLY the transcript, no explanations.";
+   \"park no it is cafe\" -> \"cafe\"\n\n\
+8. Keep first-person perspective. Output ONLY the transcript, no explanations.";
 
 pub fn postprocess(text: &str, config: &Config) -> String {
     if !config.cleanup_model.is_empty() {

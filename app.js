@@ -67,6 +67,12 @@ listen("transcript-result", (event) => {
   }
 }).catch(e => log(`listen error transcript: ${e}`));
 
+const rawTranscriptEl = document.getElementById("raw-transcript");
+listen("raw-transcript", (event) => {
+  rawTranscriptEl.textContent = event.payload || "(silence)";
+  log(`Raw: "${event.payload}"`);
+}).catch(e => log(`listen error raw: ${e}`));
+
 listen("transcription-error", (event) => {
   log(`ERROR: ${event.payload}`);
   transcriptEl.textContent = `Error: ${event.payload}`;

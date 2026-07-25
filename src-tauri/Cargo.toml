@@ -2,6 +2,7 @@
 name = "smoothflow"
 version = "0.1.0"
 edition = "2021"
+default-run = "smoothflow"
 
 [lib]
 name = "smoothflow_lib"
