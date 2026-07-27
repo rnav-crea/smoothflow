@@ -8,3 +8,5 @@ dist/
 target/
 smoothflow.json
 src-tauri/smoothflow.json
+ROADMAP.md
+.gitignore

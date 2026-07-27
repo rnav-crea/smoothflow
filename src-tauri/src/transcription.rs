@@ -4,6 +4,59 @@ use std::io::Cursor;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+#[cfg(windows)]
+mod active_window {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    type HWND = *mut std::ffi::c_void;
+
+    extern "system" {
+        fn GetForegroundWindow() -> HWND;
+        fn GetWindowTextW(hwnd: HWND, lpString: *mut u16, nMaxCount: i32) -> i32;
+    }
+
+    pub fn title() -> String {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_null() {
+                return String::new();
+            }
+            let mut buf = [0u16; 256];
+            let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+            if len > 0 {
+                OsString::from_wide(&buf[..len as usize])
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                String::new()
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod active_window {
+    pub fn title() -> String {
+        String::new()
+    }
+}
+
+fn extract_terms(title: &str) -> Vec<String> {
+    let noise = ["gmail", "slack", "discord", "chrome", "firefox", "edge",
+        "outlook", "whatsapp", "telegram", "notion", "cursor", "vscode",
+        "code", "terminal", "settings", "inbox", "visual studio"];
+    let lower = title.to_lowercase();
+    if noise.iter().any(|n| lower.contains(n)) && title.split_whitespace().count() <= 3 {
+        return vec![];
+    }
+    title.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 3)
+        .filter(|w| w.chars().next().unwrap_or(' ').is_uppercase())
+        .map(|w| w.to_string())
+        .collect()
+}
+
 fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -41,10 +94,21 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
         .mime_str("audio/wav")
         .map_err(|e| e.to_string())?;
 
+    let mut terms: Vec<String> = extract_terms(&active_window::title());
+    terms.extend(config.dictionary.iter().cloned());
+    terms.sort();
+    terms.dedup();
+    let prompt = if terms.is_empty() {
+        String::new()
+    } else {
+        format!("[vocabulary: {}]", terms.join(", "))
+    };
+
     let form = reqwest::blocking::multipart::Form::new()
         .part("file", part)
         .text("model", config.model.clone())
-        .text("language", "en");
+        .text("language", "en")
+        .text("prompt", prompt);
 
     let resp = client
         .post(&url)

@@ -25,7 +25,13 @@ const punctuationToggle = document.getElementById("punctuation-toggle");
 const fillersToggle = document.getElementById("fillers-toggle");
 const autopasteToggle = document.getElementById("autopaste-toggle");
 const startupToggle = document.getElementById("startup-toggle");
+const hotkeyInput = document.getElementById("hotkey-input");
+const overlayTopToggle = document.getElementById("overlay-top-toggle");
 const settingsStatus = document.getElementById("settings-status");
+
+const dictionaryTags = document.getElementById("dictionary-tags");
+const dictionaryInput = document.getElementById("dictionary-input");
+const dictionaryAddBtn = document.getElementById("dictionary-add-btn");
 
 let isRecording = false;
 let currentConfig = null;
@@ -79,23 +85,7 @@ listen("recording-error", (event) => {
   log(`REC ERROR: ${event.payload}`);
 }).catch(e => log(`listen error: ${e}`));
 
-// Toggle Recording
-async function toggleRecording() {
-  try {
-    if (isRecording) {
-      await invoke("stop_recording");
-    } else {
-      await invoke("start_recording");
-    }
-  } catch (err) {
-    log(`Toggle error: ${err}`);
-    transcriptEl.textContent = `Error: ${err}`;
-  }
-}
-
-if (recordBtn) recordBtn.addEventListener("click", toggleRecording); else console.warn("record-btn not found");
-
-// Hold-to-record: Space
+// Hold-to-record: Space (record button is status indicator only)
 document.addEventListener("keydown", (e) => {
   if (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "SELECT") return;
   if (settingsModal.classList.contains("open")) return;
@@ -162,10 +152,13 @@ async function loadConfig() {
     modelInput.value = config.model;
     cleanupModelInput.value = config.cleanup_model;
     apiKeyInput.value = config.api_key;
+    renderDictionary(config.dictionary);
     punctuationToggle.checked = config.auto_punctuation;
     fillersToggle.checked = config.remove_fillers;
     autopasteToggle.checked = config.auto_paste;
     startupToggle.checked = config.launch_on_startup;
+    if (hotkeyInput) hotkeyInput.value = config.hotkey || "Ctrl+Space";
+    if (overlayTopToggle) overlayTopToggle.checked = config.overlay_position === "top";
     log("Config loaded");
   } catch (err) {
     log(`Config load error: ${err}`);
@@ -181,8 +174,11 @@ async function saveConfig() {
     api_key: apiKeyInput.value,
     auto_punctuation: punctuationToggle.checked,
     remove_fillers: fillersToggle.checked,
-    auto_paste: autopasteToggle.checked,
+    auto_paste:     autopasteToggle.checked,
     launch_on_startup: startupToggle.checked,
+    dictionary: currentConfig.dictionary || [],
+    hotkey: hotkeyInput ? hotkeyInput.value : "Ctrl+Space",
+    overlay_position: overlayTopToggle && overlayTopToggle.checked ? "top" : "bottom",
   };
   try {
     await invoke("update_config", { newConfig: updatedConfig });
@@ -205,6 +201,48 @@ try {
   fillersToggle.addEventListener("change", saveConfig);
   autopasteToggle.addEventListener("change", saveConfig);
   startupToggle.addEventListener("change", saveConfig);
+  if (hotkeyInput) hotkeyInput.addEventListener("change", saveConfig);
+  if (overlayTopToggle) overlayTopToggle.addEventListener("change", saveConfig);
 } catch (e) { console.warn("Config bind error:", e); }
+
+// Personal Dictionary
+function renderDictionary(words) {
+  dictionaryTags.innerHTML = "";
+  if (!words || words.length === 0) {
+    dictionaryTags.innerHTML = '<span style="font-size:12px;opacity:0.5;font-family:var(--font-mono)">no words added</span>';
+    return;
+  }
+  for (const word of words) {
+    const tag = document.createElement("span");
+    tag.className = "dictionary-tag";
+    tag.innerHTML = `${word} <span class="dictionary-tag-remove" data-word="${word}">&times;</span>`;
+    tag.querySelector(".dictionary-tag-remove").addEventListener("click", () => removeDictionaryWord(word));
+    dictionaryTags.appendChild(tag);
+  }
+}
+
+function removeDictionaryWord(word) {
+  if (!currentConfig) return;
+  currentConfig.dictionary = currentConfig.dictionary.filter(w => w !== word);
+  renderDictionary(currentConfig.dictionary);
+  saveConfig();
+}
+
+function addDictionaryWord() {
+  if (!currentConfig || !dictionaryInput) return;
+  const word = dictionaryInput.value.trim();
+  if (!word) return;
+  if (currentConfig.dictionary.includes(word)) {
+    dictionaryInput.value = "";
+    return;
+  }
+  currentConfig.dictionary.push(word);
+  renderDictionary(currentConfig.dictionary);
+  dictionaryInput.value = "";
+  saveConfig();
+}
+
+if (dictionaryAddBtn) dictionaryAddBtn.addEventListener("click", addDictionaryWord);
+if (dictionaryInput) dictionaryInput.addEventListener("keydown", (e) => { if (e.key === "Enter") addDictionaryWord(); });
 
 loadConfig();

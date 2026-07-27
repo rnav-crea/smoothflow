@@ -14,11 +14,84 @@ use tauri::{
     Emitter, Manager, WebviewWindow, WebviewWindowBuilder,
 };
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
 struct AppState {
     recorder: Mutex<AudioRecorder>,
     config: Mutex<Config>,
     overlay: Mutex<Option<WebviewWindow>>,
+}
+
+fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
+    let parts: Vec<&str> = s.split('+').collect();
+    if parts.len() < 2 {
+        return Err(format!("Invalid hotkey '{}'. Use 'Ctrl+Space'", s));
+    }
+    let mut mods = Modifiers::empty();
+    for m in &parts[..parts.len() - 1] {
+        match *m {
+            "Ctrl" | "Control" => mods |= Modifiers::CONTROL,
+            "Alt" | "Option" => mods |= Modifiers::ALT,
+            "Shift" => mods |= Modifiers::SHIFT,
+            "Win" | "Meta" | "Super" | "Logo" => mods |= Modifiers::SUPER,
+            _ => return Err(format!("Unknown modifier: {}", m)),
+        }
+    }
+    let key = parts[parts.len() - 1];
+    let code = match key {
+        "Space" => Code::Space,
+        "Tab" => Code::Tab,
+        "Enter" => Code::Enter,
+        "Escape" | "Esc" => Code::Escape,
+        "Backspace" => Code::Backspace,
+        "Delete" => Code::Delete,
+        "Insert" => Code::Insert,
+        "Home" => Code::Home,
+        "End" => Code::End,
+        "PageUp" => Code::PageUp,
+        "PageDown" => Code::PageDown,
+        "ArrowUp" | "Up" => Code::ArrowUp,
+        "ArrowDown" | "Down" => Code::ArrowDown,
+        "ArrowLeft" | "Left" => Code::ArrowLeft,
+        "ArrowRight" | "Right" => Code::ArrowRight,
+        "Backquote" | "`" => Code::Backquote,
+        "Minus" | "-" => Code::Minus,
+        "Equal" | "=" => Code::Equal,
+        "Semicolon" | ";" => Code::Semicolon,
+        "Quote" | "'" => Code::Quote,
+        "Comma" | "," => Code::Comma,
+        "Period" | "." => Code::Period,
+        "Slash" | "/" => Code::Slash,
+        "Backslash" | "\\" => Code::Backslash,
+        "BracketLeft" | "[" => Code::BracketLeft,
+        "BracketRight" | "]" => Code::BracketRight,
+        _ if key.len() == 1 => {
+            let c = key.chars().next().unwrap().to_ascii_uppercase();
+            match c {
+                '0'..='9' => [Code::Digit0, Code::Digit1, Code::Digit2, Code::Digit3, Code::Digit4,
+                    Code::Digit5, Code::Digit6, Code::Digit7, Code::Digit8, Code::Digit9][c.to_digit(10).unwrap() as usize],
+                'A'..='Z' => [Code::KeyA, Code::KeyB, Code::KeyC, Code::KeyD, Code::KeyE, Code::KeyF,
+                    Code::KeyG, Code::KeyH, Code::KeyI, Code::KeyJ, Code::KeyK, Code::KeyL,
+                    Code::KeyM, Code::KeyN, Code::KeyO, Code::KeyP, Code::KeyQ, Code::KeyR,
+                    Code::KeyS, Code::KeyT, Code::KeyU, Code::KeyV, Code::KeyW, Code::KeyX,
+                    Code::KeyY, Code::KeyZ][(c as u8 - b'A') as usize],
+                _ => return Err(format!("Unknown key: {}", key)),
+            }
+        }
+        _ if key.starts_with('F') && key[1..].parse::<u8>().is_ok() => {
+            match key[1..].parse::<u8>().unwrap() {
+                1 => Code::F1, 2 => Code::F2, 3 => Code::F3, 4 => Code::F4,
+                5 => Code::F5, 6 => Code::F6, 7 => Code::F7, 8 => Code::F8,
+                9 => Code::F9, 10 => Code::F10, 11 => Code::F11, 12 => Code::F12,
+                13 => Code::F13, 14 => Code::F14, 15 => Code::F15, 16 => Code::F16,
+                17 => Code::F17, 18 => Code::F18, 19 => Code::F19, 20 => Code::F20,
+                21 => Code::F21, 22 => Code::F22, 23 => Code::F23, 24 => Code::F24,
+                n => return Err(format!("Unknown F-key: F{}", n)),
+            }
+        }
+        _ => return Err(format!("Unknown key: {}", key)),
+    };
+    Ok((mods, code))
 }
 
 #[tauri::command]
@@ -96,9 +169,25 @@ fn update_config(app: tauri::AppHandle, state: tauri::State<AppState>, new_confi
     if new_config.model.is_empty() {
         return Err("Model name cannot be empty".into());
     }
+    let old_hotkey = state.config.lock().unwrap().hotkey.clone();
+    let new_hotkey = new_config.hotkey.clone();
     let launch_on_startup = new_config.launch_on_startup;
     *state.config.lock().unwrap() = new_config;
     state.config.lock().unwrap().save();
+
+    if old_hotkey != new_hotkey {
+        if let Ok((om, oc)) = parse_hotkey_str(&old_hotkey) {
+            let _ = app.global_shortcut().unregister(Shortcut::new(Some(om), oc));
+        }
+        match parse_hotkey_str(&new_hotkey) {
+            Ok((nm, nc)) => {
+                app.global_shortcut().register(Shortcut::new(Some(nm), nc))
+                    .map_err(|e| format!("Failed to register hotkey '{}': {}", new_hotkey, e))?;
+                println!("HOTKEY: re-registered to {}", new_hotkey);
+            }
+            Err(e) => return Err(e),
+        }
+    }
 
     if launch_on_startup {
         let _ = app.autolaunch().enable();
@@ -114,11 +203,13 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
-                    if !shortcut.matches(Modifiers::CONTROL, Code::Space) {
-                        return;
-                    }
+                    use tauri_plugin_global_shortcut::ShortcutState;
                     let state = app.state::<AppState>();
+                    let cfg = state.config.lock().unwrap();
+                    if let Ok((m, c)) = parse_hotkey_str(&cfg.hotkey) {
+                        if !shortcut.matches(m, c) { return; }
+                    } else { return; }
+                    drop(cfg);
                     println!("HOTKEY: event state={:?}", event.state);
                     match event.state {
                         ShortcutState::Pressed => {
@@ -215,15 +306,19 @@ pub fn run() {
             overlay: Mutex::new(None),
         })
         .setup(|app| {
-            use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, GlobalShortcutExt};
-            
-            let shortcut = Shortcut::new(
-                Some(Modifiers::CONTROL),
-                Code::Space,
-            );
-            match app.global_shortcut().register(shortcut) {
-                Ok(_) => println!("SUCCESS: Registered Ctrl+Space global shortcut!"),
-                Err(e) => println!("ERROR: Failed to register Ctrl+Space global shortcut: {e}"),
+            use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+            let state = app.state::<AppState>();
+            let hotkey_str = state.config.lock().unwrap().hotkey.clone();
+            drop(state);
+            match parse_hotkey_str(&hotkey_str) {
+                Ok((m, c)) => {
+                    match app.global_shortcut().register(Shortcut::new(Some(m), c)) {
+                        Ok(_) => println!("SUCCESS: Registered {} global shortcut!", hotkey_str),
+                        Err(e) => println!("ERROR: Failed to register {}: {}", hotkey_str, e),
+                    }
+                }
+                Err(e) => println!("ERROR: Invalid hotkey '{}': {}", hotkey_str, e),
             }
 
             let overlay = WebviewWindowBuilder::new(
@@ -232,13 +327,22 @@ pub fn run() {
                 tauri::WebviewUrl::App("overlay.html".into()),
             )
             .title("")
-            .inner_size(220.0, 60.0)
+            .inner_size(120.0, 36.0)
             .always_on_top(true)
             .decorations(false)
             .transparent(true)
-            .skip_taskbar(true)
-            .center()
-            .build();
+            .shadow(false)
+            .skip_taskbar(true);
+
+            let overlay = if let Some(monitor) = app.primary_monitor().ok().flatten() {
+                let scale_factor = monitor.scale_factor();
+                let logical_width = monitor.size().width as f64 / scale_factor;
+                let x = (logical_width - 120.0) / 2.0;
+                let y = 10.0;
+                overlay.position(x, y).build()
+            } else {
+                overlay.build()
+            };
 
             let state = app.state::<AppState>();
             match &overlay {

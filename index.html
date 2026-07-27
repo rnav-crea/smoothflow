@@ -180,6 +180,33 @@
               </label>
             </div>
 
+            <div class="settings-group">
+              <label for="hotkey-input">Hotkey</label>
+              <input type="text" id="hotkey-input" placeholder="Ctrl+Space" />
+              <span class="settings-hint">Modifier keys (Ctrl, Alt, Shift, Win) + key name</span>
+            </div>
+
+            <div class="settings-group toggle-group">
+              <div class="toggle-label-desc">
+                <label for="overlay-top-toggle">Overlay at Top</label>
+                <span>Show recording indicator at top of screen</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="overlay-top-toggle" />
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="settings-group">
+              <label>Personal Dictionary</label>
+              <span class="settings-hint">Words the transcriber should recognize (names, jargon, terms)</span>
+              <div class="dictionary-tags" id="dictionary-tags"></div>
+              <div class="dictionary-add">
+                <input type="text" id="dictionary-input" placeholder="Add a word..." />
+                <button id="dictionary-add-btn" class="pill-nav-btn">Add</button>
+              </div>
+            </div>
+
             <div class="settings-footer">
               <div id="settings-status">Settings saved automatically</div>
             </div>
