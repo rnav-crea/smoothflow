@@ -659,6 +659,54 @@ input:checked + .slider::before {
   opacity: 0.85;
 }
 
+/* ── Personal Dictionary UI ─────────────────────────────── */
+.dictionary-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 0;
+}
+
+.dictionary-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--color-text-primary);
+  color: var(--color-bg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 16px;
+  border: 1px solid var(--color-border-muted);
+}
+
+.dictionary-tag-remove {
+  cursor: pointer;
+  opacity: 0.7;
+  font-size: 14px;
+  line-height: 1;
+  margin-left: 2px;
+}
+
+.dictionary-tag-remove:hover {
+  opacity: 1;
+}
+
+.dictionary-add {
+  display: flex;
+  gap: 8px;
+}
+
+.dictionary-add input {
+  flex: 1;
+}
+
+.dictionary-add .pill-nav-btn {
+  padding: 8px 16px;
+  font-size: 13px;
+}
+
 /* ── Debug Bar Footer ──────────────────────────────────── */
 #debug-bar {
   padding: var(--space-2) 0;
