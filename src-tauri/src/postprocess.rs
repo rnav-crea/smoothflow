@@ -17,40 +17,35 @@ const FILLERS: &[&str] = &[
     "literally", "sort of", "kind of", "i mean", "well",
 ];
 
-const CLEANUP_SYSTEM_PROMPT: &str = "You clean up raw dictation transcripts.\n\n\
+const ENHANCE_SYSTEM_PROMPT: &str = "You clean up raw dictation transcripts.\n\n\
+CRITICAL RULE: Output EXACTLY the same number of lines as the input.\n\
+Do not add, remove, merge, or split lines. Each input line becomes one output line.\n\n\
 Rules:\n\
 1. RESOLVE SELF-CORRECTIONS: keep only the final intent.\n\
    \"I will meet at 6pm no wait 7pm\" -> \"I will meet at 7pm\"\n\
-   \"today no tomorrow\" -> \"tomorrow\"\n\
-\n\
-2. Fix obvious grammar and spelling only. DO NOT change specific details (objects, actions, places).\n\
-   \"i hitted the bottle\" -> \"I hit the bottle\" (grammar fix, detail preserved)\n\
-   \"water fell on the divice\" -> \"water fell on the device\" (spelling fix, detail preserved)\n\
-   \"I will reach the office\" -> \"I will reach the office\" (leave it, detail preserved)\n\
-\n\
+   \"today no tomorrow\" -> \"tomorrow\"\n\n\
+2. Fix obvious grammar and spelling only. Keep specific details unchanged.\n\
+   \"i hitted the bottle\" -> \"I hit the bottle\"\n\
+   \"water fell on the divice\" -> \"water fell on the device\"\n\n\
 3. EMAIL ADDRESSES: convert spoken \"at\" to @ when clearly an email.\n\
-   \"navin at redmail.com\" -> \"navin@redmail.com\"\n\
-\n\
-4. PUNCTUATION: add basic sentence-ending periods if missing. Avoid semicolons.\n\
-\n\
-5. TIMES: \"6pm\" -> \"6:00 PM\"\n\
-\n\
-6. CHOICES: \"X or Y\" -> keep Y (last option).\n\
-   \"cake or maybe pizza not sure\" -> \"pizza\"\n\
-\n\
-7. CORRECTIONS: \"X no it is Y\" -> keep Y.\n\
-   \"park no it is cafe\" -> \"cafe\"\n\n\
-8. Keep first-person perspective. Output ONLY the transcript, no explanations.";
+   \"navin at redmail.com\" -> \"navin@redmail.com\"\n\n\
+4. Add basic punctuation (periods at sentence end).\n\n\
+5. Keep first-person perspective.\n\n\
+6. Output ONLY the cleaned transcript lines. No explanations, no notes.";
 
 pub fn postprocess(text: &str, config: &Config) -> String {
-    if !config.cleanup_model.is_empty() {
-        return cleanup_transcript(text, config)
+    if config.ai_enhance && !config.cleanup_model.is_empty() {
+        cleanup_transcript(text, config)
             .unwrap_or_else(|e| {
-                println!("CLEANUP ERROR: {e}");
-                text.to_string()
-            });
+                println!("ENHANCE ERROR: {e}");
+                basic_cleanup(text, config)
+            })
+    } else {
+        basic_cleanup(text, config)
     }
+}
 
+fn basic_cleanup(text: &str, config: &Config) -> String {
     let text = if config.remove_fillers {
         remove_fillers(text)
     } else {
@@ -95,7 +90,7 @@ fn cleanup_transcript(text: &str, config: &Config) -> Result<String, String> {
     let body = Request {
         model: config.cleanup_model.clone(),
         messages: vec![
-            Message { role: "system".into(), content: Some(CLEANUP_SYSTEM_PROMPT.into()) },
+            Message { role: "system".into(), content: Some(ENHANCE_SYSTEM_PROMPT.into()) },
             Message { role: "user".into(), content: Some(text.into()) },
         ],
         temperature: 0.0,
@@ -106,21 +101,20 @@ fn cleanup_transcript(text: &str, config: &Config) -> Result<String, String> {
         .header("Authorization", format!("Bearer {}", config.api_key))
         .json(&body)
         .send()
-        .map_err(|e| format!("Cleanup request failed: {e}"))?;
+        .map_err(|e| format!("Enhance request failed: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
-        return Err(format!("Cleanup API error {status}: {body}"));
+        return Err(format!("Enhance API error {status}: {body}"));
     }
 
-    let result: Response = resp.json().map_err(|e| format!("Failed to parse cleanup response: {e}"))?;
+    let result: Response = resp.json().map_err(|e| format!("Failed to parse enhance response: {e}"))?;
 
     Ok(result.choices.into_iter().next().and_then(|c| c.message.content).unwrap_or_default())
 }
 
 fn remove_fillers(text: &str) -> String {
-    // ponytail: word-boundary replacement instead of naive substring
     let mut result = text.to_string();
     for &filler in FILLERS {
         let re = regex::Regex::new(&format!(r"\b{}\b", regex::escape(filler))).unwrap();
@@ -139,5 +133,57 @@ fn add_punctuation(text: &str) -> String {
         format!("{}.", trimmed)
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> Config {
+        Config {
+            remove_fillers: true,
+            auto_punctuation: true,
+            ai_enhance: false,
+            cleanup_model: String::new(),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn basic_removes_fillers_and_punctuates() {
+        let c = test_config();
+        let result = postprocess("um hello world", &c);
+        assert_eq!(result, "hello world.");
+    }
+
+    #[test]
+    fn basic_preserves_existing_punctuation() {
+        let c = test_config();
+        let result = postprocess("hello world!", &c);
+        assert_eq!(result, "hello world!");
+    }
+
+    #[test]
+    fn basic_empty_input_returns_empty() {
+        let c = test_config();
+        let result = postprocess("", &c);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn ai_enhance_without_model_falls_back() {
+        let mut c = test_config();
+        c.ai_enhance = true;
+        c.cleanup_model = String::new();
+        let result = postprocess("hello world", &c);
+        assert_eq!(result, "hello world.");
+    }
+
+    #[test]
+    fn basic_handles_multiple_fillers() {
+        let c = test_config();
+        let result = postprocess("um like i mean hello world", &c);
+        assert_eq!(result, "hello world.");
     }
 }

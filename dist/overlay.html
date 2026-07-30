@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SmoothFlow</title>
+<title>SmoothFlow Overlay</title>
 <style>
 html, body {
     margin: 0;
@@ -21,27 +21,54 @@ body {
     justify-content: center;
 }
 .bubble {
-    background: rgba(0,0,0,0.8);
-    border-radius: 12px;
-    padding: 14px 32px;
+    background: #000000;
+    border-radius: 9999px;
+    padding: 6px 16px;
     display: inline-flex;
     align-items: center;
-    gap: 10px;
-    animation: pulse 1.5s ease-in-out infinite;
+    justify-content: center;
 }
-.text {
-    color: #fff;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    font-size: 18px;
-    user-select: none;
+.waveform {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 18px;
 }
-@keyframes pulse {
-    0%, 100% { opacity: 0.7; }
-    50% { opacity: 1; }
+.bar {
+    display: inline-block;
+    width: 3px;
+    border-radius: 9999px;
+    background: #888eff;
+    height: 4px;
+    transition: height 0.05s ease-out;
 }
 </style>
 </head>
 <body>
-<div class="bubble"><span class="text">🎤 Recording...</span></div>
+<div class="bubble">
+    <div class="waveform">
+        <span class="bar" data-base="0.3"></span>
+        <span class="bar" data-base="0.65"></span>
+        <span class="bar" data-base="1.0"></span>
+        <span class="bar" data-base="0.65"></span>
+        <span class="bar" data-base="0.3"></span>
+    </div>
+</div>
+<script>
+const bars = document.querySelectorAll('.bar');
+try {
+    if (window.__TAURI_INTERNALS__) {
+        window.__TAURI_INTERNALS__.listen('audio-level', (e) => {
+            const level = Math.min(parseFloat(e.payload) || 0, 1);
+            const maxH = 18;
+            bars.forEach((bar) => {
+                const base = parseFloat(bar.dataset.base);
+                const targetH = Math.max(level * maxH * base, 3);
+                bar.style.height = targetH + 'px';
+            });
+        });
+    }
+} catch (_) {}
+</script>
 </body>
 </html>

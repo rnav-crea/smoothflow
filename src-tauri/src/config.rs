@@ -22,6 +22,7 @@ pub struct Config {
     pub auto_punctuation: bool,
     pub remove_fillers: bool,
     pub auto_paste: bool,
+    pub ai_enhance: bool,
     pub launch_on_startup: bool,
     pub dictionary: Vec<String>,
     pub hotkey: String,
@@ -38,6 +39,7 @@ impl Default for Config {
             auto_punctuation: true,
             remove_fillers: true,
             auto_paste: true,
+            ai_enhance: false,
             launch_on_startup: false,
             dictionary: Vec::new(),
             hotkey: "Ctrl+Space".into(),
@@ -82,6 +84,7 @@ mod tests {
         assert!(c.auto_punctuation);
         assert!(c.remove_fillers);
         assert!(c.auto_paste);
+        assert!(!c.ai_enhance);
         assert!(!c.launch_on_startup);
         assert!(c.api_key.is_empty());
         assert!(c.dictionary.is_empty());
@@ -99,6 +102,7 @@ mod tests {
             auto_punctuation: false,
             remove_fillers: false,
             auto_paste: false,
+            ai_enhance: true,
             launch_on_startup: true,
             dictionary: vec!["foo".into(), "bar".into()],
             hotkey: "Alt+Shift+T".into(),
@@ -110,6 +114,7 @@ mod tests {
         assert_eq!(back.api_key, "sk-test");
         assert!(!back.auto_punctuation);
         assert_eq!(back.dictionary, vec!["foo", "bar"]);
+        assert!(back.ai_enhance);
         assert_eq!(back.hotkey, "Alt+Shift+T");
         assert_eq!(back.overlay_position, "top");
     }
@@ -153,6 +158,7 @@ mod tests {
             auto_punctuation: false,
             remove_fillers: true,
             auto_paste: true,
+            ai_enhance: true,
             launch_on_startup: false,
             dictionary: vec!["term".into()],
             hotkey: "Ctrl+Shift+Space".into(),
@@ -166,6 +172,7 @@ mod tests {
         assert!(!loaded.auto_punctuation);
         assert!(loaded.remove_fillers);
         assert!(loaded.auto_paste);
+        assert!(loaded.ai_enhance);
         assert_eq!(loaded.dictionary, vec!["term"]);
         assert_eq!(loaded.hotkey, "Ctrl+Shift+Space");
         assert_eq!(loaded.overlay_position, "bottom");

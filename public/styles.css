@@ -707,6 +707,52 @@ input:checked + .slider::before {
   font-size: 13px;
 }
 
+/* ── Custom Title Bar ──────────────────────────────────── */
+.titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  height: 32px;
+  background: var(--color-text-primary);
+  flex-shrink: 0;
+  user-select: none;
+}
+.titlebar-spacer {
+  flex: 1;
+  height: 100%;
+}
+.titlebar-buttons {
+  display: flex;
+  height: 100%;
+}
+.titlebar-btn {
+  width: 46px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--color-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s;
+  outline: none;
+}
+.titlebar-btn:hover {
+  background: rgba(255,255,255,0.15);
+}
+.titlebar-close:hover {
+  background: #e81123;
+}
+
+body {
+  padding-top: 32px;
+}
+
 /* ── Debug Bar Footer ──────────────────────────────────── */
 #debug-bar {
   padding: var(--space-2) 0;

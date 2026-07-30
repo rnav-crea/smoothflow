@@ -281,13 +281,20 @@ pub fn run() {
                                     }
                                     Ok::<_, String>(())
                                 }));
-                                if let Err(e) = result {
-                                    let msg = match e.downcast::<String>() {
-                                        Ok(s) => s.to_string(),
-                                        Err(_) => "unknown panic in transcription thread".into(),
-                                    };
-                                    println!("TRANSCRIPTION PANIC: {msg}");
-                                    let _ = app_clone.emit("transcription-error", msg);
+                                match result {
+                                    Err(panic) => {
+                                        let msg = match panic.downcast::<String>() {
+                                            Ok(s) => s.to_string(),
+                                            Err(_) => "unknown panic in transcription thread".into(),
+                                        };
+                                        println!("TRANSCRIPTION PANIC: {msg}");
+                                        let _ = app_clone.emit("transcription-error", msg);
+                                    }
+                                    Ok(Err(e)) => {
+                                        println!("TRANSCRIPTION ERROR: {e}");
+                                        let _ = app_clone.emit("transcription-error", e);
+                                    }
+                                    Ok(Ok(())) => {}
                                 }
                             });
                         }
@@ -295,6 +302,12 @@ pub fn run() {
                 })
                 .build(),
         )
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -307,6 +320,13 @@ pub fn run() {
         })
         .setup(|app| {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+            // Ensure main window is visible (Tauri 2 + decorations:false quirk on Windows)
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.show();
+                let _ = main.set_focus();
+                println!("SETUP: main window shown");
+            }
 
             let state = app.state::<AppState>();
             let hotkey_str = state.config.lock().unwrap().hotkey.clone();
@@ -404,9 +424,15 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let app = window.app_handle();
+                if let Some(state) = app.try_state::<AppState>() {
+                    let mut recorder = state.recorder.lock().unwrap();
+                    if recorder.is_recording() {
+                        recorder.stop();
+                    }
+                }
+                std::process::exit(0);
             }
         })
         .invoke_handler(tauri::generate_handler![
