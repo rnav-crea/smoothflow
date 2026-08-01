@@ -33,16 +33,93 @@ Rules:\n\
 5. Keep first-person perspective.\n\n\
 6. Output ONLY the cleaned transcript lines. No explanations, no notes.";
 
+#[derive(Debug, PartialEq)]
+enum ResolveOutcome {
+    NoCorrection,
+    Resolved(String),
+    Ambiguous,
+}
+
+// "A instead of B" / "A rather than B": the first option is the final intent.
+const FIRST_WINS_MARKERS: &[&str] = &["instead of", "rather than"];
+
+// "A no wait B": the last option is the final intent. Longest-first so the
+// alternation prefers "no wait" over "no" at the same position.
+const LAST_WINS_MARKERS: &[&str] = &[
+    "no, wait", "no wait", "not that", "not this",
+    "scratch that", "forget that", "i mean", "actually", "no", "wait",
+];
+
 pub fn postprocess(text: &str, config: &Config) -> String {
-    if config.ai_enhance && !config.cleanup_model.is_empty() {
-        cleanup_transcript(text, config)
-            .unwrap_or_else(|e| {
-                println!("ENHANCE ERROR: {e}");
-                basic_cleanup(text, config)
-            })
-    } else {
-        basic_cleanup(text, config)
+    if config.cleanup_model.is_empty() {
+        return basic_cleanup(text, config);
     }
+    match resolve_self_corrections(text) {
+        // ponytail: resolved text returned verbatim; wrap in basic_cleanup if stray fillers show up
+        ResolveOutcome::Resolved(fixed) => fixed,
+        ResolveOutcome::NoCorrection => basic_cleanup(text, config),
+        ResolveOutcome::Ambiguous => cleanup_transcript(text, config).unwrap_or_else(|e| {
+            println!("ENHANCE ERROR: {e}");
+            basic_cleanup(text, config)
+        }),
+    }
+}
+
+fn resolve_self_corrections(text: &str) -> ResolveOutcome {
+    let first_re = marker_re(FIRST_WINS_MARKERS);
+    let last_re = marker_re(LAST_WINS_MARKERS);
+    let (last_wins, m) = match (first_re.find(text), last_re.find(text)) {
+        (Some(fm), Some(lm)) if fm.start() <= lm.start() => (false, fm),
+        (Some(_), Some(lm)) => (true, lm),
+        (Some(fm), None) => (false, fm),
+        (None, Some(lm)) => (true, lm),
+        (None, None) => return ResolveOutcome::NoCorrection,
+    };
+    let before = text[..m.start()].trim();
+    let after = text[m.end()..].trim();
+    // conservative: a correction must split a real utterance, both sides non-trivial
+    if before.is_empty() || !after.chars().any(|c| c.is_alphanumeric()) {
+        return ResolveOutcome::Ambiguous;
+    }
+    // a leftover marker in the tail is a correction chain -> not confidently resolvable
+    if first_re.find(after).is_some() || last_re.find(after).is_some() {
+        return ResolveOutcome::Ambiguous;
+    }
+    let resolved = if last_wins {
+        // "meet at 6pm no wait 7pm": drop the superseded last word, keep the tail
+        let mut words: Vec<&str> = before.split_whitespace().collect();
+        words.pop();
+        let head = words.join(" ");
+        let combined = if head.is_empty() {
+            after.to_string()
+        } else {
+            format!("{head} {after}")
+        };
+        collapse_adjacent_dupes(&combined)
+    } else {
+        // "meet at 5pm instead of 4pm": keep the first option, drop the rest
+        before.to_string()
+    };
+    // ponytail: heuristic last-word drop + adjacent-dupe collapse; phrase boundaries,
+    // correction chains, and non-correctional "no/wait/actually" aren't distinguished
+    ResolveOutcome::Resolved(resolved)
+}
+
+fn marker_re(markers: &[&str]) -> regex::Regex {
+    let alts: Vec<String> = markers.iter().map(|m| regex::escape(m)).collect();
+    regex::Regex::new(&format!(r"(?i)\b(?:{})\b", alts.join("|"))).unwrap()
+}
+
+fn collapse_adjacent_dupes(s: &str) -> String {
+    let mut prev: Option<&str> = None;
+    let mut out: Vec<&str> = Vec::new();
+    for w in s.split_whitespace() {
+        if !prev.is_some_and(|p| p.eq_ignore_ascii_case(w)) {
+            out.push(w);
+        }
+        prev = Some(w);
+    }
+    out.join(" ")
 }
 
 fn basic_cleanup(text: &str, config: &Config) -> String {
@@ -144,7 +221,6 @@ mod tests {
         Config {
             remove_fillers: true,
             auto_punctuation: true,
-            ai_enhance: false,
             cleanup_model: String::new(),
             ..Config::default()
         }
@@ -172,10 +248,8 @@ mod tests {
     }
 
     #[test]
-    fn ai_enhance_without_model_falls_back() {
-        let mut c = test_config();
-        c.ai_enhance = true;
-        c.cleanup_model = String::new();
+    fn no_model_falls_back_to_basic_cleanup() {
+        let c = test_config();
         let result = postprocess("hello world", &c);
         assert_eq!(result, "hello world.");
     }
@@ -185,5 +259,51 @@ mod tests {
         let c = test_config();
         let result = postprocess("um like i mean hello world", &c);
         assert_eq!(result, "hello world.");
+    }
+
+    fn enhanced_config() -> Config {
+        let mut c = test_config();
+        c.cleanup_model = "llama-3.1-8b-instant".into();
+        c
+    }
+
+    #[test]
+    fn self_correction_resolves_locally_without_llama() {
+        let c = enhanced_config();
+        assert_eq!(
+            resolve_self_corrections("meet at 6pm no wait 7pm"),
+            ResolveOutcome::Resolved("meet at 7pm".into())
+        );
+        assert_eq!(postprocess("meet at 6pm no wait 7pm", &c), "meet at 7pm");
+    }
+
+    #[test]
+    fn no_marker_skips_llama_and_uses_basic_cleanup() {
+        let c = enhanced_config();
+        assert_eq!(resolve_self_corrections("hello world"), ResolveOutcome::NoCorrection);
+        assert_eq!(postprocess("hello world", &c), basic_cleanup("hello world", &c));
+    }
+
+    #[test]
+    fn ambiguous_correction_bails_to_llama_path() {
+        assert_eq!(resolve_self_corrections("wait"), ResolveOutcome::Ambiguous);
+        assert_eq!(
+            resolve_self_corrections("meet at 6pm no wait 7pm actually 8pm"),
+            ResolveOutcome::Ambiguous
+        );
+    }
+
+    #[test]
+    fn resolves_common_correction_patterns() {
+        assert_eq!(resolve_self_corrections("today no tomorrow"), ResolveOutcome::Resolved("tomorrow".into()));
+        assert_eq!(resolve_self_corrections("the park no wait the cafe"), ResolveOutcome::Resolved("the cafe".into()));
+        assert_eq!(resolve_self_corrections("the park no, wait the cafe"), ResolveOutcome::Resolved("the cafe".into()));
+        assert_eq!(resolve_self_corrections("Friday actually Saturday"), ResolveOutcome::Resolved("Saturday".into()));
+        assert_eq!(resolve_self_corrections("meet at 5pm instead of 4pm"), ResolveOutcome::Resolved("meet at 5pm".into()));
+        assert_eq!(resolve_self_corrections("the park i mean the cafe"), ResolveOutcome::Resolved("the cafe".into()));
+        assert_eq!(
+            resolve_self_corrections("i will go to school tomorrow no day after tomorrow"),
+            ResolveOutcome::Resolved("i will go to school day after tomorrow".into())
+        );
     }
 }

@@ -23,7 +23,6 @@ const toggleKeyVisibility = document.getElementById("toggle-key-visibility");
 const punctuationToggle = document.getElementById("punctuation-toggle");
 const fillersToggle = document.getElementById("fillers-toggle");
 const autopasteToggle = document.getElementById("autopaste-toggle");
-const aiEnhanceToggle = document.getElementById("ai-enhance-toggle");
 const startupToggle = document.getElementById("startup-toggle");
 const hotkeyInput = document.getElementById("hotkey-input");
 const overlayTopToggle = document.getElementById("overlay-top-toggle");
@@ -156,7 +155,6 @@ async function loadConfig() {
     punctuationToggle.checked = config.auto_punctuation;
     fillersToggle.checked = config.remove_fillers;
     autopasteToggle.checked = config.auto_paste;
-    if (aiEnhanceToggle) aiEnhanceToggle.checked = config.ai_enhance;
     startupToggle.checked = config.launch_on_startup;
     if (hotkeyInput) hotkeyInput.value = config.hotkey || "Ctrl+Space";
     if (overlayTopToggle) overlayTopToggle.checked = config.overlay_position === "top";
@@ -176,7 +174,6 @@ async function saveConfig() {
     auto_punctuation: punctuationToggle.checked,
     remove_fillers: fillersToggle.checked,
     auto_paste:     autopasteToggle.checked,
-    ai_enhance:     aiEnhanceToggle ? aiEnhanceToggle.checked : false,
     launch_on_startup: startupToggle.checked,
     dictionary: currentConfig.dictionary || [],
     hotkey: hotkeyInput ? hotkeyInput.value : "Ctrl+Space",
@@ -202,7 +199,6 @@ try {
   punctuationToggle.addEventListener("change", saveConfig);
   fillersToggle.addEventListener("change", saveConfig);
   autopasteToggle.addEventListener("change", saveConfig);
-  if (aiEnhanceToggle) aiEnhanceToggle.addEventListener("change", saveConfig);
   startupToggle.addEventListener("change", saveConfig);
   if (hotkeyInput) hotkeyInput.addEventListener("change", saveConfig);
   if (overlayTopToggle) overlayTopToggle.addEventListener("change", saveConfig);

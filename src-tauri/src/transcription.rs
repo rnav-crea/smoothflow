@@ -75,6 +75,39 @@ fn rms(samples: &[f32]) -> f32 {
     (sum / samples.len() as f32).sqrt()
 }
 
+const TARGET_RMS: f32 = 0.05;
+
+fn normalize_gain(samples: &[f32]) -> Vec<f32> {
+    let level = rms(samples);
+    if level <= 0.0 {
+        return samples.to_vec();
+    }
+    let gain = (TARGET_RMS / level).min(8.0);
+    if gain <= 1.0 {
+        return samples.to_vec();
+    }
+    samples.iter().map(|s| (s * gain).clamp(-1.0, 1.0)).collect()
+}
+
+fn resample_to_16k(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    const TARGET: u32 = 16000;
+    if samples.is_empty() || sample_rate == TARGET {
+        return samples.to_vec();
+    }
+    let ratio = sample_rate as f64 / TARGET as f64;
+    let out_len = ((samples.len() - 1) as f64 * TARGET as f64 / sample_rate as f64) as usize + 1;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let pos = i as f64 * ratio;
+        let idx = pos.floor() as usize;
+        let frac = (pos - idx as f64) as f32;
+        let a = samples[idx.min(samples.len() - 1)];
+        let b = samples[(idx + 1).min(samples.len() - 1)];
+        out.push(a + (b - a) * frac);
+    }
+    out
+}
+
 pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<String, String> {
     if config.api_key.is_empty() {
         return Err("No API key configured. Set it in settings.".into());
@@ -85,7 +118,8 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
         return Ok(String::new());
     }
 
-    let wav_bytes = encode_wav(samples, sample_rate)?;
+    let samples = normalize_gain(samples);
+    let wav_bytes = encode_wav(&samples, sample_rate)?;
     let url = format!("{}/audio/transcriptions", config.api_base_url.trim_end_matches('/'));
 
     let client = http_client();
@@ -138,13 +172,10 @@ fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
     if samples.is_empty() {
         return Err("no audio samples to encode".into());
     }
-    // Downsample to 16kHz (Whisper API expects 16kHz mono)
-    let target_rate = 16000u32;
-    let step = (sample_rate / target_rate).max(1) as usize;
 
     let spec = WavSpec {
         channels: 1,
-        sample_rate: target_rate,
+        sample_rate: 16000,
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
@@ -152,11 +183,47 @@ fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
     let mut buf = Cursor::new(Vec::new());
     let mut writer = WavWriter::new(&mut buf, spec).map_err(|e| e.to_string())?;
 
-    for &s in samples.iter().step_by(step) {
+    for s in resample_to_16k(samples, sample_rate) {
         let sample = (s * i16::MAX as f32).clamp(-32768.0, 32767.0) as i16;
         writer.write_sample(sample).map_err(|e| e.to_string())?;
     }
 
     writer.finalize().map_err(|e| e.to_string())?;
     Ok(buf.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resample_to_16k_changes_length_and_preserves_sine() {
+        let sample_rate = 44100u32;
+        let n = 4410;
+        let original: Vec<f32> = (0..n)
+            .map(|i| {
+                (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate as f32).sin()
+            })
+            .collect();
+        let resampled = resample_to_16k(&original, sample_rate);
+        assert_eq!(resampled.len(), 1600);
+        let crossings = |v: &[f32]| {
+            v.windows(2)
+                .filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0))
+                .count()
+        };
+        assert_eq!(crossings(&resampled), crossings(&original));
+        assert!((rms(&resampled) - rms(&original)).abs() < rms(&original) * 0.05);
+    }
+
+    #[test]
+    fn normalize_gain_amplifies_quiet_audio() {
+        let quiet: Vec<f32> = (0..4410)
+            .map(|i| 0.01 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let before = rms(&quiet);
+        let boosted = normalize_gain(&quiet);
+        assert!(rms(&boosted) > before * 5.0);
+        assert!(boosted.iter().all(|s| s.abs() <= 1.0));
+    }
 }
