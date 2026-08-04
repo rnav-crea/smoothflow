@@ -130,6 +130,10 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
 
     let mut terms: Vec<String> = extract_terms(&active_window::title());
     terms.extend(config.dictionary.iter().cloned());
+    terms.extend([
+        "gmail", "outlook", "yahoo", "hotmail", "aol",
+        "email", "dot com", "dot org", "dot net",
+    ].iter().map(|s| s.to_string()));
     terms.sort();
     terms.dedup();
     let prompt = if terms.is_empty() {

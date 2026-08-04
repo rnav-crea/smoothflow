@@ -22,6 +22,24 @@ struct AppState {
     overlay: Mutex<Option<WebviewWindow>>,
 }
 
+fn spawn_vu_meter(
+    app: &tauri::AppHandle,
+    recording: std::sync::Arc<std::sync::Mutex<bool>>,
+    peak_level: std::sync::Arc<std::sync::atomic::AtomicU32>,
+) {
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            if !*recording.lock().unwrap() { break; }
+            let raw = peak_level.load(std::sync::atomic::Ordering::Relaxed);
+            let level = raw as f32 / 100000.0;
+            let _ = app_clone.emit("audio-level", level);
+        }
+        let _ = app_clone.emit("audio-level", 0.0f32);
+    });
+}
+
 fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
     let parts: Vec<&str> = s.split('+').collect();
     if parts.len() < 2 {
@@ -109,17 +127,7 @@ fn start_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resu
     let _ = app.emit("recording-state", true);
 
     // ponytail: polling thread for live VU meter
-    let app_clone = app.clone();
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(80));
-            if !*recording_flag.lock().unwrap() { break; }
-            let raw = peak_level.load(std::sync::atomic::Ordering::Relaxed);
-            let level = raw as f32 / 100000.0;
-            let _ = app_clone.emit("audio-level", level);
-        }
-        let _ = app_clone.emit("audio-level", 0.0f32);
-    });
+    spawn_vu_meter(&app, recording_flag, peak_level);
 
     println!("CMD: start_recording done");
     Ok(())
@@ -218,17 +226,25 @@ pub fn run() {
                                 if recorder.is_recording() {
                                     false
                                 } else {
+                                    let peak_level = recorder.peak_level.clone();
+                                    let recording_flag = recorder.recording.clone();
                                     match recorder.start() {
-                                        Ok(_) => true,
+                                        Ok(_) => {
+                                            drop(recorder);
+                                            let _ = app.emit("recording-state", true);
+                                            spawn_vu_meter(app, recording_flag, peak_level);
+                                            true
+                                        }
                                         Err(e) => {
-                                            println!("start_recording error: {e}");
+                                            drop(recorder);
+                                            println!("HOTKEY: start_recording error: {e}");
+                                            let _ = app.emit("recording-error", format!("Could not start recording: {e}"));
                                             false
                                         }
                                     }
                                 }
                             };
                             if started {
-                                let _ = app.emit("recording-state", true);
                                 if let Some(overlay) = state.overlay.lock().unwrap().as_ref() {
                                     match overlay.show() {
                                         Ok(_) => println!("HOTKEY: overlay shown"),

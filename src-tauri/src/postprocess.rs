@@ -30,7 +30,7 @@ Rules:\n\
 3. EMAIL ADDRESSES: convert spoken \"at\" to @ when clearly an email.\n\
    \"navin at redmail.com\" -> \"navin@redmail.com\"\n\n\
 4. Add basic punctuation (periods at sentence end).\n\n\
-5. Keep first-person perspective.\n\n\
+5. Preserve the original perspective exactly as dictated — do not convert between first and third person.\n\n\
 6. Output ONLY the cleaned transcript lines. No explanations, no notes.";
 
 #[derive(Debug, PartialEq)]
@@ -58,10 +58,7 @@ pub fn postprocess(text: &str, config: &Config) -> String {
         // ponytail: resolved text returned verbatim; wrap in basic_cleanup if stray fillers show up
         ResolveOutcome::Resolved(fixed) => fixed,
         ResolveOutcome::NoCorrection => basic_cleanup(text, config),
-        ResolveOutcome::Ambiguous => cleanup_transcript(text, config).unwrap_or_else(|e| {
-            println!("ENHANCE ERROR: {e}");
-            basic_cleanup(text, config)
-        }),
+        ResolveOutcome::Ambiguous => basic_cleanup(text, config),
     }
 }
 
@@ -129,11 +126,64 @@ fn basic_cleanup(text: &str, config: &Config) -> String {
         text.to_string()
     };
 
+    let text = convert_spoken_emails(&text);
+
     if config.auto_punctuation {
         add_punctuation(&text)
     } else {
         text
     }
+}
+
+fn convert_spoken_emails(text: &str) -> String {
+    // Step 1: fix multi-level TLDs first ("university dot edu dot in" → "university.edu.in")
+    let re_multi = regex::Regex::new(
+        r"(?i)(\w+)\s+dot\s+(\w+)\s+dot\s+(\w+)"
+    ).unwrap();
+    let text = re_multi.replace_all(&text, |caps: &regex::Captures| {
+        format!("{}.{}.{}", &caps[1], &caps[2], &caps[3])
+    }).to_string();
+
+    // "university.edu dot in" → "university.edu.in" (real dot + spoken dot)
+    let re_multi2 = regex::Regex::new(
+        r"(?i)(\w+)\.(\w+)\s+dot\s+(\w+)"
+    ).unwrap();
+    let text = re_multi2.replace_all(&text, |caps: &regex::Captures| {
+        format!("{}.{}.{}", &caps[1], &caps[2], &caps[3])
+    }).to_string();
+
+    // Step 2: convert email patterns
+    // "john at gmail dot com" (full: user@domain.tld)
+    let re_dot = regex::Regex::new(
+        r"(?i)\b(\w+)\s+at\s+(?:the\s+)?(\w+(?:\s\w+)*?)\s+dot\s+(\w+)\b"
+    ).unwrap();
+    let text = re_dot.replace_all(&text, |caps: &regex::Captures| {
+        let user = &caps[1];
+        let domain = caps[2].replace(' ', "");
+        let tld = &caps[3];
+        format!("{}@{}.{}", user, domain, tld)
+    }).to_string();
+
+    // "john at the company.com" (period: user@domain.tld)
+    let re_dot2 = regex::Regex::new(
+        r"(?i)\b(\w+)\s+at\s+(?:the\s+)?(\w+)\.(\w+)\b"
+    ).unwrap();
+    let text = re_dot2.replace_all(&text, |caps: &regex::Captures| {
+        let user = &caps[1];
+        let domain = &caps[2];
+        let tld = &caps[3];
+        format!("{}@{}.{}", user, domain, tld)
+    }).to_string();
+
+    // "john at gmail dot" (no TLD — Whisper dropped it) → john@gmail
+    let re_no_tld = regex::Regex::new(
+        r"(?i)\b(\w+)\s+at\s+(?:the\s+)?(\w+)\s+dot\b"
+    ).unwrap();
+    re_no_tld.replace_all(&text, |caps: &regex::Captures| {
+        let user = &caps[1];
+        let domain = &caps[2];
+        format!("{}@{}", user, domain)
+    }).to_string()
 }
 
 fn cleanup_transcript(text: &str, config: &Config) -> Result<String, String> {
@@ -305,5 +355,20 @@ mod tests {
             resolve_self_corrections("i will go to school tomorrow no day after tomorrow"),
             ResolveOutcome::Resolved("i will go to school day after tomorrow".into())
         );
+    }
+
+    #[test]
+    fn convert_spoken_emails_basic() {
+        assert_eq!(convert_spoken_emails("send to john at gmail dot com"), "send to john@gmail.com");
+        assert_eq!(convert_spoken_emails("email navin at redmail dot com"), "email navin@redmail.com");
+        assert_eq!(convert_spoken_emails("manager at outlook dot com"), "manager@outlook.com");
+        assert_eq!(convert_spoken_emails("no email here"), "no email here");
+        assert_eq!(convert_spoken_emails("manager at the company.com"), "manager@company.com");
+        assert_eq!(convert_spoken_emails("john at gmail.com"), "john@gmail.com");
+        assert_eq!(convert_spoken_emails("manager at outlook dot ,"), "manager@outlook ,");
+        assert_eq!(convert_spoken_emails("team at company dot ."), "team@company .");
+        assert_eq!(convert_spoken_emails("user at university dot edu dot in"), "user@university.edu.in");
+        assert_eq!(convert_spoken_emails("user at university.edu dot in"), "user@university.edu.in");
+        assert_eq!(convert_spoken_emails("user at company dot co dot uk"), "user@company.co.uk");
     }
 }
