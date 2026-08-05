@@ -26,3 +26,4 @@ reqwest = { version = "0.12", features = ["json", "multipart", "blocking"] }
 nnnoiseless = "0.5"
 arboard = "3"
 regex = "1"
+keyring = "3"

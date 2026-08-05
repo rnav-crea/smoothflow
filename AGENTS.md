@@ -119,7 +119,7 @@ src-tauri/src/
   transcription.rs — configurable endpoint (Groq, OpenAI, xAI, etc.)
   text_injection.rs — enigo keystroke simulation into active window
   config.rs        — serde Config struct, JSON file I/O
-  postprocess.rs   — filler removal + auto-punctuation
+  postprocess.rs   — filler removal, auto-punctuation, self-correction resolution, spoken-email conversion
 ```
 
 ## Key constraints
@@ -144,12 +144,36 @@ src-tauri/src/
 struct Config {
     api_base_url: String,       // e.g. https://api.groq.com/openai/v1
     api_key: String,
+    model: String,              // e.g. whisper-large-v3
+    cleanup_model: String,      // e.g. llama-3.1-8b-instant (empty = skip LLM)
     auto_punctuation: bool,
     remove_fillers: bool,
+    auto_paste: bool,
     launch_on_startup: bool,
+    dictionary: Vec<String>,    // personal vocabulary prompt terms
+    hotkey: String,             // e.g. Ctrl+Space
+    overlay_position: String,   // "top" | "bottom"
 }
 ```
 
 ## File locking on Windows
 
 `cargo build` frequently hits "file in use (os error 32)". Use `--target-dir` with a fresh temp path per build.
+
+## Current status (2026-08-04)
+
+Changes in the working tree (NOT committed yet):
+
+- **lib.rs** — hotkey path now spawns the VU meter thread (overlay bars animate during Ctrl+Space dictation) and emits `recording-error` on mic-start failure.
+- **postprocess.rs** — LLM (`cleanup_transcript`) is only reached via `ResolveOutcome::Ambiguous`; ambiguous correction chains now fall back to `basic_cleanup` (LLM was corrupting text). System prompt rule 5 reworded to *preserve dictated perspective* (was forcing first-person). Added `convert_spoken_emails`: regex-based conversion of "X at Y dot Z", "X at the Y.Z", no-TLD, and multi-level TLD (`.edu.in`, `.co.uk`).
+- **transcription.rs** — Whisper API prompt now includes common email vocabulary terms (gmail, outlook, dot com, etc.).
+- **tauri.conf.json** — `bundle.resources: ["WebView2Loader.dll"]` (file copied into `src-tauri/`); fixes NSIS/MSI install crash "WebView2Loader.dll not found". Add `src-tauri/WebView2Loader.dll` to `.gitignore` (already done).
+- **TESTING.md** — manual test plan (new file), sections A–G.
+
+Verified in dev mode: simple emails (`user@gmail.com`), perspective preservation, self-correction chains (no LLM corruption). Known Whisper-level limits (not our code): `ball→boy`, `laughing→puffing`, garbled emails inside long correction chains, duplicated words.
+
+Next steps:
+1. Retest multi-level TLD emails (`.edu.in`, `.co.uk`) in `npm run tauri dev`.
+2. Run full TESTING.md plan.
+3. `npm run tauri build` and install (uninstall previous first).
+4. Commit before publishing (exclude `dist/` — tracked build artifact, use `git rm --cached dist/index.html`).

@@ -214,8 +214,14 @@ function renderDictionary(words) {
   for (const word of words) {
     const tag = document.createElement("span");
     tag.className = "dictionary-tag";
-    tag.innerHTML = `${word} <span class="dictionary-tag-remove" data-word="${word}">&times;</span>`;
-    tag.querySelector(".dictionary-tag-remove").addEventListener("click", () => removeDictionaryWord(word));
+    const wordText = document.createTextNode(word + " ");
+    const removeBtn = document.createElement("span");
+    removeBtn.className = "dictionary-tag-remove";
+    removeBtn.dataset.word = word;
+    removeBtn.textContent = "\u00d7";
+    tag.appendChild(wordText);
+    tag.appendChild(removeBtn);
+    removeBtn.addEventListener("click", () => removeDictionaryWord(word));
     dictionaryTags.appendChild(tag);
   }
 }

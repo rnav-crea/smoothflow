@@ -6,7 +6,7 @@ fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(30))
             .build()
             .expect("failed to create reqwest client")
     })
@@ -63,8 +63,10 @@ pub fn postprocess(text: &str, config: &Config) -> String {
 }
 
 fn resolve_self_corrections(text: &str) -> ResolveOutcome {
-    let first_re = marker_re(FIRST_WINS_MARKERS);
-    let last_re = marker_re(LAST_WINS_MARKERS);
+    static FIRST_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static LAST_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let first_re = FIRST_RE.get_or_init(|| marker_re(FIRST_WINS_MARKERS));
+    let last_re = LAST_RE.get_or_init(|| marker_re(LAST_WINS_MARKERS));
     let (last_wins, m) = match (first_re.find(text), last_re.find(text)) {
         (Some(fm), Some(lm)) if fm.start() <= lm.start() => (false, fm),
         (Some(_), Some(lm)) => (true, lm),
@@ -136,27 +138,33 @@ fn basic_cleanup(text: &str, config: &Config) -> String {
 }
 
 fn convert_spoken_emails(text: &str) -> String {
+    static RE_MULTI: OnceLock<regex::Regex> = OnceLock::new();
+    static RE_MULTI2: OnceLock<regex::Regex> = OnceLock::new();
+    static RE_DOT: OnceLock<regex::Regex> = OnceLock::new();
+    static RE_DOT2: OnceLock<regex::Regex> = OnceLock::new();
+    static RE_NO_TLD: OnceLock<regex::Regex> = OnceLock::new();
+
     // Step 1: fix multi-level TLDs first ("university dot edu dot in" → "university.edu.in")
-    let re_multi = regex::Regex::new(
+    let re_multi = RE_MULTI.get_or_init(|| regex::Regex::new(
         r"(?i)(\w+)\s+dot\s+(\w+)\s+dot\s+(\w+)"
-    ).unwrap();
+    ).unwrap());
     let text = re_multi.replace_all(&text, |caps: &regex::Captures| {
         format!("{}.{}.{}", &caps[1], &caps[2], &caps[3])
     }).to_string();
 
     // "university.edu dot in" → "university.edu.in" (real dot + spoken dot)
-    let re_multi2 = regex::Regex::new(
+    let re_multi2 = RE_MULTI2.get_or_init(|| regex::Regex::new(
         r"(?i)(\w+)\.(\w+)\s+dot\s+(\w+)"
-    ).unwrap();
+    ).unwrap());
     let text = re_multi2.replace_all(&text, |caps: &regex::Captures| {
         format!("{}.{}.{}", &caps[1], &caps[2], &caps[3])
     }).to_string();
 
     // Step 2: convert email patterns
     // "john at gmail dot com" (full: user@domain.tld)
-    let re_dot = regex::Regex::new(
+    let re_dot = RE_DOT.get_or_init(|| regex::Regex::new(
         r"(?i)\b(\w+)\s+at\s+(?:the\s+)?(\w+(?:\s\w+)*?)\s+dot\s+(\w+)\b"
-    ).unwrap();
+    ).unwrap());
     let text = re_dot.replace_all(&text, |caps: &regex::Captures| {
         let user = &caps[1];
         let domain = caps[2].replace(' ', "");
@@ -165,9 +173,9 @@ fn convert_spoken_emails(text: &str) -> String {
     }).to_string();
 
     // "john at the company.com" (period: user@domain.tld)
-    let re_dot2 = regex::Regex::new(
+    let re_dot2 = RE_DOT2.get_or_init(|| regex::Regex::new(
         r"(?i)\b(\w+)\s+at\s+(?:the\s+)?(\w+)\.(\w+)\b"
-    ).unwrap();
+    ).unwrap());
     let text = re_dot2.replace_all(&text, |caps: &regex::Captures| {
         let user = &caps[1];
         let domain = &caps[2];
@@ -176,9 +184,9 @@ fn convert_spoken_emails(text: &str) -> String {
     }).to_string();
 
     // "john at gmail dot" (no TLD — Whisper dropped it) → john@gmail
-    let re_no_tld = regex::Regex::new(
+    let re_no_tld = RE_NO_TLD.get_or_init(|| regex::Regex::new(
         r"(?i)\b(\w+)\s+at\s+(?:the\s+)?(\w+)\s+dot\b"
-    ).unwrap();
+    ).unwrap());
     re_no_tld.replace_all(&text, |caps: &regex::Captures| {
         let user = &caps[1];
         let domain = &caps[2];
@@ -242,9 +250,14 @@ fn cleanup_transcript(text: &str, config: &Config) -> Result<String, String> {
 }
 
 fn remove_fillers(text: &str) -> String {
+    static FILLER_RES: OnceLock<Vec<regex::Regex>> = OnceLock::new();
+    let regexes = FILLER_RES.get_or_init(|| {
+        FILLERS.iter().map(|&filler| {
+            regex::Regex::new(&format!(r"\b{}\b", regex::escape(filler))).unwrap()
+        }).collect()
+    });
     let mut result = text.to_string();
-    for &filler in FILLERS {
-        let re = regex::Regex::new(&format!(r"\b{}\b", regex::escape(filler))).unwrap();
+    for re in regexes {
         result = re.replace_all(&result, "").into_owned();
     }
     result.split_whitespace().collect::<Vec<_>>().join(" ")

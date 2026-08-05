@@ -2,7 +2,7 @@ use crate::config::Config;
 use hound::{WavSpec, WavWriter};
 use std::io::Cursor;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 mod active_window {
@@ -61,7 +61,7 @@ fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(30))
             .build()
             .expect("failed to create reqwest client")
     })
@@ -116,6 +116,17 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
     if rms(samples) < 0.0005 {
         println!("TRANSCRIBE: skipping — audio too quiet (rms={:.4})", rms(samples));
         return Ok(String::new());
+    }
+
+    // VULN-002: Rate limiting — prevent rapid-fire API calls
+    {
+        static LAST_CALL: OnceLock<std::sync::Mutex<Instant>> = OnceLock::new();
+        let last = LAST_CALL.get_or_init(|| std::sync::Mutex::new(Instant::now() - Duration::from_secs(60)));
+        let mut last_time = last.lock().unwrap_or_else(|p| p.into_inner());
+        if last_time.elapsed() < Duration::from_millis(1000) {
+            return Err("Rate limited — please wait before recording again".into());
+        }
+        *last_time = Instant::now();
     }
 
     let samples = normalize_gain(samples);

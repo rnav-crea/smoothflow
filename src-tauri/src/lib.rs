@@ -16,6 +16,15 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
+/// Debug-only logging macro. Compiles to a no-op in release builds (VULN-006).
+macro_rules! sf_log {
+    ($($arg:tt)*) => {
+        if cfg!(debug_assertions) {
+            println!($($arg)*);
+        }
+    };
+}
+
 struct AppState {
     recorder: Mutex<AudioRecorder>,
     config: Mutex<Config>,
@@ -114,10 +123,10 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
 
 #[tauri::command]
 fn start_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<(), String> {
-    println!("CMD: start_recording called");
+    sf_log!("CMD: start_recording called");
     let mut recorder = state.recorder.lock().unwrap();
     if recorder.is_recording() {
-        println!("CMD: already recording, ignoring");
+        sf_log!("CMD: already recording, ignoring");
         return Ok(());
     }
     let peak_level = recorder.peak_level.clone();
@@ -129,24 +138,24 @@ fn start_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resu
     // ponytail: polling thread for live VU meter
     spawn_vu_meter(&app, recording_flag, peak_level);
 
-    println!("CMD: start_recording done");
+    sf_log!("CMD: start_recording done");
     Ok(())
 }
 
 #[tauri::command]
 fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<String, String> {
-    println!("CMD: stop_recording called");
+    sf_log!("CMD: stop_recording called");
     let mut recorder = state.recorder.lock().unwrap();
     let samples = recorder.stop();
     let sample_rate = recorder.sample_rate();
     drop(recorder);
-    println!("CMD: got {} samples at {} Hz", samples.len(), sample_rate);
+    sf_log!("CMD: got {} samples at {} Hz", samples.len(), sample_rate);
     let _ = app.emit("recording-state", false);
     
     let config = state.config.lock().unwrap();
-    println!("CMD: transcribing...");
+    sf_log!("CMD: transcribing...");
     let raw = transcription::transcribe(&samples, sample_rate, &config)?;
-    println!("CMD: transcript received: {:?}", &raw[..raw.len().min(50)]);
+    sf_log!("CMD: transcript received: {:?}", &raw[..raw.len().min(50)]);
     let _ = app.emit("raw-transcript", raw.clone());
     let text = postprocess::postprocess(&raw, &config);
     
@@ -154,11 +163,11 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
     
     if !text.is_empty() {
         if config.auto_paste {
-            println!("CMD: typing text...");
+            sf_log!("CMD: typing text...");
             text_injection::type_text(&text)?;
-            println!("CMD: typed OK");
+            sf_log!("CMD: typed OK");
         } else {
-            println!("CMD: auto-paste disabled, showing in transcript only");
+            sf_log!("CMD: auto-paste disabled, showing in transcript only");
         }
     }
     Ok(text)
@@ -177,11 +186,23 @@ fn update_config(app: tauri::AppHandle, state: tauri::State<AppState>, new_confi
     if new_config.model.is_empty() {
         return Err("Model name cannot be empty".into());
     }
-    let old_hotkey = state.config.lock().unwrap().hotkey.clone();
+    if !new_config.api_base_url.starts_with("https://") {
+        return Err("API base URL must use HTTPS (e.g. https://api.groq.com/openai/v1)".into());
+    }
+    // VULN-003: the key goes into the OS vault before anything is saved;
+    // Config::save() strips api_key from the JSON written to disk.
+    if !new_config.api_key.is_empty() {
+        config::store_secret(&new_config.api_key)?;
+    }
     let new_hotkey = new_config.hotkey.clone();
     let launch_on_startup = new_config.launch_on_startup;
-    *state.config.lock().unwrap() = new_config;
-    state.config.lock().unwrap().save();
+    let old_hotkey = {
+        let mut config = state.config.lock().unwrap();
+        let old = config.hotkey.clone();
+        *config = new_config;
+        config.save();
+        old
+    };
 
     if old_hotkey != new_hotkey {
         if let Ok((om, oc)) = parse_hotkey_str(&old_hotkey) {
@@ -191,7 +212,7 @@ fn update_config(app: tauri::AppHandle, state: tauri::State<AppState>, new_confi
             Ok((nm, nc)) => {
                 app.global_shortcut().register(Shortcut::new(Some(nm), nc))
                     .map_err(|e| format!("Failed to register hotkey '{}': {}", new_hotkey, e))?;
-                println!("HOTKEY: re-registered to {}", new_hotkey);
+                sf_log!("HOTKEY: re-registered to {}", new_hotkey);
             }
             Err(e) => return Err(e),
         }
@@ -218,7 +239,7 @@ pub fn run() {
                         if !shortcut.matches(m, c) { return; }
                     } else { return; }
                     drop(cfg);
-                    println!("HOTKEY: event state={:?}", event.state);
+                    sf_log!("HOTKEY: event state={:?}", event.state);
                     match event.state {
                         ShortcutState::Pressed => {
                             let started = {
@@ -237,7 +258,7 @@ pub fn run() {
                                         }
                                         Err(e) => {
                                             drop(recorder);
-                                            println!("HOTKEY: start_recording error: {e}");
+                                            sf_log!("HOTKEY: start_recording error: {e}");
                                             let _ = app.emit("recording-error", format!("Could not start recording: {e}"));
                                             false
                                         }
@@ -247,11 +268,11 @@ pub fn run() {
                             if started {
                                 if let Some(overlay) = state.overlay.lock().unwrap().as_ref() {
                                     match overlay.show() {
-                                        Ok(_) => println!("HOTKEY: overlay shown"),
-                                        Err(e) => println!("HOTKEY: overlay show error: {e}"),
+                                        Ok(_) => sf_log!("HOTKEY: overlay shown"),
+                                        Err(e) => sf_log!("HOTKEY: overlay show error: {e}"),
                                     }
                                 } else {
-                                    println!("HOTKEY: overlay not available in state");
+                                    sf_log!("HOTKEY: overlay not available in state");
                                 }
                             }
                         }
@@ -267,8 +288,8 @@ pub fn run() {
 
                             if let Some(overlay) = state.overlay.lock().unwrap().as_ref() {
                                 match overlay.hide() {
-                                    Ok(_) => println!("HOTKEY: overlay hidden"),
-                                    Err(e) => println!("HOTKEY: overlay hide error: {e}"),
+                                    Ok(_) => sf_log!("HOTKEY: overlay hidden"),
+                                    Err(e) => sf_log!("HOTKEY: overlay hide error: {e}"),
                                 }
                             }
 
@@ -284,16 +305,16 @@ pub fn run() {
                                     let _ = app_clone.emit("transcript-result", text.clone());
                                     if config.auto_paste {
                                         if !text.is_empty() {
-                                            println!("HOTKEY: auto-paste enabled, typing...");
+                                            sf_log!("HOTKEY: auto-paste enabled, typing...");
                                             if let Err(e) = text_injection::type_text(&text) {
-                                                println!("HOTKEY: type_text error: {e}");
+                                                sf_log!("HOTKEY: type_text error: {e}");
                                                 let _ = app_clone.emit("transcription-error", format!("Auto-paste failed: {e}"));
                                             }
                                         } else {
-                                            println!("HOTKEY: auto-paste enabled but text is empty, skipping");
+                                            sf_log!("HOTKEY: auto-paste enabled but text is empty, skipping");
                                         }
                                     } else {
-                                        println!("HOTKEY: auto-paste disabled in config");
+                                        sf_log!("HOTKEY: auto-paste disabled in config");
                                     }
                                     Ok::<_, String>(())
                                 }));
@@ -303,11 +324,11 @@ pub fn run() {
                                             Ok(s) => s.to_string(),
                                             Err(_) => "unknown panic in transcription thread".into(),
                                         };
-                                        println!("TRANSCRIPTION PANIC: {msg}");
+                                        sf_log!("TRANSCRIPTION PANIC: {msg}");
                                         let _ = app_clone.emit("transcription-error", msg);
                                     }
                                     Ok(Err(e)) => {
-                                        println!("TRANSCRIPTION ERROR: {e}");
+                                        sf_log!("TRANSCRIPTION ERROR: {e}");
                                         let _ = app_clone.emit("transcription-error", e);
                                     }
                                     Ok(Ok(())) => {}
@@ -341,7 +362,7 @@ pub fn run() {
             if let Some(main) = app.get_webview_window("main") {
                 let _ = main.show();
                 let _ = main.set_focus();
-                println!("SETUP: main window shown");
+                sf_log!("SETUP: main window shown");
             }
 
             let state = app.state::<AppState>();
@@ -350,11 +371,11 @@ pub fn run() {
             match parse_hotkey_str(&hotkey_str) {
                 Ok((m, c)) => {
                     match app.global_shortcut().register(Shortcut::new(Some(m), c)) {
-                        Ok(_) => println!("SUCCESS: Registered {} global shortcut!", hotkey_str),
-                        Err(e) => println!("ERROR: Failed to register {}: {}", hotkey_str, e),
+                        Ok(_) => sf_log!("SUCCESS: Registered {} global shortcut!", hotkey_str),
+                        Err(e) => sf_log!("ERROR: Failed to register {}: {}", hotkey_str, e),
                     }
                 }
-                Err(e) => println!("ERROR: Invalid hotkey '{}': {}", hotkey_str, e),
+                Err(e) => sf_log!("ERROR: Invalid hotkey '{}': {}", hotkey_str, e),
             }
 
             let overlay = WebviewWindowBuilder::new(
@@ -382,12 +403,12 @@ pub fn run() {
 
             let state = app.state::<AppState>();
             match &overlay {
-                Ok(w) => { let _ = w.hide(); println!("SETUP: overlay created"); }
-                Err(e) => println!("SETUP: overlay creation error: {e}"),
+                Ok(w) => { let _ = w.hide(); sf_log!("SETUP: overlay created"); }
+                Err(e) => sf_log!("SETUP: overlay creation error: {e}"),
             }
             *state.overlay.lock().unwrap() = overlay.ok();
 
-            println!("SETUP: app ready — tray, overlay, hotkey all configured");
+            sf_log!("SETUP: app ready — tray, overlay, hotkey all configured");
             
             // Sync autostart with config
             {
@@ -448,7 +469,7 @@ pub fn run() {
                         recorder.stop();
                     }
                 }
-                std::process::exit(0);
+                app.exit(0);
             }
         })
         .invoke_handler(tauri::generate_handler![

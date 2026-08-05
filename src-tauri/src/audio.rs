@@ -92,6 +92,17 @@ impl AudioRecorder {
     }
 }
 
+impl Drop for AudioRecorder {
+    fn drop(&mut self) {
+        // SAFETY: ensures cpal::Stream is stopped before being dropped,
+        // upholding the invariant required by `unsafe impl Send`.
+        if let Some(stream) = self.stream.take() {
+            let _ = stream.pause();
+        }
+        *self.recording.lock().unwrap_or_else(|p| p.into_inner()) = false;
+    }
+}
+
 fn denoise(raw: Vec<f32>, channels: usize) -> Vec<f32> {
     if channels == 0 || raw.len() < 480 {
         return raw;

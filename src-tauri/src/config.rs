@@ -12,6 +12,43 @@ fn config_dir() -> PathBuf {
     p
 }
 
+// --- OS credential vault (VULN-003) ---
+// The API key lives in the OS credential manager, never in smoothflow.json.
+// Test builds use in-memory shims so tests stay deterministic and never
+// write to a real Windows vault.
+
+#[cfg(not(test))]
+pub fn store_secret(key: &str) -> Result<(), String> {
+    keyring::Entry::new("SmoothFlow", "api_key")
+        .and_then(|entry| entry.set_password(key))
+        .map_err(|e| format!("failed to store API key in credential vault: {e}"))
+}
+
+#[cfg(not(test))]
+pub fn load_secret() -> Option<String> {
+    keyring::Entry::new("SmoothFlow", "api_key")
+        .and_then(|entry| entry.get_password())
+        .ok()
+}
+
+#[cfg(test)]
+pub fn store_secret(key: &str) -> Result<(), String> {
+    TEST_VAULT.with(|v| v.replace(Some(key.to_string())));
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn load_secret() -> Option<String> {
+    TEST_VAULT.with(|v| v.borrow().clone())
+}
+
+// ponytail: thread-local test vault — cargo runs tests in parallel threads,
+// so a shared static would leak keys between tests; TLS isolates each test.
+#[cfg(test)]
+thread_local! {
+    static TEST_VAULT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
 #[cfg(not(test))]
 fn config_dir() -> PathBuf {
     if let Ok(appdata) = std::env::var("APPDATA") {
@@ -67,14 +104,31 @@ impl Config {
 
     pub fn load() -> Self {
         let path = Self::path();
-        std::fs::read_to_string(path)
+        let mut config: Self = std::fs::read_to_string(path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        // VULN-003 migration: legacy plaintext key in the JSON moves into the
+        // vault, then the file is rewritten without it. If the vault write
+        // fails, keep the key in memory and leave the file untouched rather
+        // than silently dropping the user's key.
+        if !config.api_key.is_empty() && store_secret(&config.api_key).is_ok() {
+            config.save();
+        }
+        // Always restore the key from the vault into memory (also on app
+        // restarts after migration, when the JSON api_key is already empty).
+        if let Some(key) = load_secret() {
+            config.api_key = key;
+        }
+        config
     }
 
     pub fn save(&self) {
-        if let Ok(s) = serde_json::to_string_pretty(self) {
+        // VULN-003: the key lives in the vault, never in the JSON on disk.
+        let mut stripped = self.clone();
+        stripped.api_key = String::new();
+        if let Ok(s) = serde_json::to_string_pretty(&stripped) {
             let _ = std::fs::write(Self::path(), s);
         }
     }
@@ -173,7 +227,7 @@ mod tests {
         c.save();
         let loaded = Config::load();
         assert_eq!(loaded.api_base_url, "https://custom.example.com");
-        assert_eq!(loaded.api_key, "key-roundtrip");
+        assert!(loaded.api_key.is_empty(), "api_key must not persist to disk (VULN-003)");
         assert_eq!(loaded.model, "whisper-custom");
         assert!(!loaded.auto_punctuation);
         assert!(loaded.remove_fillers);
@@ -181,5 +235,14 @@ mod tests {
         assert_eq!(loaded.dictionary, vec!["term"]);
         assert_eq!(loaded.hotkey, "Ctrl+Shift+Space");
         assert_eq!(loaded.overlay_position, "bottom");
+    }
+
+    #[test]
+    fn vault_key_is_restored_on_load() {
+        // Regression: after migration the JSON has an empty api_key; load()
+        // must still pull the key back out of the vault on every app start.
+        assert!(store_secret("vault-key").is_ok());
+        let loaded = Config::load();
+        assert_eq!(loaded.api_key, "vault-key");
     }
 }

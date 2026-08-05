@@ -11,3 +11,4 @@ src-tauri/smoothflow.json
 ROADMAP.md
 .gitignore
 src-tauri/WebView2Loader.dll
+vulnerability.md
