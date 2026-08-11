@@ -1,11 +1,13 @@
 mod audio;
 pub mod config;
+mod history;
 mod postprocess;
 mod text_injection;
 pub mod transcription;
 
 use audio::AudioRecorder;
 use config::Config;
+use history::History;
 use std::sync::Mutex;
 use tauri::{
     image::Image,
@@ -28,6 +30,7 @@ macro_rules! sf_log {
 struct AppState {
     recorder: Mutex<AudioRecorder>,
     config: Mutex<Config>,
+    history: Mutex<History>,
     overlay: Mutex<Option<WebviewWindow>>,
 }
 
@@ -49,10 +52,19 @@ fn spawn_vu_meter(
     });
 }
 
+/// Show the floating overlay and broadcast an error so BOTH the main window
+/// and the overlay bubble render it. Single source of truth for error display.
+fn show_error(app: &tauri::AppHandle, event: &str, msg: String) {
+    if let Some(overlay) = app.state::<AppState>().overlay.lock().unwrap().as_ref() {
+        let _ = overlay.show();
+    }
+    let _ = app.emit(event, msg);
+}
+
 fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
     let parts: Vec<&str> = s.split('+').collect();
     if parts.len() < 2 {
-        return Err(format!("Invalid hotkey '{}'. Use 'Ctrl+Space'", s));
+        return Err(format!("[CFG-005] Invalid hotkey '{}'. Use format like 'Ctrl+Space'.", s));
     }
     let mut mods = Modifiers::empty();
     for m in &parts[..parts.len() - 1] {
@@ -61,7 +73,7 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
             "Alt" | "Option" => mods |= Modifiers::ALT,
             "Shift" => mods |= Modifiers::SHIFT,
             "Win" | "Meta" | "Super" | "Logo" => mods |= Modifiers::SUPER,
-            _ => return Err(format!("Unknown modifier: {}", m)),
+            _ => return Err(format!("[CFG-005] Invalid hotkey '{}'. Unknown modifier '{}'.", s, m)),
         }
     }
     let key = parts[parts.len() - 1];
@@ -102,7 +114,7 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
                     Code::KeyM, Code::KeyN, Code::KeyO, Code::KeyP, Code::KeyQ, Code::KeyR,
                     Code::KeyS, Code::KeyT, Code::KeyU, Code::KeyV, Code::KeyW, Code::KeyX,
                     Code::KeyY, Code::KeyZ][(c as u8 - b'A') as usize],
-                _ => return Err(format!("Unknown key: {}", key)),
+                _ => return Err(format!("[CFG-005] Invalid hotkey. Unknown key '{}'.", key)),
             }
         }
         _ if key.starts_with('F') && key[1..].parse::<u8>().is_ok() => {
@@ -113,10 +125,10 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
                 13 => Code::F13, 14 => Code::F14, 15 => Code::F15, 16 => Code::F16,
                 17 => Code::F17, 18 => Code::F18, 19 => Code::F19, 20 => Code::F20,
                 21 => Code::F21, 22 => Code::F22, 23 => Code::F23, 24 => Code::F24,
-                n => return Err(format!("Unknown F-key: F{}", n)),
+                n => return Err(format!("[CFG-005] Invalid hotkey. Unknown F-key F{}.", n)),
             }
         }
-        _ => return Err(format!("Unknown key: {}", key)),
+        _ => return Err(format!("[CFG-005] Invalid hotkey. Unknown key '{}'.", key)),
     };
     Ok((mods, code))
 }
@@ -131,7 +143,10 @@ fn start_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resu
     }
     let peak_level = recorder.peak_level.clone();
     let recording_flag = recorder.recording.clone();
-    recorder.start()?;
+    recorder.start().map_err(|e| {
+        show_error(&app, "recording-error", e.clone());
+        e
+    })?;
     drop(recorder);
     let _ = app.emit("recording-state", true);
 
@@ -154,17 +169,35 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
     
     let config = state.config.lock().unwrap();
     sf_log!("CMD: transcribing...");
-    let raw = transcription::transcribe(&samples, sample_rate, &config)?;
+    let raw = match transcription::transcribe(&samples, sample_rate, &config) {
+        Ok(r) => r,
+        Err(e) => {
+            show_error(&app, "transcription-error", e.clone());
+            return Err(e);
+        }
+    };
     sf_log!("CMD: transcript received: {:?}", &raw[..raw.len().min(50)]);
     let _ = app.emit("raw-transcript", raw.clone());
     let text = postprocess::postprocess(&raw, &config);
-    
+
+    // Persist non-empty dictations to history (independent of auto-paste)
+    {
+        let mut h = state.history.lock().unwrap();
+        if !text.is_empty() {
+            h.push(&text);
+            h.save();
+        }
+    }
+
     let _ = app.emit("transcript-result", text.clone());
     
     if !text.is_empty() {
         if config.auto_paste {
             sf_log!("CMD: typing text...");
-            text_injection::type_text(&text)?;
+            if let Err(e) = text_injection::type_text(&text) {
+                show_error(&app, "transcription-error", e.clone());
+                return Err(e);
+            }
             sf_log!("CMD: typed OK");
         } else {
             sf_log!("CMD: auto-paste disabled, showing in transcript only");
@@ -181,13 +214,13 @@ fn get_config(state: tauri::State<AppState>) -> Result<Config, ()> {
 #[tauri::command]
 fn update_config(app: tauri::AppHandle, state: tauri::State<AppState>, new_config: Config) -> Result<(), String> {
     if new_config.api_key.is_empty() {
-        return Err("API key cannot be empty".into());
+        return Err("[CFG-002] API key cannot be empty. Enter a valid key in Settings.".into());
     }
     if new_config.model.is_empty() {
-        return Err("Model name cannot be empty".into());
+        return Err("[CFG-003] Model name cannot be empty. Enter a model (e.g. whisper-large-v3).".into());
     }
     if !new_config.api_base_url.starts_with("https://") {
-        return Err("API base URL must use HTTPS (e.g. https://api.groq.com/openai/v1)".into());
+        return Err("[CFG-004] API base URL must use HTTPS (e.g. https://api.groq.com/openai/v1).".into());
     }
     // VULN-003: the key goes into the OS vault before anything is saved;
     // Config::save() strips api_key from the JSON written to disk.
@@ -227,6 +260,38 @@ fn update_config(app: tauri::AppHandle, state: tauri::State<AppState>, new_confi
     Ok(())
 }
 
+#[tauri::command]
+fn get_history(state: tauri::State<AppState>) -> Result<History, ()> {
+    Ok(state.history.lock().unwrap().clone())
+}
+
+#[tauri::command]
+fn delete_history_entry(state: tauri::State<AppState>, index: usize) -> Result<(), String> {
+    let mut history = state.history.lock().unwrap();
+    if index >= history.entries.len() {
+        return Err(format!("History entry index {index} out of bounds"));
+    }
+    history.entries.remove(index);
+    history.save();
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_history(state: tauri::State<AppState>) -> Result<(), String> {
+    let mut history = state.history.lock().unwrap();
+    history.entries.clear();
+    history.save();
+    Ok(())
+}
+
+#[tauri::command]
+fn inject_text(text: String) -> Result<(), String> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    text_injection::type_text(&text)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(
@@ -259,7 +324,7 @@ pub fn run() {
                                         Err(e) => {
                                             drop(recorder);
                                             sf_log!("HOTKEY: start_recording error: {e}");
-                                            let _ = app.emit("recording-error", format!("Could not start recording: {e}"));
+                                            show_error(app, "recording-error", e);
                                             false
                                         }
                                     }
@@ -302,13 +367,20 @@ pub fn run() {
                                     let raw = transcription::transcribe(&samples, sample_rate, &config)?;
                                     let _ = app_clone.emit("raw-transcript", raw.clone());
                                     let text = postprocess::postprocess(&raw, &config);
+                                    let st = app_clone.state::<AppState>();
+                                    let mut h = st.history.lock().unwrap();
+                                    if !text.is_empty() {
+                                        h.push(&text);
+                                        h.save();
+                                    }
+                                    drop(h);
                                     let _ = app_clone.emit("transcript-result", text.clone());
                                     if config.auto_paste {
                                         if !text.is_empty() {
                                             sf_log!("HOTKEY: auto-paste enabled, typing...");
                                             if let Err(e) = text_injection::type_text(&text) {
                                                 sf_log!("HOTKEY: type_text error: {e}");
-                                                let _ = app_clone.emit("transcription-error", format!("Auto-paste failed: {e}"));
+                                                show_error(&app_clone, "transcription-error", e);
                                             }
                                         } else {
                                             sf_log!("HOTKEY: auto-paste enabled but text is empty, skipping");
@@ -325,11 +397,11 @@ pub fn run() {
                                             Err(_) => "unknown panic in transcription thread".into(),
                                         };
                                         sf_log!("TRANSCRIPTION PANIC: {msg}");
-                                        let _ = app_clone.emit("transcription-error", msg);
+                                        show_error(&app_clone, "transcription-error", msg);
                                     }
                                     Ok(Err(e)) => {
                                         sf_log!("TRANSCRIPTION ERROR: {e}");
-                                        let _ = app_clone.emit("transcription-error", e);
+                                        show_error(&app_clone, "transcription-error", e);
                                     }
                                     Ok(Ok(())) => {}
                                 }
@@ -353,6 +425,7 @@ pub fn run() {
         .manage(AppState {
             recorder: Mutex::new(AudioRecorder::new()),
             config: Mutex::new(Config::load()),
+            history: Mutex::new(History::load()),
             overlay: Mutex::new(None),
         })
         .setup(|app| {
@@ -384,7 +457,7 @@ pub fn run() {
                 tauri::WebviewUrl::App("overlay.html".into()),
             )
             .title("")
-            .inner_size(120.0, 36.0)
+            .inner_size(800.0, 60.0)
             .always_on_top(true)
             .decorations(false)
             .transparent(true)
@@ -394,7 +467,7 @@ pub fn run() {
             let overlay = if let Some(monitor) = app.primary_monitor().ok().flatten() {
                 let scale_factor = monitor.scale_factor();
                 let logical_width = monitor.size().width as f64 / scale_factor;
-                let x = (logical_width - 120.0) / 2.0;
+                let x = (logical_width - 800.0) / 2.0;
                 let y = 10.0;
                 overlay.position(x, y).build()
             } else {
@@ -403,7 +476,7 @@ pub fn run() {
 
             let state = app.state::<AppState>();
             match &overlay {
-                Ok(w) => { let _ = w.hide(); sf_log!("SETUP: overlay created"); }
+                Ok(w) => { let _ = w.hide(); let _ = w.set_ignore_cursor_events(true); sf_log!("SETUP: overlay created"); }
                 Err(e) => sf_log!("SETUP: overlay creation error: {e}"),
             }
             *state.overlay.lock().unwrap() = overlay.ok();
@@ -477,6 +550,10 @@ pub fn run() {
             stop_recording,
             get_config,
             update_config,
+            get_history,
+            delete_history_entry,
+            clear_history,
+            inject_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

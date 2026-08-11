@@ -42,10 +42,37 @@ body {
     height: 4px;
     transition: height 0.05s ease-out;
 }
+.error-bubble {
+    background: #000000;
+    border-radius: 9999px;
+    padding: 6px 16px;
+    color: #ff4d4d;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 13px;
+    line-height: 1.4;
+    max-width: 780px;
+    display: none;
+    align-items: center;
+    text-align: center;
+    animation: fadeIn 0.15s ease-out;
+}
+.error-bubble .code {
+    font-weight: 700;
+    flex-shrink: 0;
+}
+.error-bubble .code::after {
+    content: " - ";
+    margin: 0 4px;
+    font-weight: 400;
+}
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
 </style>
 </head>
 <body>
-<div class="bubble">
+<div class="bubble" id="vu">
     <div class="waveform">
         <span class="bar" data-base="0.3"></span>
         <span class="bar" data-base="0.65"></span>
@@ -54,21 +81,52 @@ body {
         <span class="bar" data-base="0.3"></span>
     </div>
 </div>
+<div class="error-bubble" id="error"><span class="code" id="err-code"></span><span id="err-msg"></span></div>
 <script>
 const bars = document.querySelectorAll('.bar');
-try {
-    if (window.__TAURI_INTERNALS__) {
-        window.__TAURI_INTERNALS__.listen('audio-level', (e) => {
-            const level = Math.min(parseFloat(e.payload) || 0, 1);
-            const maxH = 18;
-            bars.forEach((bar) => {
-                const base = parseFloat(bar.dataset.base);
-                const targetH = Math.max(level * maxH * base, 3);
-                bar.style.height = targetH + 'px';
-            });
+const vu = document.getElementById('vu');
+const errEl = document.getElementById('error');
+const errCode = document.getElementById('err-code');
+const errMsg = document.getElementById('err-msg');
+let hideTimer = null;
+
+function showError(msg) {
+    const clean = String(msg).replace(/^\[[A-Z]+-\d+\]\s*/, '');
+    errCode.style.display = 'none';
+    errMsg.textContent = clean;
+    vu.style.display = 'none';
+    errEl.style.display = 'inline-flex';
+    // ponytail: auto-hide error + close the floating window after ~4s
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => {
+        errEl.style.display = 'none';
+        vu.style.display = 'inline-flex';
+        invoke('plugin:window|hide', { label: window.__TAURI_INTERNALS__.metadata?.currentWindow?.label });
+    }, 4000);
+}
+
+// Tauri 2 raw event API (overlay.html ships unbundled from public/, so we
+// replicate @tauri-apps/api's listen() against __TAURI_INTERNALS__ directly)
+const invoke = window.__TAURI_INTERNALS__?.invoke;
+const transformCallback = window.__TAURI_INTERNALS__?.transformCallback;
+if (invoke && transformCallback) {
+    const listen = (event, handler) => invoke('plugin:event|listen', {
+        event,
+        target: { kind: 'Any' },
+        handler: transformCallback(handler),
+    });
+    listen('audio-level', (e) => {
+        const level = Math.min(parseFloat(e.payload) || 0, 1);
+        const maxH = 18;
+        bars.forEach((bar) => {
+            const base = parseFloat(bar.dataset.base);
+            const targetH = Math.max(level * maxH * base, 3);
+            bar.style.height = targetH + 'px';
         });
-    }
-} catch (_) {}
+    });
+    listen('recording-error', (e) => showError(e.payload));
+    listen('transcription-error', (e) => showError(e.payload));
+}
 </script>
 </body>
 </html>

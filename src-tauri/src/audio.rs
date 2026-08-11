@@ -41,10 +41,10 @@ impl AudioRecorder {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
-            .ok_or_else(|| "No input device found".to_string())?;
+            .ok_or_else(|| "[REC-001] No microphone found. Plug one in or enable it in Windows settings.".to_string())?;
         let config = device
             .default_input_config()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("[REC-002] Could not read microphone settings. ({e})"))?;
 
         *self.recording.lock().unwrap() = true;
         self.samples.lock().unwrap().clear();
@@ -70,9 +70,9 @@ impl AudioRecorder {
                 err_fn,
                 None,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("[REC-003] Could not start the microphone. ({e})"))?;
 
-        stream.play().map_err(|e| e.to_string())?;
+        stream.play().map_err(|e| format!("[REC-004] Microphone failed to start. ({e})"))?;
         self.stream = Some(stream);
         Ok(())
     }
@@ -83,8 +83,15 @@ impl AudioRecorder {
             let _ = s.pause();
         }
         let raw = std::mem::take(&mut *self.samples.lock().unwrap());
-        let denoised = denoise(raw, self.channels as usize);
-        trim_silence(&denoised, self.sample_rate)
+        // ponytail: RNNoise is hardcoded to 48kHz internally; at any other sample
+        // rate its 480-sample frames aren't 10ms and it corrupts speech, which
+        // Whisper hallucinates on. Raw passthrough beats corrupted denoising.
+        let samples = if self.sample_rate == 48000 {
+            denoise(raw, self.channels as usize)
+        } else {
+            raw
+        };
+        trim_silence(&samples, self.sample_rate)
     }
 
     pub fn channels(&self) -> u16 {
@@ -196,6 +203,29 @@ mod tests {
         let samples = r.stop();
         assert!(!r.is_recording());
         assert_eq!(samples, vec![0.5]);
+    }
+
+    #[test]
+    fn stop_skips_denoise_at_non_48k_sample_rate() {
+        let mut r = AudioRecorder::new();
+        r.sample_rate = 44100;
+        r.channels = 1;
+        let raw = vec![0.05f32; 960]; // > 480, would be denoised if the gate were off
+        *r.samples.lock().unwrap() = raw.clone();
+        let out = r.stop();
+        assert_eq!(out, raw, "non-48k audio must bypass RNNoise");
+    }
+
+    #[test]
+    fn stop_denoises_at_48k() {
+        let mut r = AudioRecorder::new();
+        r.sample_rate = 48000;
+        r.channels = 1;
+        let raw = vec![0.05f32; 960]; // constant DC signal, high-passed away by RNNoise
+        *r.samples.lock().unwrap() = raw.clone();
+        let out = r.stop();
+        assert_eq!(out.len(), raw.len());
+        assert!(out.iter().any(|s| *s != 0.05), "denoise must alter the signal at 48k");
     }
 
     #[test]

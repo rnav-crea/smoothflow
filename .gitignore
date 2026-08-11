@@ -8,7 +8,12 @@ dist/
 target/
 smoothflow.json
 src-tauri/smoothflow.json
-ROADMAP.md
 .gitignore
 src-tauri/WebView2Loader.dll
-vulnerability.md
+
+.agents/
+skills-lock.json
+/styles.css
+
+*.md
+!README.md

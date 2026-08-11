@@ -1,10 +1,24 @@
-{
-  "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "Full permissions for the main window",
-  "windows": ["main"],
-  "permissions": [
-    "core:default",
-    "global-shortcut:default"
-  ]
-}
+[
+  {
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "default",
+    "description": "Full permissions for the main window",
+    "windows": ["main"],
+    "permissions": [
+      "core:default",
+      "global-shortcut:default"
+    ]
+  },
+  {
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "overlay",
+    "description": "Listen-only permissions for the floating overlay window",
+    "windows": ["overlay"],
+    "permissions": [
+      "core:event:allow-listen",
+      "core:event:allow-unlisten",
+      "core:event:allow-emit",
+      "core:window:allow-hide"
+    ]
+  }
+]

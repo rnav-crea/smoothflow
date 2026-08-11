@@ -9,11 +9,29 @@ const recordBtn = document.getElementById("record-btn");
 const btnLabel = document.getElementById("btn-label");
 const statusText = document.getElementById("status-text");
 const transcriptEl = document.getElementById("transcript");
-const rawTranscriptEl = document.getElementById("raw-transcript");
+const copyTranscriptBtn = document.getElementById("copy-transcript-btn");
 
+if (copyTranscriptBtn && transcriptEl) {
+  copyTranscriptBtn.addEventListener("click", async () => {
+    const text = transcriptEl.textContent;
+    if (!text || text === "Your dictated text will appear here...") return;
+    try {
+      await navigator.clipboard.writeText(text);
+      const span = copyTranscriptBtn.querySelector("span");
+      if (span) {
+        const old = span.textContent;
+        span.textContent = "Copied!";
+        setTimeout(() => { span.textContent = old; }, 1500);
+      }
+    } catch (e) { console.error("Copy error:", e); }
+  });
+}
+
+const navHome = document.getElementById("nav-home");
 const settingsToggle = document.getElementById("settings-toggle");
 const settingsClose = document.getElementById("settings-close");
 const settingsModal = document.getElementById("settings-modal");
+const themeSelect = document.getElementById("theme-select");
 
 const apiUrlInput = document.getElementById("api-url-input");
 const modelInput = document.getElementById("model-input");
@@ -35,77 +53,30 @@ const dictionaryAddBtn = document.getElementById("dictionary-add-btn");
 let isRecording = false;
 let currentConfig = null;
 
-function updateRecordingUI(recording) {
-  isRecording = recording;
-  if (recording) {
-    recordBtn.classList.add("recording");
-    btnLabel.textContent = "Stop";
-    statusText.textContent = "Recording...";
-    log("Recording started");
-  } else {
-    recordBtn.classList.remove("recording");
-    btnLabel.textContent = "Record";
-    statusText.textContent = "Idle";
-    log("Recording stopped");
-  }
+// Theme Switcher & Persistence
+function applyTheme(themeName) {
+  const finalTheme = themeName === "classic" ? "classic" : "retro";
+  document.body.className = `theme-${finalTheme}`;
+  if (themeSelect) themeSelect.value = finalTheme;
+  localStorage.setItem("smoothflow_theme", finalTheme);
 }
 
-// Events from Rust
-listen("recording-state", (event) => {
-  updateRecordingUI(event.payload);
-}).catch(e => log(`listen error recording-state: ${e}`));
+const savedTheme = localStorage.getItem("smoothflow_theme") || "retro";
+applyTheme(savedTheme);
 
-listen("transcript-result", (event) => {
-  const text = event.payload;
-  transcriptEl.textContent = text || "(silence)";
-  log(`Transcript: ${text}`);
-}).catch(e => log(`listen error transcript: ${e}`));
+if (themeSelect) {
+  themeSelect.addEventListener("change", (e) => {
+    applyTheme(e.target.value);
+  });
+}
 
-listen("raw-transcript", (event) => {
-  rawTranscriptEl.textContent = event.payload || "(silence)";
-  log(`Raw: ${event.payload}`);
-}).catch(e => log(`listen error raw: ${e}`));
-
-listen("transcription-error", (event) => {
-  transcriptEl.textContent = `Error: ${event.payload}`;
-  statusText.textContent = "Error";
-  recordBtn.classList.remove("recording");
-  btnLabel.textContent = "Record";
-  isRecording = false;
-  log(`ERROR: ${event.payload}`);
-}).catch(e => log(`listen error: ${e}`));
-
-listen("recording-error", (event) => {
-  transcriptEl.textContent = `Recording error: ${event.payload}`;
-  statusText.textContent = "Error";
-  recordBtn.classList.remove("recording");
-  btnLabel.textContent = "Record";
-  isRecording = false;
-  log(`REC ERROR: ${event.payload}`);
-}).catch(e => log(`listen error: ${e}`));
-
-// Hold-to-record: Space (record button is status indicator only)
-document.addEventListener("keydown", (e) => {
-  if (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "SELECT") return;
-  if (settingsModal.classList.contains("open")) return;
-  if (e.code === "Space" && !e.repeat && !isRecording) {
-    e.preventDefault();
-    invoke("start_recording").catch(err => log(`start error: ${err}`));
-  }
-});
-
-document.addEventListener("keyup", (e) => {
-  if (e.code === "Space" && isRecording) {
-    e.preventDefault();
-    invoke("stop_recording").catch(err => log(`stop error: ${err}`));
-  }
-});
-
-// Settings modal
+// Settings modal & Header Nav
 let isModalClosing = false;
 
 function openSettings() {
   if (!settingsModal) return;
+  if (navHome) navHome.classList.remove("active");
+  if (settingsToggle) settingsToggle.classList.add("active");
   settingsModal.classList.remove("closing");
   settingsModal.classList.add("open");
   log("Settings opened");
@@ -115,6 +86,8 @@ function closeSettings() {
   if (!settingsModal || isModalClosing) return;
 
   isModalClosing = true;
+  if (navHome) navHome.classList.add("active");
+  if (settingsToggle) settingsToggle.classList.remove("active");
   settingsModal.classList.remove("open");
   settingsModal.classList.add("closing");
 
@@ -127,6 +100,7 @@ function closeSettings() {
 window.openSettings = openSettings;
 window.closeSettings = closeSettings;
 
+if (navHome) navHome.addEventListener("click", closeSettings);
 if (settingsToggle) settingsToggle.addEventListener("click", openSettings);
 if (settingsClose) settingsClose.addEventListener("click", closeSettings);
 if (settingsModal) {
@@ -249,5 +223,165 @@ function addDictionaryWord() {
 
 if (dictionaryAddBtn) dictionaryAddBtn.addEventListener("click", addDictionaryWord);
 if (dictionaryInput) dictionaryInput.addEventListener("keydown", (e) => { if (e.key === "Enter") addDictionaryWord(); });
+
+// History & stats
+const statTodayWords = document.getElementById("stat-today-words");
+const statTodayDictations = document.getElementById("stat-today-dictations");
+const statTotalWords = document.getElementById("stat-total-words");
+const statTotalDictations = document.getElementById("stat-total-dictations");
+const recentsList = document.getElementById("recents-list");
+const recentsEmpty = document.getElementById("recents-empty");
+
+const popover = document.createElement("div");
+popover.className = "recent-popover";
+popover.style.display = "none";
+document.body.appendChild(popover);
+
+function closePopover() { popover.style.display = "none"; }
+
+document.addEventListener("click", (e) => {
+  if (!popover.contains(e.target)) closePopover();
+});
+
+function showPopover(anchor, entry) {
+  popover.innerHTML = "";
+
+  // ── Copy ──────────────────────────────────────────
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "popover-btn";
+  copyBtn.innerHTML = `Copy`;
+  copyBtn.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(entry.text); }
+    catch (err) { console.error("copy failed:", err); }
+    closePopover();
+  });
+
+  // ── Re-inject ─────────────────────────────────────
+  const reinjectBtn = document.createElement("button");
+  reinjectBtn.className = "popover-btn";
+  reinjectBtn.innerHTML = `Re-inject`;
+  reinjectBtn.addEventListener("click", async () => {
+    try { await invoke("inject_text", { text: entry.text }); }
+    catch (err) { console.error("re-inject failed:", err); }
+    closePopover();
+  });
+
+  // ── Delete ────────────────────────────────────────
+  const deleteBtn = document.createElement("button");
+  deleteBtn.className = "popover-btn popover-btn-danger";
+  deleteBtn.innerHTML = `Delete`;
+  deleteBtn.addEventListener("click", async () => {
+    try { await invoke("delete_history_entry", { index: entry.index }); }
+    catch (err) { console.error("delete failed:", err); }
+    closePopover();
+    loadHistory();
+  });
+
+  popover.appendChild(copyBtn);
+  popover.appendChild(reinjectBtn);
+  popover.appendChild(deleteBtn);
+
+  // ── Smart positioning ─────────────────────────────
+  // 1. Paint invisibly so we can measure real dimensions
+  popover.style.visibility = "hidden";
+  popover.style.display = "flex";
+
+  const rect = anchor.getBoundingClientRect();
+  const pw = popover.offsetWidth;
+  const ph = popover.offsetHeight;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const gap = 4;
+
+  // Align right edge of popover to right edge of the ⋮ button
+  let left = rect.right - pw;
+  // If it goes off the left edge, clamp to 8px
+  if (left < 8) left = 8;
+  // If it goes off the right edge, clamp
+  if (left + pw > vw - 8) left = vw - pw - 8;
+
+  // Prefer opening below the button; flip above if not enough space
+  let top;
+  if (rect.bottom + gap + ph <= vh - 8) {
+    top = rect.bottom + gap;          // below
+  } else {
+    top = rect.top - ph - gap;        // above
+    if (top < 8) top = 8;            // last resort: clamp to top
+  }
+
+  popover.style.left = left + "px";
+  popover.style.top = top + "px";
+  popover.style.visibility = "visible";
+}
+
+function padZero(num, size) {
+  let s = num + "";
+  while (s.length < size) s = "0" + s;
+  return s;
+}
+
+function renderRecents(todayEntries) {
+  if (!recentsList) return;
+  recentsList.innerHTML = "";
+
+  // Hide static placeholder slots
+  for (let i = 1; i <= 3; i++) {
+    const slot = document.getElementById(`slot-placeholder-${i}`);
+    if (slot) slot.style.display = "none";
+  }
+
+  if (!todayEntries || todayEntries.length === 0) {
+    if (recentsEmpty) recentsEmpty.style.display = "flex";
+    return;
+  }
+
+  if (recentsEmpty) recentsEmpty.style.display = "none";
+
+  for (const entry of todayEntries) {
+    const li = document.createElement("li");
+    li.className = "dictation-item";
+
+    const textDiv = document.createElement("div");
+    textDiv.className = "dictation-text";
+    textDiv.textContent = entry.text;
+
+    const moreBtn = document.createElement("button");
+    moreBtn.className = "dictation-menu-btn";
+    moreBtn.textContent = "⋮";
+    moreBtn.setAttribute("aria-label", "Entry options");
+    moreBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      showPopover(moreBtn, entry);
+    });
+
+    li.appendChild(textDiv);
+    li.appendChild(moreBtn);
+    recentsList.appendChild(li);
+  }
+}
+
+async function loadHistory() {
+  let data = { total_words: 0, total_dictations: 0, entries: [] };
+  try { data = await invoke("get_history"); }
+  catch (err) { console.error("get_history failed:", err); }
+
+  const entries = data.entries || [];
+  const now = new Date();
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const todayEntries = entries
+    .map((e, i) => ({ text: e.text, timestamp: e.timestamp, words: e.words, index: i }))
+    .filter(e => e.timestamp * 1000 >= midnight.getTime())
+    .reverse();
+
+  const todayWords = todayEntries.reduce((sum, e) => sum + (e.words || 0), 0);
+  if (statTodayWords) statTodayWords.textContent = todayWords;
+  if (statTodayDictations) statTodayDictations.textContent = todayEntries.length;
+  if (statTotalWords) statTotalWords.textContent = padZero(data.total_words ?? 0, 3);
+  if (statTotalDictations) statTotalDictations.textContent = padZero(data.total_dictations ?? 0, 2);
+  
+  renderRecents(todayEntries);
+}
+
+loadHistory();
 
 loadConfig();

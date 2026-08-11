@@ -7,30 +7,30 @@ pub fn type_text(text: &str) -> Result<(), String> {
 
 fn clipboard_paste(text: &str) -> Result<(), String> {
     let mut clipboard =
-        arboard::Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
+        arboard::Clipboard::new().map_err(|e| format!("[PST-001] Could not open clipboard. ({e})"))?;
 
     let old = clipboard.get_text().ok();
 
     clipboard
         .set_text(text.to_owned())
-        .map_err(|e| format!("clipboard set: {e}"))?;
+        .map_err(|e| format!("[PST-001] Could not write to clipboard. ({e})"))?;
 
     std::thread::sleep(Duration::from_millis(50));
 
     let mut enigo =
-        Enigo::new(&Settings::default()).map_err(|e| format!("enigo init: {e}"))?;
+        Enigo::new(&Settings::default()).map_err(|e| format!("[PST-002] Keyboard init failed. ({e})"))?;
 
     enigo
         .key(Key::Control, Direction::Press)
-        .map_err(|e| format!("ctrl press: {e}"))?;
+        .map_err(|e| format!("[PST-002] Auto-paste failed — click into the target app and retry. ({e})"))?;
     std::thread::sleep(Duration::from_millis(10));
     enigo
         .key(Key::V, Direction::Click)
-        .map_err(|e| format!("v click: {e}"))?;
+        .map_err(|e| format!("[PST-002] Auto-paste failed — click into the target app and retry. ({e})"))?;
     std::thread::sleep(Duration::from_millis(10));
     enigo
         .key(Key::Control, Direction::Release)
-        .map_err(|e| format!("ctrl release: {e}"))?;
+        .map_err(|e| format!("[PST-002] Auto-paste failed — click into the target app and retry. ({e})"))?;
 
     std::thread::sleep(Duration::from_millis(100));
 
@@ -43,10 +43,10 @@ fn clipboard_paste(text: &str) -> Result<(), String> {
 
 fn enigo_text(text: &str) -> Result<(), String> {
     let mut enigo =
-        Enigo::new(&Settings::default()).map_err(|e| format!("enigo init: {e}"))?;
+        Enigo::new(&Settings::default()).map_err(|e| format!("[PST-002] Keyboard init failed. ({e})"))?;
     enigo
         .text(text)
-        .map_err(|e| format!("type error: {e}"))
+        .map_err(|e| format!("[PST-003] Auto-paste failed — click into the target app and retry. ({e})"))
 }
 
 #[cfg(test)]

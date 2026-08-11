@@ -8,94 +8,76 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400;1,500&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://fonts.cdnfonts.com/css/pp-neue-montreal" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/public/styles.css" />
   </head>
-  <body>
+  <body class="theme-retro">
     <div id="app">
+      <!-- Header -->
       <header class="app-header">
         <div class="brand">
-          <svg class="brand-flower" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 8a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"></path>
-            <path d="M12 24a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"></path>
-            <path d="M4 16a4 4 0 1 0-8 0 4 4 0 0 0 8 0z"></path>
-            <path d="M24 16a4 4 0 1 0-8 0 4 4 0 0 0 8 0z"></path>
-            <path d="M6.34 6.34a4 4 0 1 0-5.65-5.65 4 4 0 0 0 5.65 5.65z"></path>
-            <path d="M23.31 23.31a4 4 0 1 0-5.65-5.65 4 4 0 0 0 5.65 5.65z"></path>
-            <path d="M6.34 17.66a4 4 0 1 0-5.65 5.65 4 4 0 0 0 5.65-5.65z"></path>
-            <path d="M23.31 6.34a4 4 0 1 0-5.65-5.65 4 4 0 0 0 5.65 5.65z"></path>
-            <circle cx="12" cy="12" r="2.5" fill="currentColor"></circle>
-          </svg>
-          <h1>smoothflow</h1>
+          <h1 class="brand-title">SMOOTHFLOW</h1>
         </div>
+
         <nav class="header-nav">
-          <button id="settings-toggle" class="pill-nav-btn" aria-label="Settings">
-            <span>settings</span>
-          </button>
+          <button id="nav-home" class="pill-nav-btn active" aria-label="Home">HOME</button>
+          <button id="settings-toggle" class="pill-nav-btn" aria-label="Settings">SETTINGS</button>
         </nav>
       </header>
 
+      <!-- Main Content -->
       <main class="main-content">
+        <!-- Hero Section -->
         <section class="hero-section">
-          <div class="hero-icon-container">
-            <svg width="48" height="44" viewBox="0 0 48 44" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="2" y="8" width="28" height="24" rx="2" stroke="currentColor" stroke-width="1.8" fill="none"></rect>
-              <line x1="2" y1="14" x2="30" y2="14" stroke="currentColor" stroke-width="1.8"></line>
-              <circle cx="6" cy="11" r="1" fill="currentColor"></circle>
-              <circle cx="10" cy="11" r="1" fill="currentColor"></circle>
-              <circle cx="14" cy="11" r="1" fill="currentColor"></circle>
-              
-              <rect x="18" y="2" width="28" height="24" rx="2" stroke="currentColor" stroke-width="1.8" fill="none"></rect>
-              <line x1="18" y1="8" x2="46" y2="8" stroke="currentColor" stroke-width="1.8"></line>
-              <circle cx="22" cy="5" r="1" fill="currentColor"></circle>
-              <circle cx="26" cy="5" r="1" fill="currentColor"></circle>
-              <circle cx="30" cy="5" r="1" fill="currentColor"></circle>
-
-              <path d="M12 22 L18 28 L24 20" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
-            </svg>
+          <div class="hero-text">
+            <h2 class="hero-title">Stop typing, Start talking</h2>
+            <p class="hero-subtitle">Type anywhere with your voice.</p>
+            <p class="hero-subtitle">Your voice is now your fastest keyboard.</p>
+            
+            <div class="hero-description">
+              <p>No login, no registration, no data collection just bring your own API key to run the entire app.</p>
+              <p>Enjoy effortless voice dictation. If you find any bug or have feedback, feel free to report it!</p>
+            </div>
           </div>
 
-          <h2 class="hero-title">
-            done–for–you<br />
-            voice &amp; text<br />
-            dictation
-          </h2>
-
-          <p class="hero-subtitle">
-            <em>generate clean, accurate transcriptions—<br />easier and faster than ever before.</em>
-          </p>
+          <div class="hero-illustration">
+            <img src="/public/hero-illustration.png" alt="Desk Illustration" class="hero-img" id="hero-img" />
+          </div>
         </section>
 
-        <div class="transcript-grid">
-          <div class="transcript-panel" id="raw-panel">
-            <div class="panel-header">
-              <span class="panel-label">raw voice</span>
-              <span class="panel-badge">live</span>
+        <div class="hero-callout-card">
+                <div class="hero-callout-label">
+                  <span>RECOMMENDED: USE GROQ</span>
+                </div>
+                <div class="hero-callout-content">
+                  For the best experience, we recommend using <a href="https://console.groq.com" target="_blank" rel="noopener noreferrer" class="hero-callout-link">Groq Cloud API</a>. It provides better performance, zero cost, and full compatibility.
+                </div>
+              </div>
+
+        <!-- Hidden stats elements for JS backward compatibility -->
+        <!-- <div style="display: none;">
+          <span id="stat-today-words">0</span>
+          <span id="stat-today-dictations">0</span>
+        </div> -->
+
+        <!-- Recent Dictations Section -->
+        <section class="recents-section">
+          <div class="recents-card-header">
+            <span class="recents-title">RECENT DICTATIONS</span>
+            <div class="recents-stats">
+              TOTAL DICTATIONS = <span id="stat-total-dictations">00</span> &nbsp;&nbsp;&nbsp;&nbsp; WORDS = <span id="stat-total-words">000</span>
             </div>
-            <div id="raw-transcript" class="panel-content">Waiting for input...</div>
           </div>
 
-          <div class="transcript-panel transformed-card" id="transformed-panel">
-            <div class="panel-header">
-              <span class="panel-label">transformed</span>
-              <span class="panel-badge highlight">ai enhanced</span>
-            </div>
-            <div id="transcript" class="panel-content">Your dictated text will appear here</div>
+          <div class="recents-card-body">
+            <ul id="recents-list" class="recents-list"></ul>
+            <div id="recents-empty" class="recents-empty" style="display: none;">No dictations recorded today</div>
+            
+            <!-- Static placeholder slots to complete the 4-row layout matching reference UI -->
+            <div class="dictation-slot empty-slot" id="slot-placeholder-1"></div>
+            <div class="dictation-slot empty-slot" id="slot-placeholder-2"></div>
+            <div class="dictation-slot empty-slot" id="slot-placeholder-3"></div>
           </div>
-        </div>
-
-        <div class="controls-bar">
-          <div class="status-indicator">
-            <span class="status-dot"></span>
-            <div id="status-text">Idle</div>
-          </div>
-          
-          <button id="record-btn" class="record-button" aria-label="Toggle Recording">
-            <svg id="mic-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v1a7 7 0 0 1-14 0v-1"></path><line x1="12" x2="12" y1="19" y2="22"></line></svg>
-            <span id="btn-label">Record</span>
-          </button>
-
-          <div class="status-tip">Hold <kbd>Space</kbd> to dictate</div>
-        </div>
+        </section>
       </main>
 
       <footer id="debug-bar">App loaded</footer>
@@ -110,6 +92,15 @@
             </button>
           </div>
           <div class="modal-body">
+            <!-- <div class="settings-group">
+              <label for="theme-select">UI Theme</label>
+              <select id="theme-select" class="settings-select">
+                <option value="retro">Retro Green (Delphitools)</option>
+                <option value="classic">Periwinkle Classic (Original)</option>
+              </select>
+              <span class="settings-hint">Switch between Delphitools retro style and original Periwinkle UI</span>
+            </div> -->
+
             <div class="settings-group">
               <label for="api-url-input">API Base URL</label>
               <input type="text" id="api-url-input" placeholder="https://api.groq.com/openai/v1" />

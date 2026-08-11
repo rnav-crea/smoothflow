@@ -21,7 +21,7 @@ fn config_dir() -> PathBuf {
 pub fn store_secret(key: &str) -> Result<(), String> {
     keyring::Entry::new("SmoothFlow", "api_key")
         .and_then(|entry| entry.set_password(key))
-        .map_err(|e| format!("failed to store API key in credential vault: {e}"))
+        .map_err(|e| format!("[CFG-001] Could not save API key to Windows Credential Manager. ({e})"))
 }
 
 #[cfg(not(test))]

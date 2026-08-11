@@ -82,7 +82,9 @@ fn normalize_gain(samples: &[f32]) -> Vec<f32> {
     if level <= 0.0 {
         return samples.to_vec();
     }
-    let gain = (TARGET_RMS / level).min(8.0);
+    // ponytail: 2.5x cap — an 8x cap amplified background noise along with
+    // quiet speech, which is exactly the input Whisper hallucinates on.
+    let gain = (TARGET_RMS / level).min(2.5);
     if gain <= 1.0 {
         return samples.to_vec();
     }
@@ -110,7 +112,7 @@ fn resample_to_16k(samples: &[f32], sample_rate: u32) -> Vec<f32> {
 
 pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<String, String> {
     if config.api_key.is_empty() {
-        return Err("No API key configured. Set it in settings.".into());
+        return Err("[TXN-001] No API key set. Add your API key in Settings.".into());
     }
 
     if rms(samples) < 0.0005 {
@@ -124,7 +126,7 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
         let last = LAST_CALL.get_or_init(|| std::sync::Mutex::new(Instant::now() - Duration::from_secs(60)));
         let mut last_time = last.lock().unwrap_or_else(|p| p.into_inner());
         if last_time.elapsed() < Duration::from_millis(1000) {
-            return Err("Rate limited — please wait before recording again".into());
+            return Err("[TXN-005] Recording too fast — wait a second and try again.".into());
         }
         *last_time = Instant::now();
     }
@@ -137,7 +139,7 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
     let part = reqwest::blocking::multipart::Part::bytes(wav_bytes)
         .file_name("audio.wav")
         .mime_str("audio/wav")
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("[TXN-008] Audio encoding failed. ({e})"))?;
 
     let mut terms: Vec<String> = extract_terms(&active_window::title());
     terms.extend(config.dictionary.iter().cloned());
@@ -150,7 +152,7 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
     let prompt = if terms.is_empty() {
         String::new()
     } else {
-        format!("[vocabulary: {}]", terms.join(", "))
+        format!("Vocabulary hints for this audio: {}.", terms.join(", "))
     };
 
     let form = reqwest::blocking::multipart::Form::new()
@@ -164,12 +166,21 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
         .header("Authorization", format!("Bearer {}", config.api_key))
         .multipart(form)
         .send()
-        .map_err(|e| format!("API request failed: {}", e))?;
+        .map_err(|e| format!("[TXN-002] Network error — check your internet connection. ({e})"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
-        return Err(format!("API error {}: {}", status, body));
+        let code = match status.as_u16() {
+            401 => "[TXN-003] Invalid API key (401). Check your key in Settings.",
+            404 => "[TXN-004] Model or endpoint not found (404). Check your Model name in Settings.",
+            429 => "[TXN-005] Rate limited (429). Wait a moment and try again.",
+            s if s >= 500 => "[TXN-006] Server error — try again in a minute.",
+            _ => "[TXN-002] API request failed.",
+        };
+        let trimmed = body.trim();
+        let detail = if trimmed.is_empty() { String::new() } else { format!(" ({trimmed})") };
+        return Err(format!("{code}{detail}"));
     }
 
     #[derive(serde::Deserialize)]
@@ -178,14 +189,14 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
     }
 
     let whisper_resp: WhisperResponse =
-        resp.json().map_err(|e| format!("failed to parse response: {}", e))?;
+        resp.json().map_err(|e| format!("[TXN-007] Could not parse the response. ({e})"))?;
 
     Ok(whisper_resp.text)
 }
 
 fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
     if samples.is_empty() {
-        return Err("no audio samples to encode".into());
+        return Err("[TXN-008] No audio captured — try speaking closer to the microphone.".into());
     }
 
     let spec = WavSpec {
@@ -196,14 +207,14 @@ fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
     };
 
     let mut buf = Cursor::new(Vec::new());
-    let mut writer = WavWriter::new(&mut buf, spec).map_err(|e| e.to_string())?;
+    let mut writer = WavWriter::new(&mut buf, spec).map_err(|e| format!("[TXN-008] Audio encoding failed. ({e})"))?;
 
     for s in resample_to_16k(samples, sample_rate) {
         let sample = (s * i16::MAX as f32).clamp(-32768.0, 32767.0) as i16;
-        writer.write_sample(sample).map_err(|e| e.to_string())?;
+        writer.write_sample(sample).map_err(|e| format!("[TXN-008] Audio encoding failed. ({e})"))?;
     }
 
-    writer.finalize().map_err(|e| e.to_string())?;
+    writer.finalize().map_err(|e| format!("[TXN-008] Audio encoding failed. ({e})"))?;
     Ok(buf.into_inner())
 }
 
@@ -238,7 +249,9 @@ mod tests {
             .collect();
         let before = rms(&quiet);
         let boosted = normalize_gain(&quiet);
-        assert!(rms(&boosted) > before * 5.0);
+        // rms≈0.007 → gain 7.1, capped at 2.5 → ~2.5x boost
+        assert!(rms(&boosted) > before * 2.0, "quiet audio should still be boosted");
+        assert!(rms(&boosted) < before * 3.0, "boost must respect the 2.5x cap");
         assert!(boosted.iter().all(|s| s.abs() <= 1.0));
     }
 }

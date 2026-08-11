@@ -47,7 +47,7 @@ const FIRST_WINS_MARKERS: &[&str] = &["instead of", "rather than"];
 // alternation prefers "no wait" over "no" at the same position.
 const LAST_WINS_MARKERS: &[&str] = &[
     "no, wait", "no wait", "not that", "not this",
-    "scratch that", "forget that", "i mean", "actually", "no", "wait",
+    "scratch that", "forget that", "i meant", "i mean", "actually", "no", "wait",
 ];
 
 pub fn postprocess(text: &str, config: &Config) -> String {
@@ -55,8 +55,9 @@ pub fn postprocess(text: &str, config: &Config) -> String {
         return basic_cleanup(text, config);
     }
     match resolve_self_corrections(text) {
-        // ponytail: resolved text returned verbatim; wrap in basic_cleanup if stray fillers show up
-        ResolveOutcome::Resolved(fixed) => fixed,
+        // resolved corrections still get the finishing pass (fillers, emails,
+        // dictionary, punctuation) — just not another resolution attempt
+        ResolveOutcome::Resolved(fixed) => basic_cleanup(&fixed, config),
         ResolveOutcome::NoCorrection => basic_cleanup(text, config),
         ResolveOutcome::Ambiguous => basic_cleanup(text, config),
     }
@@ -76,32 +77,57 @@ fn resolve_self_corrections(text: &str) -> ResolveOutcome {
     };
     let before = text[..m.start()].trim();
     let after = text[m.end()..].trim();
+    // A leading marker phrase ("no wait I meant 4 pm") belongs to the SAME
+    // correction — strip it first so it isn't mistaken for a second one.
+    let tail = strip_leading_markers(after);
     // conservative: a correction must split a real utterance, both sides non-trivial
-    if before.is_empty() || !after.chars().any(|c| c.is_alphanumeric()) {
+    if before.is_empty() || !tail.chars().any(|c| c.is_alphanumeric()) {
         return ResolveOutcome::Ambiguous;
     }
     // a leftover marker in the tail is a correction chain -> not confidently resolvable
-    if first_re.find(after).is_some() || last_re.find(after).is_some() {
+    if first_re.find(&tail).is_some() || last_re.find(&tail).is_some() {
         return ResolveOutcome::Ambiguous;
     }
     let resolved = if last_wins {
-        // "meet at 6pm no wait 7pm": drop the superseded last word, keep the tail
         let mut words: Vec<&str> = before.split_whitespace().collect();
-        words.pop();
+        // the superseded value: drop from the last number token ("3 PM", "6pm");
+        // if the corrected thing was a plain word ("today", "the park"), drop the last word
+        match words.iter().rposition(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit())) {
+            Some(i) => words.truncate(i),
+            None => { words.pop(); }
+        }
         let head = words.join(" ");
-        let combined = if head.is_empty() {
-            after.to_string()
-        } else {
-            format!("{head} {after}")
-        };
+        let combined = if head.is_empty() { tail } else { format!("{head} {tail}") };
         collapse_adjacent_dupes(&combined)
     } else {
         // "meet at 5pm instead of 4pm": keep the first option, drop the rest
         before.to_string()
     };
-    // ponytail: heuristic last-word drop + adjacent-dupe collapse; phrase boundaries,
+    // ponytail: heuristic value-drop + adjacent-dupe collapse; phrase boundaries,
     // correction chains, and non-correctional "no/wait/actually" aren't distinguished
     ResolveOutcome::Resolved(resolved)
+}
+
+fn strip_leading_markers(text: &str) -> String {
+    static LEAD_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = LEAD_RE.get_or_init(|| {
+        let phrases = [
+            "i mean", "i meant", "no wait", "no, wait", "oh wait",
+            "scratch that", "forget that", "not that", "not this",
+            "sorry", "wait", "actually", "no", "oh",
+        ];
+        let alts: Vec<String> = phrases.iter().map(|p| regex::escape(p)).collect();
+        regex::Regex::new(&format!(r"(?i)^\s*(?:{})\s*[\s,]+", alts.join("|"))).unwrap()
+    });
+    let mut s = text.to_string();
+    loop {
+        let next = re.replace(&s, "").into_owned();
+        if next == s {
+            break;
+        }
+        s = next;
+    }
+    s
 }
 
 fn marker_re(markers: &[&str]) -> regex::Regex {
@@ -121,14 +147,40 @@ fn collapse_adjacent_dupes(s: &str) -> String {
     out.join(" ")
 }
 
+fn remove_hallucination_loops(text: &str) -> String {
+    // ponytail: whitespace-token runs; collapses a token repeated 3+ times
+    // consecutively to one. Won't catch 2-token loops ("thank you thank you")
+    // or non-adjacent repeats — those need the LLM path, not a regex.
+    let mut runs: Vec<Vec<&str>> = Vec::new();
+    for w in text.split_whitespace() {
+        match runs.last_mut() {
+            Some(last) if last.last().is_some_and(|p| p.eq_ignore_ascii_case(w)) => last.push(w),
+            _ => runs.push(vec![w]),
+        }
+    }
+    let mut out: Vec<&str> = Vec::new();
+    for run in runs {
+        if run.len() >= 3 {
+            out.push(run[0]);
+        } else {
+            out.extend(run);
+        }
+    }
+    out.join(" ")
+}
+
 fn basic_cleanup(text: &str, config: &Config) -> String {
+    let text = remove_hallucination_loops(text);
+
     let text = if config.remove_fillers {
-        remove_fillers(text)
+        remove_fillers(&text)
     } else {
-        text.to_string()
+        text
     };
 
     let text = convert_spoken_emails(&text);
+
+    let text = correct_dictionary_terms(&text, &config.dictionary);
 
     if config.auto_punctuation {
         add_punctuation(&text)
@@ -161,9 +213,10 @@ fn convert_spoken_emails(text: &str) -> String {
     }).to_string();
 
     // Step 2: convert email patterns
-    // "john at gmail dot com" (full: user@domain.tld)
+    // "john at gmail dot com" (full: user@domain.tld).
+    // TLD is letters-only so times ("at 7.45") and decimals never become emails.
     let re_dot = RE_DOT.get_or_init(|| regex::Regex::new(
-        r"(?i)\b(\w+)\s+at\s+(?:the\s+)?(\w+(?:\s\w+)*?)\s+dot\s+(\w+)\b"
+        r"(?i)\b(\w+)\s+at\s+(?:the\s+)?(\w+(?:\s\w+)*?)\s+dot\s+([a-zA-Z]{2,})\b"
     ).unwrap());
     let text = re_dot.replace_all(&text, |caps: &regex::Captures| {
         let user = &caps[1];
@@ -174,7 +227,7 @@ fn convert_spoken_emails(text: &str) -> String {
 
     // "john at the company.com" (period: user@domain.tld)
     let re_dot2 = RE_DOT2.get_or_init(|| regex::Regex::new(
-        r"(?i)\b(\w+)\s+at\s+(?:the\s+)?(\w+)\.(\w+)\b"
+        r"(?i)\b(\w+)\s+at\s+(?:the\s+)?(\w+)\.([a-zA-Z]{2,})\b"
     ).unwrap());
     let text = re_dot2.replace_all(&text, |caps: &regex::Captures| {
         let user = &caps[1];
@@ -183,9 +236,10 @@ fn convert_spoken_emails(text: &str) -> String {
         format!("{}@{}.{}", user, domain, tld)
     }).to_string();
 
-    // "john at gmail dot" (no TLD — Whisper dropped it) → john@gmail
+    // "john at gmail dot" (no TLD — Whisper dropped it) → john@gmail.
+    // Domain must contain a letter so "at 7 dot" (decimals/times) is never an email.
     let re_no_tld = RE_NO_TLD.get_or_init(|| regex::Regex::new(
-        r"(?i)\b(\w+)\s+at\s+(?:the\s+)?(\w+)\s+dot\b"
+        r"(?i)\b(\w+)\s+at\s+(?:the\s+)?(\w*[a-zA-Z]\w*)\s+dot\b"
     ).unwrap());
     re_no_tld.replace_all(&text, |caps: &regex::Captures| {
         let user = &caps[1];
@@ -236,15 +290,15 @@ fn cleanup_transcript(text: &str, config: &Config) -> Result<String, String> {
         .header("Authorization", format!("Bearer {}", config.api_key))
         .json(&body)
         .send()
-        .map_err(|e| format!("Enhance request failed: {e}"))?;
+        .map_err(|e| format!("[ENH-001] Cleanup request failed — check your internet. ({e})"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
-        return Err(format!("Enhance API error {status}: {body}"));
+        return Err(format!("[ENH-002] Cleanup service error {status}. ({body})"));
     }
 
-    let result: Response = resp.json().map_err(|e| format!("Failed to parse enhance response: {e}"))?;
+    let result: Response = resp.json().map_err(|e| format!("[ENH-003] Could not parse cleanup response. ({e})"))?;
 
     Ok(result.choices.into_iter().next().and_then(|c| c.message.content).unwrap_or_default())
 }
@@ -260,7 +314,74 @@ fn remove_fillers(text: &str) -> String {
     for re in regexes {
         result = re.replace_all(&result, "").into_owned();
     }
+    let result = strip_orphan_commas(&result);
     result.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn strip_orphan_commas(text: &str) -> String {
+    // deleting a filler from between punctuation leaves ", ," or ", ." — keep a
+    // comma only when it directly follows the previous word ("hello, world")
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if c == ',' && (i == 0 || chars[i - 1].is_whitespace()) {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn correct_dictionary_terms(text: &str, dictionary: &[String]) -> String {
+    if dictionary.is_empty() {
+        return text.to_string();
+    }
+    let terms: Vec<(String, String)> = dictionary.iter()
+        .filter(|t| t.chars().count() >= 5)
+        .map(|t| (t.clone(), t.to_lowercase()))
+        .collect();
+    if terms.is_empty() {
+        return text.to_string();
+    }
+    // ponytail: conservative fuzzy token swap — only near-misses within a tight
+    // edit distance are replaced ("LightJBM"->"LightGBM"); wildly garbled tokens
+    // ("QBundit"->"Optuna") stay as-is. Whisper's prompt bias is the real fix.
+    text.split_whitespace()
+        .map(|token| {
+            let stripped: String = token.chars().filter(|c| c.is_alphanumeric()).collect();
+            if stripped.chars().count() < 4 {
+                return token.to_string();
+            }
+            let low = stripped.to_lowercase();
+            for (term, tlower) in &terms {
+                let tlen = tlower.chars().count();
+                let max_dist = if tlen >= 8 { 2 } else { 1 };
+                if (low.chars().count() as isize - tlen as isize).abs() > 2 {
+                    continue;
+                }
+                if edit_distance(&low, tlower) <= max_dist {
+                    return term.clone();
+                }
+            }
+            token.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut cur = vec![i];
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur.push((prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
 }
 
 fn add_punctuation(text: &str) -> String {
@@ -287,6 +408,15 @@ mod tests {
             cleanup_model: String::new(),
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn remove_hallucination_loops_collapses_repeats() {
+        assert_eq!(remove_hallucination_loops("found output output output yes"), "found output yes");
+        assert_eq!(remove_hallucination_loops("luckily found output output output yes"), "luckily found output yes");
+        assert_eq!(remove_hallucination_loops("this is normal text"), "this is normal text");
+        assert_eq!(remove_hallucination_loops("very very good"), "very very good");
+        assert_eq!(remove_hallucination_loops("thank you thank you"), "thank you thank you");
     }
 
     #[test]
@@ -324,6 +454,74 @@ mod tests {
         assert_eq!(result, "hello world.");
     }
 
+    #[test]
+    fn filler_removal_does_not_leave_double_comma() {
+        let c = test_config();
+        assert_eq!(remove_fillers("tomorrow, you know, around"), "tomorrow, around");
+        assert_eq!(
+            postprocess("we should meet tomorrow, you know, around noon", &c),
+            "we should meet tomorrow, around noon."
+        );
+    }
+
+    #[test]
+    fn self_correction_strips_marker_and_number() {
+        let c = enhanced_config();
+        assert_eq!(
+            resolve_self_corrections("let's meet at 3 pm no wait i meant 4 pm at the coffee shop"),
+            ResolveOutcome::Resolved("let's meet at 4 pm at the coffee shop".into())
+        );
+        assert_eq!(
+            postprocess("let's meet at 3 pm no wait i meant 4 pm at the coffee shop", &c),
+            "let's meet at 4 pm at the coffee shop."
+        );
+    }
+
+    #[test]
+    fn self_correction_with_only_i_meant_marker() {
+        let c = enhanced_config();
+        assert_eq!(
+            resolve_self_corrections("let's meet at 3 pm i meant 4 pm at the coffee shop"),
+            ResolveOutcome::Resolved("let's meet at 4 pm at the coffee shop".into())
+        );
+        assert_eq!(
+            postprocess("let's meet at 3 pm i meant 4 pm at the coffee shop", &c),
+            "let's meet at 4 pm at the coffee shop."
+        );
+        // a second "i meant" past a value is a genuine chain, not resolvable
+        assert_eq!(
+            resolve_self_corrections("meet at 3 no wait 4 i meant 5"),
+            ResolveOutcome::Ambiguous
+        );
+    }
+
+    #[test]
+    fn dictionary_corrects_near_misses_only() {
+        let dict = vec!["LightGBM".into(), "Optuna".into(), "Agmarknet".into()];
+        assert_eq!(
+            correct_dictionary_terms("I used LightJBM for training", &dict),
+            "I used LightGBM for training"
+        );
+        // garbled beyond a tight edit distance -> left alone, not corrupted
+        assert_eq!(
+            correct_dictionary_terms("tuned with QBundit and Octono", &dict),
+            "tuned with QBundit and Octono"
+        );
+        // common words are protected
+        assert_eq!(
+            correct_dictionary_terms("the park near the store", &dict),
+            "the park near the store"
+        );
+    }
+
+    #[test]
+    fn dictionary_applies_through_postprocess() {
+        let mut c = test_config();
+        c.dictionary = vec!["LightGBM".into()];
+        let result = postprocess("I used LightJBM for training", &c);
+        assert_eq!(result, "I used LightGBM for training.");
+    }
+
     fn enhanced_config() -> Config {
         let mut c = test_config();
         c.cleanup_model = "llama-3.1-8b-instant".into();
@@ -337,7 +535,7 @@ mod tests {
             resolve_self_corrections("meet at 6pm no wait 7pm"),
             ResolveOutcome::Resolved("meet at 7pm".into())
         );
-        assert_eq!(postprocess("meet at 6pm no wait 7pm", &c), "meet at 7pm");
+        assert_eq!(postprocess("meet at 6pm no wait 7pm", &c), "meet at 7pm.");
     }
 
     #[test]
@@ -383,5 +581,7 @@ mod tests {
         assert_eq!(convert_spoken_emails("user at university dot edu dot in"), "user@university.edu.in");
         assert_eq!(convert_spoken_emails("user at university.edu dot in"), "user@university.edu.in");
         assert_eq!(convert_spoken_emails("user at company dot co dot uk"), "user@company.co.uk");
+        assert_eq!(convert_spoken_emails("the exam at 7.45 in the morning"), "the exam at 7.45 in the morning");
+        assert_eq!(convert_spoken_emails("meet at 7 dot 45"), "meet at 7 dot 45");
     }
 }
