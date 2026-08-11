@@ -1,0 +1,5 @@
+{
+  "bundle": {
+    "resources": ["WebView2Loader.dll"]
+  }
+}
