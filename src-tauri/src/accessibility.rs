@@ -34,9 +34,13 @@ extern "C" {
 /// On non‑macOS platforms this always returns `true` (no permission required).
 pub fn is_trusted() -> bool {
     #[cfg(target_os = "macos")]
-    unsafe { AXIsProcessTrusted() != 0 };
+    {
+        return unsafe { AXIsProcessTrusted() != 0 };
+    }
     #[cfg(not(target_os = "macos"))]
-    true
+    {
+        return true;
+    }
 }
 
 /// Fires the system Accessibility permission prompt once.
