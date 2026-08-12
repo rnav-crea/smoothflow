@@ -57,8 +57,8 @@ fn config_dir() -> PathBuf {
         let _ = std::fs::create_dir_all(&p);
         p
     } else {
-        // ponytail: fallback to cwd if APPDATA not set (unlikely on Windows)
-        std::env::current_dir().unwrap_or_default()
+        // ponytail: fallback to home dir if APPDATA not set (macOS / Linux)
+        std::env::home_dir().unwrap_or_default().join("SmoothFlow")
     }
 }
 
@@ -89,7 +89,7 @@ impl Default for Config {
             auto_paste: true,
             launch_on_startup: false,
             dictionary: Vec::new(),
-            hotkey: "Ctrl+Space".into(),
+            hotkey: "Meta+Space".into(),
             overlay_position: "bottom".into(),
         }
     }

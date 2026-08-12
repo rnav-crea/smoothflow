@@ -36,8 +36,8 @@ impl History {
             let _ = std::fs::create_dir_all(&p);
             p
         } else {
-            // ponytail: fallback to cwd if APPDATA not set (unlikely on Windows)
-            std::env::current_dir().unwrap_or_default()
+            // ponytail: fallback to home dir if APPDATA not set (macOS / Linux)
+            std::env::home_dir().unwrap_or_default().join("SmoothFlow")
         }
     }
 

@@ -1,3 +1,4 @@
+mod accessibility;
 mod audio;
 pub mod config;
 mod history;
@@ -136,6 +137,7 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
 #[tauri::command]
 fn start_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<(), String> {
     sf_log!("CMD: start_recording called");
+    accessibility::request_once();
     let mut recorder = state.recorder.lock().unwrap();
     if recorder.is_recording() {
         sf_log!("CMD: already recording, ignoring");
@@ -307,6 +309,7 @@ pub fn run() {
                     sf_log!("HOTKEY: event state={:?}", event.state);
                     match event.state {
                         ShortcutState::Pressed => {
+                            accessibility::request_once();
                             let started = {
                                 let mut recorder = state.recorder.lock().unwrap();
                                 if recorder.is_recording() {
