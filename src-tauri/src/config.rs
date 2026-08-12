@@ -151,7 +151,7 @@ mod tests {
         assert!(!c.launch_on_startup);
         assert!(c.api_key.is_empty());
         assert!(c.dictionary.is_empty());
-        assert_eq!(c.hotkey, "Ctrl+Space");
+        assert_eq!(c.hotkey, "Meta+Space");
         assert_eq!(c.overlay_position, "bottom");
     }
 
