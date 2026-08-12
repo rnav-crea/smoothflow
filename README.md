@@ -10,16 +10,27 @@ vanilla HTML/CSS/JS frontend.
 
 ## Downloads
 
-Installers are published on the [GitHub Releases page](https://github.com/rnav-crea/smoothflow/releases/latest)
-when a new version is tagged. Pick the one for your OS:
+Installers are published to the [GitHub Releases page](https://github.com/rnav-crea/smoothflow/releases/latest)
+when a new version is tagged. The buttons below download the latest installer directly:
+
+<a href="https://github.com/rnav-crea/smoothflow/releases/latest/download/SmoothFlow-Windows-x64-setup.exe">
+  <img src="https://img.shields.io/badge/Download_for-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows">
+</a>
+<a href="https://github.com/rnav-crea/smoothflow/releases/latest/download/SmoothFlow-macOS-arm64.dmg">
+  <img src="https://img.shields.io/badge/Download_for-macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS">
+</a>
+<a href="https://github.com/rnav-crea/smoothflow/releases/latest/download/SmoothFlow-Linux-x86_64.AppImage">
+  <img src="https://img.shields.io/badge/Download_for-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download for Linux">
+</a>
 
 | Platform | Installer | Notes |
 |----------|-----------|-------|
-| **Windows** | `SmoothFlow_<version>_x64-setup.exe` (or `.msi`) | x86_64. WebView2 runtime is auto-installed if missing. |
-| **macOS** | `SmoothFlow_<version>_aarch64.dmg` (Apple Silicon) or `_x86_64.dmg` | Unsigned: first launch needs **right-click → Open**. You'll be asked for **Accessibility permission** on first dictation. |
-| **Linux** | `.deb` (Debian/Ubuntu) or `.AppImage` (any distro) | Requires `libwebkit2gtk-4.1`; `sudo apt install` it if launch complains. |
+| **Windows** | `SmoothFlow-Windows-x64-setup.exe` (or `.msi`) | x86_64. WebView2 runtime is auto-installed if missing. |
+| **macOS** | `SmoothFlow-macOS-arm64.dmg` (Apple Silicon) | Unsigned: first launch needs **right-click → Open**. You'll be asked for **Accessibility permission** on first dictation. |
+| **Linux** | `SmoothFlow-Linux-x86_64.AppImage` (or `.deb`) | Requires `libwebkit2gtk-4.1`; `sudo apt install` it if launch complains. |
 
-> Not sure which macOS build? Use `aarch64` on Apple Silicon (M1/M2/M3), `x86_64` on Intel Macs.
+> The buttons link to the **latest** release, so they always fetch the current version — no need to update them per release.
+> Intel Macs (x86_64) aren't shipped yet; build from source for now (see Development below).
 
 ---
 
