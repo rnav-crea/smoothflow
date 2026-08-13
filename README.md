@@ -137,6 +137,8 @@ The main window shows two panels so you can watch the magic:
 
 ## Privacy
 
+Full policy in [PRIVACY.md](PRIVACY.md).
+
 - Your **voice audio is sent to Groq's cloud** for transcription (this is how it works).
 - Your **API key is stored in your OS credential manager**, not in any settings file.
 - SmoothFlow has no local/offline speech recognition.
