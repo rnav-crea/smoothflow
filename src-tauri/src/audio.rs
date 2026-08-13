@@ -280,6 +280,10 @@ mod tests {
         assert_eq!(trimmed.len(), 100);
     }
 
+    // Opens a real microphone via cpal. On macOS CI runners the device that
+    // gets exposed can make CoreAudio abort() the process instead of returning
+    // an error, so this is only safe on platforms without a flaky mic device.
+    #[cfg_attr(target_os = "macos", ignore = "cpal mic init can SIGABRT the process on macOS CI runners")]
     #[test]
     fn start_fails_without_mic() {
         // This runs on any machine - no mic needed to test error handling
