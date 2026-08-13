@@ -59,7 +59,11 @@ pub fn postprocess(text: &str, config: &Config) -> String {
         // dictionary, punctuation) — just not another resolution attempt
         ResolveOutcome::Resolved(fixed) => basic_cleanup(&fixed, config),
         ResolveOutcome::NoCorrection => basic_cleanup(text, config),
-        ResolveOutcome::Ambiguous => basic_cleanup(text, config),
+        ResolveOutcome::Ambiguous => match cleanup_transcript(text, config) {
+            Ok(cleaned) if !cleaned.trim().is_empty() => basic_cleanup(&cleaned, config),
+            // LLM is optional: silent fallback so dictation never breaks on service failure
+            _ => basic_cleanup(text, config),
+        },
     }
 }
 
