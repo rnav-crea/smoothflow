@@ -50,6 +50,10 @@ when a new version is tagged. The buttons below download the latest installer di
 ### Windows
 
 1. Run `SmoothFlow_<version>_x64-setup.exe` and follow the installer.
+   If Windows SmartScreen warns *"isn't commonly downloaded"*, click **More info → Run anyway**
+   — SmoothFlow is unsigned, so this is expected on first install. Open-source alone doesn't
+   remove this; it goes away once the build is signed (paid code-signing certificate or Azure
+   Trusted Signing) or after enough people install and it earns SmartScreen's trust.
 2. Launch SmoothFlow from the Start menu. It sits in the system tray.
 
 ### macOS
@@ -155,3 +159,10 @@ npm run tauri build    # production installer for the current OS
 ```
 
 See `AGENTS.md` for the build prerequisites, architecture, and project conventions.
+
+---
+
+## License
+
+[MIT](LICENSE) — free to use, modify, and distribute, including in commercial
+projects. Third-party components (Tauri, cpal, enigo, etc.) have their own licenses.
