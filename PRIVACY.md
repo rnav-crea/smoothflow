@@ -6,20 +6,26 @@ This policy explains what SmoothFlow collects, where it goes, and what is stored
 on your machine. SmoothFlow is an open-source application; this policy describes
 the app as it is distributed.
 
+## No accounts, no sign-up required
+
+SmoothFlow requires **no account, no sign-up, no personal information**. You can
+fork it, build it, and use it without giving us any data.
+
 ## What we collect and where it goes
 
-- **Voice audio and transcribed text** are sent to the Groq cloud API (or the
-  API endpoint you configure in Settings) for speech-to-text transcription and
-  optional cleanup. This is how dictation works — there is **no local/offline
-  speech recognition**.
-- The audio and transcript are processed by the provider you configured and are
-  not stored by us. We do not maintain servers of our own.
+- **Voice audio and transcribed text** are sent to the AI cloud API endpoint you
+  configure in Settings (the default is configured to your own API key) for
+  speech-to-text transcription and optional cleanup. This is how dictation works
+  — there is **no local/offline speech recognition**.
+- The audio and transcript are processed by the API provider you configured and
+  are **not stored by us**. We do not maintain servers of our own, and we never
+  see your audio.
 
 ## What is stored on your machine
 
-- **API key**: stored in your operating system's credential manager (Windows
-  Credential Manager, macOS Keychain, Linux Secret Service). It is never written
-  to a settings file.
+- **API key**: **your own key**, stored in your operating system's credential
+  manager (Windows Credential Manager, macOS Keychain, Linux Secret Service). It
+  is never written to a settings file and is never seen by us.
 - **Configuration**: your settings are stored locally in a JSON file
   (`%APPDATA%\SmoothFlow\smoothflow.json` on Windows, `~/SmoothFlow/` on
   macOS/Linux).
@@ -37,9 +43,8 @@ the app as it is distributed.
 ## Third parties
 
 The only external service is the transcription/cleanup API endpoint you
-configure. When using the default, your audio is handled under
-[Groq's privacy policy](https://www.groq.com/legal/privacy-policy). Review the
-policy of any other provider you configure.
+configure. Your audio is handled under that provider's privacy policy — review
+the policy of the provider you choose.
 
 ## Open source
 
