@@ -71,12 +71,18 @@ fn enigo_text(text: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    // Real clipboard/keyboard access via arboard+enigo. On macOS CI runners the
+    // test binary can appear Accessibility-trusted while having no attached
+    // WindowServer session, and NSPasteboard then aborts the whole process.
+    // These are OS-integration smoke tests — keep them for real desktops.
+    #[cfg_attr(target_os = "macos", ignore = "clipboard access can SIGABRT the process on macOS CI runners")]
     #[test]
     fn type_text_accepts_empty_string() {
         let result = type_text("");
         let _ = result;
     }
 
+    #[cfg_attr(target_os = "macos", ignore = "clipboard access can SIGABRT the process on macOS CI runners")]
     #[test]
     fn type_text_accepts_short_string() {
         let result = type_text("hi");
@@ -86,6 +92,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(target_os = "macos", ignore = "clipboard access can SIGABRT the process on macOS CI runners")]
     #[test]
     fn type_text_handles_special_chars() {
         let result = type_text("Hello, world! 123.");
