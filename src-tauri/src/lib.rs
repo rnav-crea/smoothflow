@@ -170,6 +170,7 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
     let _ = app.emit("recording-state", false);
     
     let config = state.config.lock().unwrap();
+    let t0 = std::time::Instant::now();
     sf_log!("CMD: transcribing...");
     let raw = match transcription::transcribe(&samples, sample_rate, &config) {
         Ok(r) => r,
@@ -178,9 +179,11 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
             return Err(e);
         }
     };
-    sf_log!("CMD: transcript received: {:?}", &raw[..raw.len().min(50)]);
+    sf_log!("CMD: transcript received in {:?}: {:?}", t0.elapsed(), &raw[..raw.len().min(50)]);
     let _ = app.emit("raw-transcript", raw.clone());
+    let t1 = std::time::Instant::now();
     let text = postprocess::postprocess(&raw, &config);
+    sf_log!("CMD: cleanup took {:?}", t1.elapsed());
 
     // Persist non-empty dictations to history (independent of auto-paste)
     {
@@ -195,12 +198,13 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
     
     if !text.is_empty() {
         if config.auto_paste {
+            let t2 = std::time::Instant::now();
             sf_log!("CMD: typing text...");
             if let Err(e) = text_injection::type_text(&text) {
                 show_error(&app, "transcription-error", e.clone());
                 return Err(e);
             }
-            sf_log!("CMD: typed OK");
+            sf_log!("CMD: typed OK in {:?}", t2.elapsed());
         } else {
             sf_log!("CMD: auto-paste disabled, showing in transcript only");
         }
