@@ -82,7 +82,7 @@ impl Default for Config {
         Self {
             api_base_url: "https://api.groq.com/openai/v1".into(),
             api_key: String::new(),
-            model: "whisper-large-v3".into(),
+            model: "whisper-large-v3-turbo".into(),
             cleanup_model: "llama-3.1-8b-instant".into(),
             auto_punctuation: true,
             remove_fillers: true,
@@ -143,7 +143,7 @@ mod tests {
     fn default_values() {
         let c = Config::default();
         assert_eq!(c.api_base_url, "https://api.groq.com/openai/v1");
-        assert_eq!(c.model, "whisper-large-v3");
+        assert_eq!(c.model, "whisper-large-v3-turbo");
         assert_eq!(c.cleanup_model, "llama-3.1-8b-instant");
         assert!(c.auto_punctuation);
         assert!(c.remove_fillers);

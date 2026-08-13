@@ -78,7 +78,7 @@ when a new version is tagged. The buttons below download the latest installer di
 3. Paste the key into **API Key** in Settings.
 4. Keep the defaults:
    - **API Base URL**: `https://api.groq.com/openai/v1`
-   - **Model**: `whisper-large-v3`
+   - **Model**: `whisper-large-v3-turbo`
 5. Close Settings — changes save automatically.
 
 ---
@@ -106,7 +106,7 @@ The main window shows two panels so you can watch the magic:
 | Setting | What it does |
 |---------|--------------|
 | **API Base URL** | Where transcription requests go. Leave at Groq's URL unless you use another OpenAI-compatible provider. |
-| **Model** | The speech-to-text model. `whisper-large-v3` is the recommended default. |
+| **Model** | The speech-to-text model. `whisper-large-v3-turbo` is the recommended default. |
 | **Cleanup Model** | Optional LLM used to fix self-corrections. Leave as `llama-3.1-8b-instant`. |
 | **API Key** | Your Groq key. Stored in your OS credential manager (Windows Credential Manager, macOS Keychain, Linux Secret Service) — never in a file. |
 | **Auto Punctuation** | Adds ending punctuation (periods) to sentences. |
@@ -116,6 +116,21 @@ The main window shows two panels so you can watch the magic:
 | **Hotkey** | The global dictation key, e.g. `Ctrl+Space`. Format: modifier + key (`Ctrl`, `Alt`, `Shift`, `Win`/`Cmd`). |
 | **Overlay at Top** | Shows the recording pill at the top of the screen. |
 | **Personal Dictionary** | Add names, jargon, or terms the transcriber should recognize. |
+
+## Free transcription endpoints
+
+SmoothFlow works with any OpenAI-compatible `/audio/transcriptions` endpoint —
+you provide your own API key, and the audio goes to the provider you choose.
+A few free options to try:
+
+| Provider | Base URL | Model | Notes |
+|----------|----------|-------|-------|
+| **Groq** | `https://api.groq.com/openai/v1` | `whisper-large-v3-turbo` | Default. Fast, generous free tier. |
+| **Groq (alt)** | `https://api.groq.com/openai/v1` | `whisper-large-v3` | Original full model; try both to compare accuracy. |
+| **OpenRouter** | `https://openrouter.ai/api/v1` | `openai/whisper-1` (varies) | Free models available; check current list. |
+
+Add the base URL + model under **Settings → API Base URL / Model**, paste your key,
+and dictate. There's no lock-in — switching endpoints is a settings change.
 
 ---
 
