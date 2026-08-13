@@ -128,6 +128,7 @@ A few free options to try:
 | **Groq** | `https://api.groq.com/openai/v1` | `whisper-large-v3-turbo` | Default. Fast, generous free tier. |
 | **Groq (alt)** | `https://api.groq.com/openai/v1` | `whisper-large-v3` | Original full model; try both to compare accuracy. |
 | **OpenRouter** | `https://openrouter.ai/api/v1` | `openai/whisper-1` (varies) | Free models available; check current list. |
+| **NVIDIA NIM** | `https://integrate.api.nvidia.com/v1` | `nvidia/parakeet-tdt-0.6b-v2` | Free credits on signup; Parakeet = low-hallucination ASR. Stricter rate limit (40 req/min). |
 
 Add the base URL + model under **Settings → API Base URL / Model**, paste your key,
 and dictate. There's no lock-in — switching endpoints is a settings change.
