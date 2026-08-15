@@ -68,6 +68,10 @@ pub struct Config {
     pub api_key: String,
     pub model: String,
     pub cleanup_model: String,
+    // old smoothflow.json files predate this field — load them with the new
+    // default instead of failing the whole parse
+    #[serde(default = "default_cleanup_fallback_model")]
+    pub cleanup_fallback_model: String,
     pub auto_punctuation: bool,
     pub remove_fillers: bool,
     pub auto_paste: bool,
@@ -77,13 +81,18 @@ pub struct Config {
     pub overlay_position: String,
 }
 
+fn default_cleanup_fallback_model() -> String {
+    "qwen/qwen3.6-27b".into()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             api_base_url: "https://api.groq.com/openai/v1".into(),
             api_key: String::new(),
-            model: "whisper-large-v3-turbo".into(),
-            cleanup_model: "llama-3.1-8b-instant".into(),
+            model: "whisper-large-v3".into(),
+            cleanup_model: "openai/gpt-oss-20b".into(),
+            cleanup_fallback_model: "qwen/qwen3.6-27b".into(),
             auto_punctuation: true,
             remove_fillers: true,
             auto_paste: true,
@@ -143,8 +152,9 @@ mod tests {
     fn default_values() {
         let c = Config::default();
         assert_eq!(c.api_base_url, "https://api.groq.com/openai/v1");
-        assert_eq!(c.model, "whisper-large-v3-turbo");
-        assert_eq!(c.cleanup_model, "llama-3.1-8b-instant");
+        assert_eq!(c.model, "whisper-large-v3");
+        assert_eq!(c.cleanup_model, "openai/gpt-oss-20b");
+        assert_eq!(c.cleanup_fallback_model, "qwen/qwen3.6-27b");
         assert!(c.auto_punctuation);
         assert!(c.remove_fillers);
         assert!(c.auto_paste);
@@ -162,6 +172,7 @@ mod tests {
             api_key: "sk-test".into(),
             model: "whisper-1".into(),
             cleanup_model: "gpt-4o-mini".into(),
+            cleanup_fallback_model: String::new(),
             auto_punctuation: false,
             remove_fillers: false,
             auto_paste: false,
@@ -181,8 +192,17 @@ mod tests {
     }
 
     #[test]
-    fn load_missing_file_returns_default() {
-        let path = Config::path();
+    fn old_json_without_fallback_field_loads_with_default() {
+        // Config files written before cleanup_fallback_model existed must
+        // deserialize with the new default rather than failing the whole parse.
+        let json = r#"{"api_base_url":"https://api.groq.com/openai/v1","api_key":"","model":"whisper-large-v3-turbo","cleanup_model":"openai/gpt-oss-20b","auto_punctuation":true,"remove_fillers":true,"auto_paste":true,"launch_on_startup":false,"dictionary":[],"hotkey":"Meta+Space","overlay_position":"bottom"}"#;
+        let c: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(c.cleanup_fallback_model, "qwen/qwen3.6-27b");
+        assert_eq!(c.cleanup_model, "openai/gpt-oss-20b");
+    }
+
+    #[test]
+    fn load_missing_file_returns_default() {        let path = Config::path();
         let backup = std::fs::read_to_string(&path).ok();
         let _ = std::fs::remove_file(&path);
         let c = Config::load();
@@ -216,6 +236,7 @@ mod tests {
             api_key: "key-roundtrip".into(),
             model: "whisper-custom".into(),
             cleanup_model: String::new(),
+            cleanup_fallback_model: "qwen-fallback".into(),
             auto_punctuation: false,
             remove_fillers: true,
             auto_paste: true,
@@ -229,6 +250,7 @@ mod tests {
         assert_eq!(loaded.api_base_url, "https://custom.example.com");
         assert!(loaded.api_key.is_empty(), "api_key must not persist to disk (VULN-003)");
         assert_eq!(loaded.model, "whisper-custom");
+        assert_eq!(loaded.cleanup_fallback_model, "qwen-fallback");
         assert!(!loaded.auto_punctuation);
         assert!(loaded.remove_fillers);
         assert!(loaded.auto_paste);

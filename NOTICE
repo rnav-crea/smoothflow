@@ -1,0 +1,9 @@
+SmoothFlow incorporates portions of FreeFlow (https://github.com/zachlatta/freeflow),
+Copyright (c) 2026 Zach Latta, licensed under the MIT License.
+
+The post-processing system prompt, hallucination filter, model fallback and
+rate-limit cooldown logic in src-tauri/src/postprocess.rs and
+src-tauri/src/transcription.rs are adapted from FreeFlow's
+PostProcessingService.swift and TranscriptionService.swift.
+
+Full MIT license text is reproduced in LICENSE.

@@ -23,7 +23,8 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut}
 macro_rules! sf_log {
     ($($arg:tt)*) => {
         if cfg!(debug_assertions) {
-            println!($($arg)*);
+            let line = format!($($arg)*);
+            println!("{line}");
         }
     };
 }
@@ -182,7 +183,7 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
     sf_log!("CMD: transcript received in {:?}: {:?}", t0.elapsed(), &raw[..raw.len().min(50)]);
     let _ = app.emit("raw-transcript", raw.clone());
     let t1 = std::time::Instant::now();
-    let text = postprocess::postprocess(&raw, &config);
+                                    let text = postprocess::postprocess_with_context(&raw, &config, &transcription::active_window_title());
     sf_log!("CMD: cleanup took {:?}", t1.elapsed());
 
     // Persist non-empty dictations to history (independent of auto-paste)
@@ -373,7 +374,7 @@ pub fn run() {
                                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     let raw = transcription::transcribe(&samples, sample_rate, &config)?;
                                     let _ = app_clone.emit("raw-transcript", raw.clone());
-                                    let text = postprocess::postprocess(&raw, &config);
+let text = postprocess::postprocess_with_context(&raw, &config, &transcription::active_window_title());
                                     let st = app_clone.state::<AppState>();
                                     let mut h = st.history.lock().unwrap();
                                     if !text.is_empty() {

@@ -42,6 +42,12 @@ mod active_window {
     }
 }
 
+/// Foreground window title (Win32), empty on non-Windows and when none is
+/// readable. Used as a spelling-hint context for the cleanup LLM.
+pub fn active_window_title() -> String {
+    active_window::title()
+}
+
 fn extract_terms(title: &str) -> Vec<String> {
     let noise = ["gmail", "slack", "discord", "chrome", "firefox", "edge",
         "outlook", "whatsapp", "telegram", "notion", "cursor", "vscode",
@@ -76,6 +82,54 @@ fn rms(samples: &[f32]) -> f32 {
 }
 
 const TARGET_RMS: f32 = 0.05;
+
+/// Models that return per-segment `no_speech_prob` metadata with
+/// `response_format=verbose_json`; anything else (e.g. gpt-4o-transcribe)
+/// only supports plain `json`.
+fn response_format(model: &str) -> &'static str {
+    const VERBOSE_JSON_MODELS: &[&str] = &["whisper-large-v3", "whisper-large-v3-turbo", "whisper-1"];
+    let m = model.trim().to_lowercase();
+    if VERBOSE_JSON_MODELS.contains(&m.as_str()) {
+        "verbose_json"
+    } else {
+        "json"
+    }
+}
+
+/// Whisper hallucination phrases on silence/background noise (from FreeFlow,
+/// MIT). Exact-match on normalized text only — the caller gates on
+/// `no_speech_prob` so real user speech is never filtered.
+const HALLUCINATION_PHRASES: &[&str] = &[
+    "thank you",
+    "thank you for watching",
+    "thank you very much",
+    "thank you so much",
+    "thanks for watching",
+    "please subscribe",
+    "like and subscribe",
+    "subtitles by",
+    "subtitles by the amara.org community",
+    "you",
+];
+
+/// Lowercase, strip leading/trailing whitespace and non-alphanumeric chars.
+fn normalize_hallucination_text(text: &str) -> String {
+    text.trim()
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase()
+}
+
+/// True only when the normalized text is a known hallucination phrase AND the
+/// first segment's `no_speech_prob` is >= 0.1. Missing/None metadata → never
+/// filter (plain-json providers).
+fn is_hallucination(text: &str, no_speech_prob: Option<f64>) -> bool {
+    match no_speech_prob {
+        Some(p) if p >= 0.1 => HALLUCINATION_PHRASES
+            .iter()
+            .any(|h| normalize_hallucination_text(text) == *h),
+        _ => false,
+    }
+}
 
 fn normalize_gain(samples: &[f32]) -> Vec<f32> {
     let level = rms(samples);
@@ -158,6 +212,7 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
     let form = reqwest::blocking::multipart::Form::new()
         .part("file", part)
         .text("model", config.model.clone())
+        .text("response_format", response_format(&config.model))
         .text("language", "en")
         .text("prompt", prompt);
 
@@ -186,12 +241,31 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
     #[derive(serde::Deserialize)]
     struct WhisperResponse {
         text: String,
+        #[serde(default)]
+        segments: Vec<Segment>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Segment {
+        #[serde(rename = "no_speech_prob")]
+        no_speech_prob: Option<f64>,
     }
 
     let whisper_resp: WhisperResponse =
         resp.json().map_err(|e| format!("[TXN-007] Could not parse the response. ({e})"))?;
 
-    Ok(whisper_resp.text)
+    // Hallucination filter: Whisper emits "thank you"/"please subscribe"-style
+    // phrases on silence/background noise. Only filter when verbose_json gave
+    // us per-segment metadata and it agrees this was probably not speech.
+    let first_no_speech_prob = whisper_resp
+        .segments
+        .first()
+        .and_then(|seg| seg.no_speech_prob);
+    if is_hallucination(&whisper_resp.text, first_no_speech_prob) {
+        Ok(String::new())
+    } else {
+        Ok(whisper_resp.text)
+    }
 }
 
 fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
@@ -253,5 +327,40 @@ mod tests {
         assert!(rms(&boosted) > before * 2.0, "quiet audio should still be boosted");
         assert!(rms(&boosted) < before * 3.0, "boost must respect the 2.5x cap");
         assert!(boosted.iter().all(|s| s.abs() <= 1.0));
+    }
+
+    #[test]
+    fn response_format_uses_verbose_json_for_whisper_models() {
+        for model in ["whisper-large-v3", "whisper-large-v3-turbo", "whisper-1"] {
+            assert_eq!(response_format(model), "verbose_json", "model: {model}");
+        }
+        // case/whitespace insensitive
+        assert_eq!(response_format("  WHISPER-LARGE-V3 "), "verbose_json");
+    }
+
+    #[test]
+    fn response_format_falls_back_to_json_for_other_models() {
+        for model in ["gpt-4o-transcribe", "whisper-custom", ""] {
+            assert_eq!(response_format(model), "json", "model: {model}");
+        }
+    }
+
+    #[test]
+    fn hallucination_filter_gated_on_no_speech_prob() {
+        // Phrase + high no_speech_prob (silence) → filtered
+        assert!(is_hallucination("Thank you!", Some(0.9)));
+        assert!(is_hallucination("  please subscribe  ", Some(0.5)));
+        // Same phrase + low prob (real speech) → kept
+        assert!(!is_hallucination("Thank you", Some(0.01)));
+        // Non-phrase text → kept regardless of prob
+        assert!(!is_hallucination("I need the quarterly report by Friday", Some(0.9)));
+        // Missing metadata (plain json) → never filtered
+        assert!(!is_hallucination("thank you", None));
+    }
+
+    #[test]
+    fn normalize_hallucination_text_strips_punctuation_and_case() {
+        assert_eq!(normalize_hallucination_text("  \"Thank You,\"  "), "thank you");
+        assert_eq!(normalize_hallucination_text("YOU."), "you");
     }
 }
