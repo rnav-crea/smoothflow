@@ -63,6 +63,21 @@ fn extract_terms(title: &str) -> Vec<String> {
         .collect()
 }
 
+/// Map a non-success HTTP status to the TXN error message, appending the
+/// trimmed response body as detail when present. Shared by `verify_api`.
+fn error_for_status(status: reqwest::StatusCode, body: &str) -> String {
+    let code = match status.as_u16() {
+        401 => "[TXN-003] Invalid API key (401). Check your key in Settings.",
+        404 => "[TXN-004] Model or endpoint not found (404). Check your API Base URL in Settings.",
+        429 => "[TXN-005] Rate limited (429). Wait a moment and try again.",
+        s if s >= 500 => "[TXN-006] Server error — try again in a minute.",
+        _ => "[TXN-002] API request failed.",
+    };
+    let trimmed = body.trim();
+    let detail = if trimmed.is_empty() { String::new() } else { format!(" ({trimmed})") };
+    format!("{code}{detail}")
+}
+
 fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -136,9 +151,9 @@ fn normalize_gain(samples: &[f32]) -> Vec<f32> {
     if level <= 0.0 {
         return samples.to_vec();
     }
-    // ponytail: 2.5x cap — an 8x cap amplified background noise along with
-    // quiet speech, which is exactly the input Whisper hallucinates on.
-    let gain = (TARGET_RMS / level).min(2.5);
+    // ponytail: 4x cap — raises quiet speech toward a usable level; a larger
+    // cap would also amplify background noise, which is input Whisper hallucinates on.
+    let gain = (TARGET_RMS / level).min(4.0);
     if gain <= 1.0 {
         return samples.to_vec();
     }
@@ -162,6 +177,23 @@ fn resample_to_16k(samples: &[f32], sample_rate: u32) -> Vec<f32> {
         out.push(a + (b - a) * frac);
     }
     out
+}
+
+/// Whisper prompt: optional free-text context line, then vocabulary hints.
+/// Empty context keeps the exact legacy "Vocabulary hints" string; both empty
+/// → empty prompt (current behavior).
+fn build_prompt(context: &str, terms: &[String]) -> String {
+    let context = context.trim();
+    let hints = if terms.is_empty() {
+        String::new()
+    } else {
+        format!(" Vocabulary hints for this audio: {}.", terms.join(", "))
+    };
+    if context.is_empty() {
+        hints.trim_start().to_string()
+    } else {
+        format!("Context: {}.{}", context, hints)
+    }
 }
 
 pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<String, String> {
@@ -203,11 +235,7 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
     ].iter().map(|s| s.to_string()));
     terms.sort();
     terms.dedup();
-    let prompt = if terms.is_empty() {
-        String::new()
-    } else {
-        format!("Vocabulary hints for this audio: {}.", terms.join(", "))
-    };
+    let prompt = build_prompt(&config.dictation_context, &terms);
 
     let form = reqwest::blocking::multipart::Form::new()
         .part("file", part)
@@ -268,6 +296,26 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
     }
 }
 
+/// Check that the configured API base URL + key are usable without recording
+/// audio: `GET {base_url}/models` with a Bearer token. Ok(()) on any 2xx.
+pub fn verify_api(base_url: &str, api_key: &str) -> Result<(), String> {
+    if api_key.is_empty() {
+        return Err("[TXN-001] No API key set. Add your API key in Settings.".into());
+    }
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let resp = http_client()
+        .get(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .map_err(|e| format!("[TXN-002] Network error — check your internet connection. ({e})"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        return Err(error_for_status(status, &body));
+    }
+    Ok(())
+}
+
 fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
     if samples.is_empty() {
         return Err("[TXN-008] No audio captured — try speaking closer to the microphone.".into());
@@ -323,10 +371,26 @@ mod tests {
             .collect();
         let before = rms(&quiet);
         let boosted = normalize_gain(&quiet);
-        // rms≈0.007 → gain 7.1, capped at 2.5 → ~2.5x boost
+        // rms≈0.007 → gain 7.1, capped at 4.0 → ~4x boost
         assert!(rms(&boosted) > before * 2.0, "quiet audio should still be boosted");
-        assert!(rms(&boosted) < before * 3.0, "boost must respect the 2.5x cap");
+        assert!(rms(&boosted) < before * 5.0, "boost must respect the 4x cap");
         assert!(boosted.iter().all(|s| s.abs() <= 1.0));
+    }
+
+    #[test]
+    fn prompt_includes_dictation_context() {
+        let terms = vec!["pencil".into(), "eraser".into()];
+        let p = build_prompt("drawing stationery", &terms);
+        assert!(p.contains("Context: drawing stationery."), "got: {p}");
+        assert!(p.contains("Vocabulary hints"), "got: {p}");
+        // empty context → legacy hint-only prompt, no "Context:"
+        let legacy = build_prompt("", &terms);
+        assert!(!legacy.contains("Context:"));
+        assert_eq!(legacy, "Vocabulary hints for this audio: pencil, eraser.");
+        // context only, no terms → clean single line
+        assert_eq!(build_prompt("  drawing stationery  ", &[]), "Context: drawing stationery.");
+        // neither → empty prompt
+        assert_eq!(build_prompt("", &[]), "");
     }
 
     #[test]
@@ -362,5 +426,17 @@ mod tests {
     fn normalize_hallucination_text_strips_punctuation_and_case() {
         assert_eq!(normalize_hallucination_text("  \"Thank You,\"  "), "thank you");
         assert_eq!(normalize_hallucination_text("YOU."), "you");
+    }
+
+    #[test]
+    fn error_for_status_maps_codes_and_appends_body() {
+        let mk = |u: u16, body: &str| error_for_status(reqwest::StatusCode::from_u16(u).unwrap(), body);
+        assert!(mk(401, "").contains("401"));
+        assert!(mk(404, "not found").contains("404") && mk(404, "not found").contains("(not found)"));
+        assert!(mk(429, "").contains("429"));
+        assert!(mk(500, "boom").contains("Server error") && mk(500, "boom").contains("(boom)"));
+        assert!(mk(418, "").contains("API request failed"));
+        // empty body → no detail suffix
+        assert!(!mk(401, "  ").contains("("));
     }
 }

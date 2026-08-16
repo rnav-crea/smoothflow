@@ -320,19 +320,115 @@ body {
   background: #58264b;
   /* border: 2px solid #b45b8e;
   border-radius: 4px; */
-  padding: 14px 18px;
+  padding: 10px 18px;
   color: #f4d1ba;
   font-size: 14px;
   line-height: 1.45;
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  min-height: 52px;
+  max-height: 52px;
+  overflow: hidden;
 }
 
 .dictation-text {
   flex: 1;
-  word-break: break-word;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* ── Dictation Checkbox ──────────────────────────────── */
+.dictation-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  border: 1.5px solid #b45b8e;
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.dictation-checkbox:checked {
+  background: #b45b8e;
+  border-color: #d478ac;
+}
+
+.dictation-checkbox:checked::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 0px;
+  width: 5px;
+  height: 9px;
+  border: 2px solid #fff;
+  border-top: none;
+  border-left: none;
+  transform: rotate(45deg);
+}
+
+.dictation-checkbox:hover {
+  border-color: #d478ac;
+}
+
+/* ── Bulk Delete Toolbar ─────────────────────────────── */
+.bulk-delete-bar {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: #3b1d32;
+  border-top: 2px solid #58264b;
+  border-bottom: 1px solid #58264b;
+  gap: 10px;
+  flex-shrink: 0;
+  /* slide in from top */
+  animation: bulk-bar-in 150ms ease forwards;
+}
+
+@keyframes bulk-bar-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.bulk-delete-bar.visible {
+  display: flex;
+}
+
+.bulk-delete-count {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #cdafa0;
+  flex: 1;
+}
+
+.bulk-delete-btn {
+  background: transparent;
+  border: 1.5px solid #f87171;
+  color: #f87171;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+  letter-spacing: 0.5px;
+}
+
+.bulk-delete-btn:hover {
+  background: #3d1a1a;
+  color: #fca5a5;
+  border-color: #fca5a5;
 }
 
 .dictation-menu-btn {
@@ -767,6 +863,26 @@ select:focus {
 
 .password-toggle:hover {
   opacity: 1;
+}
+
+.api-test-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+#test-api-status {
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+#test-api-status.valid {
+  color: #2e7d32;
+}
+
+#test-api-status.invalid {
+  color: #c62828;
 }
 
 /* Toggle Switches - Clean Row Separators */

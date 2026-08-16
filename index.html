@@ -68,6 +68,12 @@
             </div>
           </div>
 
+          <!-- Bulk-delete toolbar: lives OUTSIDE the scroll area so it never scrolls away -->
+          <div id="bulk-delete-bar" class="bulk-delete-bar">
+            <span id="bulk-delete-count" class="bulk-delete-count">0 selected</span>
+            <button id="bulk-delete-btn" class="bulk-delete-btn">DELETE SELECTED</button>
+          </div>
+
           <div class="recents-card-body">
             <ul id="recents-list" class="recents-list"></ul>
             <div id="recents-empty" class="recents-empty" style="display: none;">No dictations recorded today</div>
@@ -124,6 +130,10 @@
                 <button id="toggle-key-visibility" class="icon-btn password-toggle" aria-label="Toggle key visibility">
                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
                 </button>
+              </div>
+              <div class="api-test-row">
+                <button id="test-api-btn" class="pill-nav-btn">Test Connection</button>
+                <span id="test-api-status"></span>
               </div>
             </div>
 
@@ -186,6 +196,12 @@
                 <input type="checkbox" id="overlay-top-toggle" />
                 <span class="slider"></span>
               </label>
+            </div>
+
+            <div class="settings-group">
+              <label for="dictation-context">Dictation Context</label>
+              <input type="text" id="dictation-context" placeholder="e.g. drawing stationery shopping list" />
+              <span class="settings-hint">What you'll be dictating — helps accuracy on quiet speech.</span>
             </div>
 
             <div class="settings-group">

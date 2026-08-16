@@ -79,10 +79,20 @@ pub struct Config {
     pub dictionary: Vec<String>,
     pub hotkey: String,
     pub overlay_position: String,
+    // free-text subject context that biases transcription vocabulary
+    #[serde(default)]
+    pub dictation_context: String,
 }
 
 fn default_cleanup_fallback_model() -> String {
     "qwen/qwen3.6-27b".into()
+}
+
+/// Per-OS default hotkey. macOS defaults to the bare Fn key, which is handled
+/// by a CGEventTap (the global-shortcut crate can't map Fn); everything else
+/// uses Alt+Space.
+fn default_hotkey() -> &'static str {
+    if cfg!(target_os = "macos") { "Fn" } else { "Alt+Space" }
 }
 
 impl Default for Config {
@@ -98,8 +108,9 @@ impl Default for Config {
             auto_paste: true,
             launch_on_startup: false,
             dictionary: Vec::new(),
-            hotkey: "Meta+Space".into(),
+            hotkey: default_hotkey().into(),
             overlay_position: "bottom".into(),
+            dictation_context: String::new(),
         }
     }
 }
@@ -161,8 +172,9 @@ mod tests {
         assert!(!c.launch_on_startup);
         assert!(c.api_key.is_empty());
         assert!(c.dictionary.is_empty());
-        assert_eq!(c.hotkey, "Meta+Space");
+        assert_eq!(c.hotkey, default_hotkey());
         assert_eq!(c.overlay_position, "bottom");
+        assert!(c.dictation_context.is_empty());
     }
 
     #[test]
@@ -180,6 +192,7 @@ mod tests {
             dictionary: vec!["foo".into(), "bar".into()],
             hotkey: "Alt+Shift+T".into(),
             overlay_position: "top".into(),
+            dictation_context: "quarterly review".into(),
         };
         let json = serde_json::to_string(&c).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
@@ -244,6 +257,7 @@ mod tests {
             dictionary: vec!["term".into()],
             hotkey: "Ctrl+Shift+Space".into(),
             overlay_position: "bottom".into(),
+            dictation_context: "my notes".into(),
         };
         c.save();
         let loaded = Config::load();
@@ -257,6 +271,7 @@ mod tests {
         assert_eq!(loaded.dictionary, vec!["term"]);
         assert_eq!(loaded.hotkey, "Ctrl+Shift+Space");
         assert_eq!(loaded.overlay_position, "bottom");
+        assert_eq!(loaded.dictation_context, "my notes");
     }
 
     #[test]

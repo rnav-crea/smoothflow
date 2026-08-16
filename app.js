@@ -44,7 +44,18 @@ const autopasteToggle = document.getElementById("autopaste-toggle");
 const startupToggle = document.getElementById("startup-toggle");
 const hotkeyInput = document.getElementById("hotkey-input");
 const overlayTopToggle = document.getElementById("overlay-top-toggle");
+const dictationContextInput = document.getElementById("dictation-context");
 const settingsStatus = document.getElementById("settings-status");
+
+// Surface hotkey registration/parse errors from the backend at startup
+try {
+  listen("hotkey-error", (e) => {
+    settingsStatus.textContent = "Hotkey: " + e.payload;
+    log("Hotkey error: " + e.payload);
+  });
+} catch (err) {
+  console.warn("hotkey-error listener setup failed:", err);
+}
 
 const dictionaryTags = document.getElementById("dictionary-tags");
 const dictionaryInput = document.getElementById("dictionary-input");
@@ -116,6 +127,29 @@ else toggleKeyVisibility.addEventListener("click", () => {
   apiKeyInput.setAttribute("type", type);
 });
 
+// Test API connection (read-only, no config save)
+const testApiBtn = document.getElementById("test-api-btn");
+const testApiStatus = document.getElementById("test-api-status");
+if (!testApiBtn || !testApiStatus) {
+  console.warn("test-api-btn / test-api-status not found");
+} else {
+  testApiBtn.addEventListener("click", async () => {
+    testApiBtn.disabled = true;
+    testApiStatus.textContent = "Testing...";
+    testApiStatus.classList.remove("valid", "invalid");
+    try {
+      await invoke("test_api_connection", { baseUrl: apiUrlInput.value, apiKey: apiKeyInput.value });
+      testApiStatus.textContent = "Verified";
+      testApiStatus.classList.add("valid");
+    } catch (err) {
+      testApiStatus.textContent = err;
+      testApiStatus.classList.add("invalid");
+    } finally {
+      testApiBtn.disabled = false;
+    }
+  });
+}
+
 // Config
 async function loadConfig() {
   try {
@@ -132,6 +166,7 @@ async function loadConfig() {
     startupToggle.checked = config.launch_on_startup;
     if (hotkeyInput) hotkeyInput.value = config.hotkey || "Ctrl+Space";
     if (overlayTopToggle) overlayTopToggle.checked = config.overlay_position === "top";
+    if (dictationContextInput) dictationContextInput.value = config.dictation_context || "";
     log("Config loaded");
   } catch (err) {
     log(`Config load error: ${err}`);
@@ -152,6 +187,7 @@ async function saveConfig() {
     dictionary: currentConfig.dictionary || [],
     hotkey: hotkeyInput ? hotkeyInput.value : "Ctrl+Space",
     overlay_position: overlayTopToggle && overlayTopToggle.checked ? "top" : "bottom",
+    dictation_context: dictationContextInput ? dictationContextInput.value : "",
   };
   try {
     await invoke("update_config", { newConfig: updatedConfig });
@@ -161,7 +197,7 @@ async function saveConfig() {
     log("Config saved");
   } catch (err) {
     log(`Config save error: ${err}`);
-    settingsStatus.textContent = "Save failed";
+    settingsStatus.textContent = "Save failed: " + err;
   }
 }
 
@@ -176,6 +212,7 @@ try {
   startupToggle.addEventListener("change", saveConfig);
   if (hotkeyInput) hotkeyInput.addEventListener("change", saveConfig);
   if (overlayTopToggle) overlayTopToggle.addEventListener("change", saveConfig);
+  if (dictationContextInput) dictationContextInput.addEventListener("change", saveConfig);
 } catch (e) { console.warn("Config bind error:", e); }
 
 // Personal Dictionary
@@ -231,6 +268,36 @@ const statTotalWords = document.getElementById("stat-total-words");
 const statTotalDictations = document.getElementById("stat-total-dictations");
 const recentsList = document.getElementById("recents-list");
 const recentsEmpty = document.getElementById("recents-empty");
+const bulkDeleteBar = document.getElementById("bulk-delete-bar");
+const bulkDeleteCount = document.getElementById("bulk-delete-count");
+const bulkDeleteBtn = document.getElementById("bulk-delete-btn");
+
+// Track checked indexes
+let checkedIndexes = new Set();
+
+function updateBulkBar() {
+  const count = checkedIndexes.size;
+  if (count > 0) {
+    bulkDeleteBar.classList.add("visible");
+    bulkDeleteCount.textContent = `${count} selected`;
+  } else {
+    bulkDeleteBar.classList.remove("visible");
+  }
+}
+
+if (bulkDeleteBtn) {
+  bulkDeleteBtn.addEventListener("click", async () => {
+    // Delete highest indexes first to avoid index shifting
+    const sorted = [...checkedIndexes].sort((a, b) => b - a);
+    for (const idx of sorted) {
+      try { await invoke("delete_history_entry", { index: idx }); }
+      catch (err) { console.error("bulk delete failed for index", idx, err); }
+    }
+    checkedIndexes.clear();
+    updateBulkBar();
+    loadHistory();
+  });
+}
 
 const popover = document.createElement("div");
 popover.className = "recent-popover";
@@ -337,13 +404,35 @@ function renderRecents(todayEntries) {
 
   if (recentsEmpty) recentsEmpty.style.display = "none";
 
+  // Prune stale checked indexes (entries that were deleted individually via popover)
+  const validIndexes = new Set(todayEntries.map(e => e.index));
+  for (const idx of checkedIndexes) {
+    if (!validIndexes.has(idx)) checkedIndexes.delete(idx);
+  }
+  updateBulkBar();
+
   for (const entry of todayEntries) {
     const li = document.createElement("li");
     li.className = "dictation-item";
 
+    // Checkbox
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "dictation-checkbox";
+    checkbox.checked = checkedIndexes.has(entry.index);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        checkedIndexes.add(entry.index);
+      } else {
+        checkedIndexes.delete(entry.index);
+      }
+      updateBulkBar();
+    });
+
     const textDiv = document.createElement("div");
     textDiv.className = "dictation-text";
     textDiv.textContent = entry.text;
+    textDiv.title = entry.text; // full text on hover
 
     const moreBtn = document.createElement("button");
     moreBtn.className = "dictation-menu-btn";
@@ -354,6 +443,7 @@ function renderRecents(todayEntries) {
       showPopover(moreBtn, entry);
     });
 
+    li.appendChild(checkbox);
     li.appendChild(textDiv);
     li.appendChild(moreBtn);
     recentsList.appendChild(li);

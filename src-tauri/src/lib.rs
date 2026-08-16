@@ -2,6 +2,8 @@ mod accessibility;
 mod audio;
 pub mod config;
 mod history;
+#[cfg(target_os = "macos")]
+mod hotkey;
 mod postprocess;
 mod text_injection;
 pub mod transcription;
@@ -65,8 +67,8 @@ fn show_error(app: &tauri::AppHandle, event: &str, msg: String) {
 
 fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
     let parts: Vec<&str> = s.split('+').collect();
-    if parts.len() < 2 {
-        return Err(format!("[CFG-005] Invalid hotkey '{}'. Use format like 'Ctrl+Space'.", s));
+    if parts.is_empty() {
+        return Err(format!("[CFG-005] Invalid hotkey '{}'. Use format like 'Ctrl+Space' or a bare key like 'Fn'.", s));
     }
     let mut mods = Modifiers::empty();
     for m in &parts[..parts.len() - 1] {
@@ -74,7 +76,7 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
             "Ctrl" | "Control" => mods |= Modifiers::CONTROL,
             "Alt" | "Option" => mods |= Modifiers::ALT,
             "Shift" => mods |= Modifiers::SHIFT,
-            "Win" | "Meta" | "Super" | "Logo" => mods |= Modifiers::SUPER,
+            "Win" | "Meta" | "Super" | "Logo" | "Cmd" | "Command" => mods |= Modifiers::SUPER,
             _ => return Err(format!("[CFG-005] Invalid hotkey '{}'. Unknown modifier '{}'.", s, m)),
         }
     }
@@ -85,6 +87,7 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
         "Enter" => Code::Enter,
         "Escape" | "Esc" => Code::Escape,
         "Backspace" => Code::Backspace,
+        "Fn" => Code::Fn,
         "Delete" => Code::Delete,
         "Insert" => Code::Insert,
         "Home" => Code::Home,
@@ -237,25 +240,47 @@ fn update_config(app: tauri::AppHandle, state: tauri::State<AppState>, new_confi
     let new_hotkey = new_config.hotkey.clone();
     let launch_on_startup = new_config.launch_on_startup;
     let old_hotkey = {
-        let mut config = state.config.lock().unwrap();
+        let config = state.config.lock().unwrap();
         let old = config.hotkey.clone();
-        *config = new_config;
-        config.save();
+        drop(config);
         old
     };
 
     if old_hotkey != new_hotkey {
-        if let Ok((om, oc)) = parse_hotkey_str(&old_hotkey) {
-            let _ = app.global_shortcut().unregister(Shortcut::new(Some(om), oc));
-        }
-        match parse_hotkey_str(&new_hotkey) {
-            Ok((nm, nc)) => {
-                app.global_shortcut().register(Shortcut::new(Some(nm), nc))
-                    .map_err(|e| format!("Failed to register hotkey '{}': {}", new_hotkey, e))?;
-                sf_log!("HOTKEY: re-registered to {}", new_hotkey);
+        let (nm, nc) = parse_hotkey_str(&new_hotkey)?;
+        if cfg!(target_os = "macos") && nm.is_empty() && nc == Code::Fn {
+            #[cfg(target_os = "macos")]
+            hotkey::start_fn_tap(app.clone()).map_err(|e| {
+                format!("Failed to register hotkey '{}': {}", new_hotkey, e)
+            })?;
+            // Old hotkey was a global-shortcut chord — drop it.
+            if let Ok((om, oc)) = parse_hotkey_str(&old_hotkey) {
+                let _ = app.global_shortcut().unregister(Shortcut::new(Some(om), oc));
             }
-            Err(e) => return Err(e),
+        } else {
+            // Leaving the Fn tap (macOS) — stop it before registering a chord.
+            #[cfg(target_os = "macos")]
+            if hotkey::is_running() {
+                hotkey::stop_fn_tap();
+            }
+            app.global_shortcut().register(Shortcut::new(Some(nm), nc)).map_err(|e| {
+                let mut msg = format!("Failed to register hotkey '{}': {}", new_hotkey, e);
+                if cfg!(target_os = "macos") {
+                    msg.push_str(" — this combination may be reserved by macOS (Spotlight owns Cmd+Space); try Option+Space or Ctrl+Opt");
+                }
+                msg
+            })?;
+            if let Ok((om, oc)) = parse_hotkey_str(&old_hotkey) {
+                let _ = app.global_shortcut().unregister(Shortcut::new(Some(om), oc));
+            }
         }
+        sf_log!("HOTKEY: re-registered to {}", new_hotkey);
+    }
+
+    {
+        let mut config = state.config.lock().unwrap();
+        *config = new_config;
+        config.save();
     }
 
     if launch_on_startup {
@@ -299,6 +324,122 @@ fn inject_text(text: String) -> Result<(), String> {
     text_injection::type_text(&text)
 }
 
+#[tauri::command]
+fn test_api_connection(base_url: String, api_key: String) -> Result<(), String> {
+    transcription::verify_api(&base_url, &api_key)
+}
+
+/// Start recording + show the overlay. Shared by the global-shortcut handler
+/// and the macOS Fn event tap. Returns whether recording actually started.
+pub(crate) fn hotkey_start(app: &tauri::AppHandle) -> bool {
+    accessibility::request_once();
+    let state = app.state::<AppState>();
+    let started = {
+        let mut recorder = state.recorder.lock().unwrap();
+        if recorder.is_recording() {
+            false
+        } else {
+            let peak_level = recorder.peak_level.clone();
+            let recording_flag = recorder.recording.clone();
+            match recorder.start() {
+                Ok(_) => {
+                    drop(recorder);
+                    let _ = app.emit("recording-state", true);
+                    spawn_vu_meter(app, recording_flag, peak_level);
+                    true
+                }
+                Err(e) => {
+                    drop(recorder);
+                    sf_log!("HOTKEY: start_recording error: {e}");
+                    show_error(app, "recording-error", e);
+                    false
+                }
+            }
+        }
+    };
+    if started {
+        if let Some(overlay) = state.overlay.lock().unwrap().as_ref() {
+            match overlay.show() {
+                Ok(_) => sf_log!("HOTKEY: overlay shown"),
+                Err(e) => sf_log!("HOTKEY: overlay show error: {e}"),
+            }
+        } else {
+            sf_log!("HOTKEY: overlay not available in state");
+        }
+    }
+    started
+}
+
+/// Stop recording, hide the overlay, and kick off the transcription thread.
+/// Shared by the global-shortcut handler and the macOS Fn event tap.
+pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let mut recorder = state.recorder.lock().unwrap();
+    if !recorder.is_recording() {
+        return;
+    }
+    let samples = recorder.stop();
+    let sample_rate = recorder.sample_rate();
+    drop(recorder);
+    let _ = app.emit("recording-state", false);
+
+    if let Some(overlay) = state.overlay.lock().unwrap().as_ref() {
+        match overlay.hide() {
+            Ok(_) => sf_log!("HOTKEY: overlay hidden"),
+            Err(e) => sf_log!("HOTKEY: overlay hide error: {e}"),
+        }
+    }
+
+    let config = state.config.lock().unwrap().clone();
+    let app_clone = app.clone();
+
+    // ponytail: spawn to unblock shortcut thread during HTTP calls
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let raw = transcription::transcribe(&samples, sample_rate, &config)?;
+            let _ = app_clone.emit("raw-transcript", raw.clone());
+            let text = postprocess::postprocess_with_context(&raw, &config, &transcription::active_window_title());
+            let st = app_clone.state::<AppState>();
+            let mut h = st.history.lock().unwrap();
+            if !text.is_empty() {
+                h.push(&text);
+                h.save();
+            }
+            drop(h);
+            let _ = app_clone.emit("transcript-result", text.clone());
+            if config.auto_paste {
+                if !text.is_empty() {
+                    sf_log!("HOTKEY: auto-paste enabled, typing...");
+                    if let Err(e) = text_injection::type_text(&text) {
+                        sf_log!("HOTKEY: type_text error: {e}");
+                        show_error(&app_clone, "transcription-error", e);
+                    }
+                } else {
+                    sf_log!("HOTKEY: auto-paste enabled but text is empty, skipping");
+                }
+            } else {
+                sf_log!("HOTKEY: auto-paste disabled in config");
+            }
+            Ok::<_, String>(())
+        }));
+        match result {
+            Err(panic) => {
+                let msg = match panic.downcast::<String>() {
+                    Ok(s) => s.to_string(),
+                    Err(_) => "unknown panic in transcription thread".into(),
+                };
+                sf_log!("TRANSCRIPTION PANIC: {msg}");
+                show_error(&app_clone, "transcription-error", msg);
+            }
+            Ok(Err(e)) => {
+                sf_log!("TRANSCRIPTION ERROR: {e}");
+                show_error(&app_clone, "transcription-error", e);
+            }
+            Ok(Ok(())) => {}
+        }
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(
@@ -313,108 +454,8 @@ pub fn run() {
                     drop(cfg);
                     sf_log!("HOTKEY: event state={:?}", event.state);
                     match event.state {
-                        ShortcutState::Pressed => {
-                            accessibility::request_once();
-                            let started = {
-                                let mut recorder = state.recorder.lock().unwrap();
-                                if recorder.is_recording() {
-                                    false
-                                } else {
-                                    let peak_level = recorder.peak_level.clone();
-                                    let recording_flag = recorder.recording.clone();
-                                    match recorder.start() {
-                                        Ok(_) => {
-                                            drop(recorder);
-                                            let _ = app.emit("recording-state", true);
-                                            spawn_vu_meter(app, recording_flag, peak_level);
-                                            true
-                                        }
-                                        Err(e) => {
-                                            drop(recorder);
-                                            sf_log!("HOTKEY: start_recording error: {e}");
-                                            show_error(app, "recording-error", e);
-                                            false
-                                        }
-                                    }
-                                }
-                            };
-                            if started {
-                                if let Some(overlay) = state.overlay.lock().unwrap().as_ref() {
-                                    match overlay.show() {
-                                        Ok(_) => sf_log!("HOTKEY: overlay shown"),
-                                        Err(e) => sf_log!("HOTKEY: overlay show error: {e}"),
-                                    }
-                                } else {
-                                    sf_log!("HOTKEY: overlay not available in state");
-                                }
-                            }
-                        }
-                        ShortcutState::Released => {
-                            let mut recorder = state.recorder.lock().unwrap();
-                            if !recorder.is_recording() {
-                                return;
-                            }
-                            let samples = recorder.stop();
-                            let sample_rate = recorder.sample_rate();
-                            drop(recorder);
-                            let _ = app.emit("recording-state", false);
-
-                            if let Some(overlay) = state.overlay.lock().unwrap().as_ref() {
-                                match overlay.hide() {
-                                    Ok(_) => sf_log!("HOTKEY: overlay hidden"),
-                                    Err(e) => sf_log!("HOTKEY: overlay hide error: {e}"),
-                                }
-                            }
-
-                            let config = state.config.lock().unwrap().clone();
-                            let app_clone = app.clone();
-
-                            // ponytail: spawn to unblock shortcut thread during HTTP calls
-                            std::thread::spawn(move || {
-                                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    let raw = transcription::transcribe(&samples, sample_rate, &config)?;
-                                    let _ = app_clone.emit("raw-transcript", raw.clone());
-let text = postprocess::postprocess_with_context(&raw, &config, &transcription::active_window_title());
-                                    let st = app_clone.state::<AppState>();
-                                    let mut h = st.history.lock().unwrap();
-                                    if !text.is_empty() {
-                                        h.push(&text);
-                                        h.save();
-                                    }
-                                    drop(h);
-                                    let _ = app_clone.emit("transcript-result", text.clone());
-                                    if config.auto_paste {
-                                        if !text.is_empty() {
-                                            sf_log!("HOTKEY: auto-paste enabled, typing...");
-                                            if let Err(e) = text_injection::type_text(&text) {
-                                                sf_log!("HOTKEY: type_text error: {e}");
-                                                show_error(&app_clone, "transcription-error", e);
-                                            }
-                                        } else {
-                                            sf_log!("HOTKEY: auto-paste enabled but text is empty, skipping");
-                                        }
-                                    } else {
-                                        sf_log!("HOTKEY: auto-paste disabled in config");
-                                    }
-                                    Ok::<_, String>(())
-                                }));
-                                match result {
-                                    Err(panic) => {
-                                        let msg = match panic.downcast::<String>() {
-                                            Ok(s) => s.to_string(),
-                                            Err(_) => "unknown panic in transcription thread".into(),
-                                        };
-                                        sf_log!("TRANSCRIPTION PANIC: {msg}");
-                                        show_error(&app_clone, "transcription-error", msg);
-                                    }
-                                    Ok(Err(e)) => {
-                                        sf_log!("TRANSCRIPTION ERROR: {e}");
-                                        show_error(&app_clone, "transcription-error", e);
-                                    }
-                                    Ok(Ok(())) => {}
-                                }
-                            });
-                        }
+                        ShortcutState::Pressed => { hotkey_start(app); }
+                        ShortcutState::Released => { hotkey_finalize(app); }
                     }
                 })
                 .build(),
@@ -451,12 +492,31 @@ let text = postprocess::postprocess_with_context(&raw, &config, &transcription::
             drop(state);
             match parse_hotkey_str(&hotkey_str) {
                 Ok((m, c)) => {
-                    match app.global_shortcut().register(Shortcut::new(Some(m), c)) {
-                        Ok(_) => sf_log!("SUCCESS: Registered {} global shortcut!", hotkey_str),
-                        Err(e) => sf_log!("ERROR: Failed to register {}: {}", hotkey_str, e),
+                    if cfg!(target_os = "macos") && m.is_empty() && c == Code::Fn {
+                        // Bare Fn has no Carbon scancode — use the CGEventTap
+                        // backend instead of the global-shortcut crate.
+                        #[cfg(target_os = "macos")]
+                        match hotkey::start_fn_tap(app.handle().clone()) {
+                            Ok(_) => sf_log!("SUCCESS: Registered {} Fn event tap!", hotkey_str),
+                            Err(e) => {
+                                sf_log!("ERROR: Failed to register {}: {}", hotkey_str, e);
+                                let _ = app.emit("hotkey-error", format!("Failed to register hotkey '{}': {}", hotkey_str, e));
+                            }
+                        }
+                    } else {
+                        match app.global_shortcut().register(Shortcut::new(Some(m), c)) {
+                            Ok(_) => sf_log!("SUCCESS: Registered {} global shortcut!", hotkey_str),
+                            Err(e) => {
+                                sf_log!("ERROR: Failed to register {}: {}", hotkey_str, e);
+                                let _ = app.emit("hotkey-error", format!("Failed to register hotkey '{}': {}", hotkey_str, e));
+                            }
+                        }
                     }
                 }
-                Err(e) => sf_log!("ERROR: Invalid hotkey '{}': {}", hotkey_str, e),
+                Err(e) => {
+                    sf_log!("ERROR: Invalid hotkey '{}': {}", hotkey_str, e);
+                    let _ = app.emit("hotkey-error", format!("Invalid hotkey '{}': {}", hotkey_str, e));
+                }
             }
 
             let overlay = WebviewWindowBuilder::new(
@@ -562,8 +622,21 @@ let text = postprocess::postprocess_with_context(&raw, &config, &transcription::
             delete_history_entry,
             clear_history,
             inject_text,
+            test_api_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hotkey_cmd_alias() {
+        let (mods, code) = parse_hotkey_str("Cmd+Space").expect("Cmd+Space should parse");
+        assert!(mods.contains(Modifiers::SUPER));
+        assert_eq!(code, Code::Space);
+    }
 }
 
