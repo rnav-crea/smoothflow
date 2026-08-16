@@ -436,7 +436,10 @@ mod tests {
         assert!(mk(429, "").contains("429"));
         assert!(mk(500, "boom").contains("Server error") && mk(500, "boom").contains("(boom)"));
         assert!(mk(418, "").contains("API request failed"));
-        // empty body → no detail suffix
-        assert!(!mk(401, "  ").contains("("));
+        // whitespace-only body → no detail suffix appended
+        assert_eq!(
+            mk(401, "  "),
+            "[TXN-003] Invalid API key (401). Check your key in Settings."
+        );
     }
 }
