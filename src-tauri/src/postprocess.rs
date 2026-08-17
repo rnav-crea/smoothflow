@@ -730,6 +730,24 @@ fn normalize_llm_output(raw: &str, original: &str) -> Result<String, CleanupErro
 /// "I'd be happy to", ...) but the raw transcript does NOT, assume the model
 /// drafted a reply and reject it. A guard, not a perfect detector.
 fn looks_like_assistant_execution(cleaned: &str, raw: &str) -> bool {
+    // Phrase guard: reasoning preambles ("I think you meant to say ...",
+    // "Based on the transcript ...") are model output, not the dictation.
+    // Unless the raw transcript itself started the same way — that is the
+    // user literally dictating "I think we should meet at 3".
+    const PHRASES: &[&str] = &[
+        "i think", "i believe", "i'm not sure", "i'm guessing",
+        "based on the", "the transcript", "here is", "here's",
+    ];
+    let cleaned_low = cleaned.trim().to_lowercase();
+    let raw_low = raw.trim().to_lowercase();
+    if PHRASES
+        .iter()
+        .any(|p| cleaned_low.starts_with(p) && !raw_low.starts_with(p))
+    {
+        return true;
+    }
+
+    // Single-word guard (existing).
     let strip = |w: &str| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
     let cleaned_first = cleaned.trim().split_whitespace().next().map(strip);
     let raw_first = raw.trim().split_whitespace().next().map(strip);
@@ -1133,6 +1151,18 @@ mod tests {
         // ordinary cleaned text -> not execution
         assert!(!looks_like_assistant_execution("Let's meet at 3 pm", "meet at 3 pm"));
         assert!(!looks_like_assistant_execution("", ""));
+    }
+
+    #[test]
+    fn guard_rejects_reasoning_preambles() {
+        // reasoning preamble in cleaned output, absent from raw -> reject
+        assert!(looks_like_assistant_execution("I think you meant to say hello", "hello world"));
+        assert!(looks_like_assistant_execution("Based on the transcript, the meeting is at 3", "meeting at 3"));
+        assert!(looks_like_assistant_execution("I believe the correct date is Friday", "the date is Friday"));
+        assert!(looks_like_assistant_execution("I'm not sure what you meant", "meet tomorrow"));
+        // raw transcript legitimately started with the phrase -> not execution
+        assert!(!looks_like_assistant_execution("I think we should meet at 3", "i think we should meet at 3"));
+        assert!(!looks_like_assistant_execution("Based on the transcript we meet at 3", "based on the transcript we meet at 3"));
     }
 
     #[test]

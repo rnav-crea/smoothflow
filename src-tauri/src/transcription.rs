@@ -125,6 +125,7 @@ const HALLUCINATION_PHRASES: &[&str] = &[
     "subtitles by",
     "subtitles by the amara.org community",
     "you",
+    "i think so",
 ];
 
 /// Lowercase, strip leading/trailing whitespace and non-alphanumeric chars.
@@ -134,14 +135,20 @@ fn normalize_hallucination_text(text: &str) -> String {
         .to_lowercase()
 }
 
-/// True only when the normalized text is a known hallucination phrase AND the
-/// first segment's `no_speech_prob` is >= 0.1. Missing/None metadata → never
-/// filter (plain-json providers).
+/// True when the normalized text equals a known hallucination phrase, or —
+/// when the phrase is at least 3 words long — starts with one. The 3-word
+/// minimum keeps single-word "you" from prefix-matching arbitrary text. Both
+/// rules run only under the caller's `no_speech_prob >= 0.1` gate, so real
+/// speech (low prob) is never dropped.
 fn is_hallucination(text: &str, no_speech_prob: Option<f64>) -> bool {
     match no_speech_prob {
-        Some(p) if p >= 0.1 => HALLUCINATION_PHRASES
-            .iter()
-            .any(|h| normalize_hallucination_text(text) == *h),
+        Some(p) if p >= 0.1 => {
+            let normalized = normalize_hallucination_text(text);
+            HALLUCINATION_PHRASES.iter().any(|h| {
+                normalized == *h
+                    || (h.split_whitespace().count() >= 3 && normalized.starts_with(h))
+            })
+        }
         _ => false,
     }
 }
@@ -405,6 +412,19 @@ mod tests {
         assert!(!is_hallucination("I need the quarterly report by Friday", Some(0.9)));
         // Missing metadata (plain json) → never filtered
         assert!(!is_hallucination("thank you", None));
+    }
+
+    #[test]
+    fn hallucination_prefix_match_catches_ramble() {
+        // "i think so" ramble (3+ word phrase prefix) + high prob → filtered
+        assert!(is_hallucination("I think so on so on so", Some(0.9)));
+        // same phrase, low prob (real speech) → kept
+        assert!(!is_hallucination("I think so", Some(0.01)));
+        // real sentence that merely starts "i think" → kept, not a prefix hit
+        assert!(!is_hallucination("I think the meeting is at three", Some(0.9)));
+        // exact matches still work
+        assert!(is_hallucination("thank you for watching", Some(0.9)));
+        assert!(!is_hallucination("I need the quarterly report by Friday", Some(0.9)));
     }
 
     #[test]

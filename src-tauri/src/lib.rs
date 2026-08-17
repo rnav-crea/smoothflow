@@ -31,6 +31,12 @@ macro_rules! sf_log {
     };
 }
 
+/// Frontmost app at the moment the hotkey started recording (macOS only).
+/// Captured before the overlay steals focus so we can reactivate the target
+/// document right before auto-paste fires Cmd+V.
+#[cfg(target_os = "macos")]
+static LAST_FRONT_APP: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 struct AppState {
     recorder: Mutex<AudioRecorder>,
     config: Mutex<Config>,
@@ -72,43 +78,45 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
     }
     let mut mods = Modifiers::empty();
     for m in &parts[..parts.len() - 1] {
-        match *m {
-            "Ctrl" | "Control" => mods |= Modifiers::CONTROL,
-            "Alt" | "Option" => mods |= Modifiers::ALT,
-            "Shift" => mods |= Modifiers::SHIFT,
-            "Win" | "Meta" | "Super" | "Logo" | "Cmd" | "Command" => mods |= Modifiers::SUPER,
-            _ => return Err(format!("[CFG-005] Invalid hotkey '{}'. Unknown modifier '{}'.", s, m)),
+        match m.trim().to_lowercase().as_str() {
+            "ctrl" | "control" => mods |= Modifiers::CONTROL,
+            "alt" | "option" => mods |= Modifiers::ALT,
+            "shift" => mods |= Modifiers::SHIFT,
+            "win" | "meta" | "super" | "logo" | "cmd" | "command" => mods |= Modifiers::SUPER,
+            _ => return Err(format!("[CFG-005] Invalid hotkey '{}'. Unknown modifier '{}'.", s, m.trim())),
         }
     }
-    let key = parts[parts.len() - 1];
-    let code = match key {
-        "Space" => Code::Space,
-        "Tab" => Code::Tab,
-        "Enter" => Code::Enter,
-        "Escape" | "Esc" => Code::Escape,
-        "Backspace" => Code::Backspace,
-        "Fn" => Code::Fn,
-        "Delete" => Code::Delete,
-        "Insert" => Code::Insert,
-        "Home" => Code::Home,
-        "End" => Code::End,
-        "PageUp" => Code::PageUp,
-        "PageDown" => Code::PageDown,
-        "ArrowUp" | "Up" => Code::ArrowUp,
-        "ArrowDown" | "Down" => Code::ArrowDown,
-        "ArrowLeft" | "Left" => Code::ArrowLeft,
-        "ArrowRight" | "Right" => Code::ArrowRight,
-        "Backquote" | "`" => Code::Backquote,
-        "Minus" | "-" => Code::Minus,
-        "Equal" | "=" => Code::Equal,
-        "Semicolon" | ";" => Code::Semicolon,
-        "Quote" | "'" => Code::Quote,
-        "Comma" | "," => Code::Comma,
-        "Period" | "." => Code::Period,
-        "Slash" | "/" => Code::Slash,
-        "Backslash" | "\\" => Code::Backslash,
-        "BracketLeft" | "[" => Code::BracketLeft,
-        "BracketRight" | "]" => Code::BracketRight,
+    // key_raw keeps the user's original text for error messages; key is trimmed+lowercased for matching.
+    let key_raw = parts[parts.len() - 1].trim();
+    let key = key_raw.to_lowercase();
+    let code = match key.as_str() {
+        "space" => Code::Space,
+        "tab" => Code::Tab,
+        "enter" => Code::Enter,
+        "escape" | "esc" => Code::Escape,
+        "backspace" => Code::Backspace,
+        "fn" => Code::Fn,
+        "delete" => Code::Delete,
+        "insert" => Code::Insert,
+        "home" => Code::Home,
+        "end" => Code::End,
+        "pageup" => Code::PageUp,
+        "pagedown" => Code::PageDown,
+        "arrowup" | "up" => Code::ArrowUp,
+        "arrowdown" | "down" => Code::ArrowDown,
+        "arrowleft" | "left" => Code::ArrowLeft,
+        "arrowright" | "right" => Code::ArrowRight,
+        "backquote" | "`" => Code::Backquote,
+        "minus" | "-" => Code::Minus,
+        "equal" | "=" => Code::Equal,
+        "semicolon" | ";" => Code::Semicolon,
+        "quote" | "'" => Code::Quote,
+        "comma" | "," => Code::Comma,
+        "period" | "." => Code::Period,
+        "slash" | "/" => Code::Slash,
+        "backslash" | "\\" => Code::Backslash,
+        "bracketleft" | "[" => Code::BracketLeft,
+        "bracketright" | "]" => Code::BracketRight,
         _ if key.len() == 1 => {
             let c = key.chars().next().unwrap().to_ascii_uppercase();
             match c {
@@ -119,10 +127,10 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
                     Code::KeyM, Code::KeyN, Code::KeyO, Code::KeyP, Code::KeyQ, Code::KeyR,
                     Code::KeyS, Code::KeyT, Code::KeyU, Code::KeyV, Code::KeyW, Code::KeyX,
                     Code::KeyY, Code::KeyZ][(c as u8 - b'A') as usize],
-                _ => return Err(format!("[CFG-005] Invalid hotkey. Unknown key '{}'.", key)),
+                _ => return Err(format!("[CFG-005] Invalid hotkey. Unknown key '{}'.", key_raw)),
             }
         }
-        _ if key.starts_with('F') && key[1..].parse::<u8>().is_ok() => {
+        _ if key.starts_with('f') && key[1..].parse::<u8>().is_ok() => {
             match key[1..].parse::<u8>().unwrap() {
                 1 => Code::F1, 2 => Code::F2, 3 => Code::F3, 4 => Code::F4,
                 5 => Code::F5, 6 => Code::F6, 7 => Code::F7, 8 => Code::F8,
@@ -133,7 +141,7 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
                 n => return Err(format!("[CFG-005] Invalid hotkey. Unknown F-key F{}.", n)),
             }
         }
-        _ => return Err(format!("[CFG-005] Invalid hotkey. Unknown key '{}'.", key)),
+        _ => return Err(format!("[CFG-005] Invalid hotkey. Unknown key '{}'.", key_raw)),
     };
     Ok((mods, code))
 }
@@ -188,6 +196,13 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
     let t1 = std::time::Instant::now();
                                     let text = postprocess::postprocess_with_context(&raw, &config, &transcription::active_window_title());
     sf_log!("CMD: cleanup took {:?}", t1.elapsed());
+
+    // macOS: near-silent audio (typically missing Mic permission) yields empty
+    // text — surface it instead of silently doing nothing.
+    #[cfg(target_os = "macos")]
+    if text.is_empty() {
+        show_error(&app, "transcription-error", "No speech detected. Check SmoothFlow's Microphone permission in System Settings → Privacy & Security → Microphone, then try again.".into());
+    }
 
     // Persist non-empty dictations to history (independent of auto-paste)
     {
@@ -358,6 +373,36 @@ pub(crate) fn hotkey_start(app: &tauri::AppHandle) -> bool {
         }
     };
     if started {
+        #[cfg(target_os = "macos")]
+        {
+            // Capture the frontmost app BEFORE the overlay steals focus, so the
+            // target document can be reactivated right before auto-paste.
+            let auto_paste = {
+                let config = state.config.lock().unwrap();
+                config.auto_paste
+            };
+            if auto_paste {
+                let handle = std::thread::spawn(|| {
+                    let out = std::process::Command::new("osascript")
+                        .args(["-e", r#"tell application "System Events" to get name of first application process whose frontmost is true"#])
+                        .output();
+                    match out {
+                        Ok(o) if o.status.success() => {
+                            let name = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            if !name.is_empty() {
+                                *LAST_FRONT_APP.lock().unwrap() = Some(name.clone());
+                                sf_log!("HOTKEY: captured frontmost app: {}", name);
+                            } else {
+                                sf_log!("HOTKEY: osascript returned empty frontmost app name");
+                            }
+                        }
+                        Ok(o) => sf_log!("HOTKEY: osascript exited with status {}", o.status),
+                        Err(e) => sf_log!("HOTKEY: osascript failed: {e}"),
+                    }
+                });
+                let _ = handle.join();
+            }
+        }
         if let Some(overlay) = state.overlay.lock().unwrap().as_ref() {
             match overlay.show() {
                 Ok(_) => sf_log!("HOTKEY: overlay shown"),
@@ -399,6 +444,10 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
             let raw = transcription::transcribe(&samples, sample_rate, &config)?;
             let _ = app_clone.emit("raw-transcript", raw.clone());
             let text = postprocess::postprocess_with_context(&raw, &config, &transcription::active_window_title());
+            #[cfg(target_os = "macos")]
+            if text.is_empty() {
+                show_error(&app_clone, "transcription-error", "No speech detected. Check SmoothFlow's Microphone permission in System Settings → Privacy & Security → Microphone, then try again.".into());
+            }
             let st = app_clone.state::<AppState>();
             let mut h = st.history.lock().unwrap();
             if !text.is_empty() {
@@ -410,6 +459,20 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
             if config.auto_paste {
                 if !text.is_empty() {
                     sf_log!("HOTKEY: auto-paste enabled, typing...");
+                    #[cfg(target_os = "macos")]
+                    {
+                        // Overlay made SmoothFlow active — give focus back to the
+                        // app that was frontmost when recording started, then let
+                        // it settle before Cmd+V lands in type_text.
+                        let front = LAST_FRONT_APP.lock().unwrap().clone();
+                        if let Some(name) = front {
+                            if !name.is_empty() && name != "SmoothFlow" {
+                                sf_log!("HOTKEY: reactivating frontmost app: {}", name);
+                                let _ = std::process::Command::new("open").arg("-a").arg(&name).spawn();
+                                std::thread::sleep(std::time::Duration::from_millis(250));
+                            }
+                        }
+                    }
                     if let Err(e) = text_injection::type_text(&text) {
                         sf_log!("HOTKEY: type_text error: {e}");
                         show_error(&app_clone, "transcription-error", e);
@@ -637,6 +700,36 @@ mod tests {
         let (mods, code) = parse_hotkey_str("Cmd+Space").expect("Cmd+Space should parse");
         assert!(mods.contains(Modifiers::SUPER));
         assert_eq!(code, Code::Space);
+    }
+
+    #[test]
+    fn parse_hotkey_case_insensitive() {
+        let (m1, c1) = parse_hotkey_str("ctrl+space").expect("lowercase should parse");
+        let (m2, c2) = parse_hotkey_str("Ctrl+Space").expect("mixed case should parse");
+        assert_eq!(m1, m2);
+        assert_eq!(c1, c2);
+        assert!(m1.contains(Modifiers::CONTROL));
+        assert_eq!(c1, Code::Space);
+    }
+
+    #[test]
+    fn parse_hotkey_whitespace_tolerant() {
+        let (mods, code) = parse_hotkey_str(" Ctrl + Space ").expect("whitespace should parse");
+        assert!(mods.contains(Modifiers::CONTROL));
+        assert_eq!(code, Code::Space);
+    }
+
+    #[test]
+    fn parse_hotkey_lowercase_fkey() {
+        let (mods, code) = parse_hotkey_str("alt+f5").expect("lowercase F-key should parse");
+        assert!(mods.contains(Modifiers::ALT));
+        assert_eq!(code, Code::F5);
+    }
+
+    #[test]
+    fn parse_hotkey_lowercase_letter() {
+        let (_, code) = parse_hotkey_str("a").expect("single lowercase letter should parse");
+        assert_eq!(code, Code::KeyA);
     }
 }
 
