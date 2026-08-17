@@ -189,20 +189,6 @@ pub fn postprocess(text: &str, config: &Config) -> String {
     postprocess_with_context(text, config, "")
 }
 
-/// Join the free-text dictation context and the active-window title into one
-/// context line for the cleanup LLM. Either side trimmed and used alone when
-/// the other is empty; both empty → empty (strict no-op).
-fn combine_context(dictation_context: &str, window_context: &str) -> String {
-    let dict = dictation_context.trim();
-    let win = window_context.trim();
-    match (dict.is_empty(), win.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => dict.to_string(),
-        (true, false) => win.to_string(),
-        (false, false) => format!("{dict} — {win}"),
-    }
-}
-
 pub(crate) fn postprocess_with_context(text: &str, config: &Config, context: &str) -> String {
     if config.cleanup_model.is_empty() {
         return ensure_email_structure(&basic_cleanup(text, config));
@@ -215,14 +201,13 @@ pub(crate) fn postprocess_with_context(text: &str, config: &Config, context: &st
     // and each prompt rule cost tokens on every request. Runs only on the LLM
     // path; basic_cleanup deliberately keeps the literal words.
     let text = convert_spoken_formatting(text);
-    let combined = combine_context(&config.dictation_context, context);
     // Always-on LLM cleanup: any failure (service error, empty output, both
     // models in cooldown, instruction-execution guard) silently falls back
     // to rule-based cleanup — dictation never breaks on service failure.
     // The LLM output is returned as-is, NOT re-run through basic_cleanup:
     // remove_fillers collapses all whitespace with split_whitespace().join(" "),
     // which destroys any list/newline structure the LLM produced.
-    match llm_cleanup(&text, config, &combined) {
+    match llm_cleanup(&text, config, context) {
         Ok(cleaned) => ensure_email_structure(&cleaned),
         Err(_) => ensure_email_structure(&basic_cleanup(&text, config)),
     }
@@ -1166,19 +1151,6 @@ mod tests {
         assert!(in_cooldown("model-c"));
         std::thread::sleep(Duration::from_millis(150));
         assert!(!in_cooldown("model-c"));
-    }
-
-    #[test]
-    fn combined_context_merges_dictation_and_window() {
-        assert_eq!(combine_context("", ""), "");
-        assert_eq!(combine_context("  ", "   "), "");
-        assert_eq!(combine_context("drawing stationery", ""), "drawing stationery");
-        assert_eq!(combine_context("  drawing stationery  ", ""), "drawing stationery");
-        assert_eq!(combine_context("", "Slack - Acme Corp"), "Slack - Acme Corp");
-        assert_eq!(
-            combine_context("drawing stationery", "Slack - Acme Corp"),
-            "drawing stationery — Slack - Acme Corp"
-        );
     }
 
     #[test]

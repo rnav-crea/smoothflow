@@ -182,17 +182,11 @@ fn resample_to_16k(samples: &[f32], sample_rate: u32) -> Vec<f32> {
 /// Whisper prompt: optional free-text context line, then vocabulary hints.
 /// Empty context keeps the exact legacy "Vocabulary hints" string; both empty
 /// → empty prompt (current behavior).
-fn build_prompt(context: &str, terms: &[String]) -> String {
-    let context = context.trim();
-    let hints = if terms.is_empty() {
+fn build_prompt(terms: &[String]) -> String {
+    if terms.is_empty() {
         String::new()
     } else {
-        format!(" Vocabulary hints for this audio: {}.", terms.join(", "))
-    };
-    if context.is_empty() {
-        hints.trim_start().to_string()
-    } else {
-        format!("Context: {}.{}", context, hints)
+        format!("Vocabulary hints for this audio: {}.", terms.join(", "))
     }
 }
 
@@ -235,7 +229,7 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
     ].iter().map(|s| s.to_string()));
     terms.sort();
     terms.dedup();
-    let prompt = build_prompt(&config.dictation_context, &terms);
+    let prompt = build_prompt(&terms);
 
     let form = reqwest::blocking::multipart::Form::new()
         .part("file", part)
@@ -378,19 +372,10 @@ mod tests {
     }
 
     #[test]
-    fn prompt_includes_dictation_context() {
+    fn prompt_uses_vocabulary_hints() {
         let terms = vec!["pencil".into(), "eraser".into()];
-        let p = build_prompt("drawing stationery", &terms);
-        assert!(p.contains("Context: drawing stationery."), "got: {p}");
-        assert!(p.contains("Vocabulary hints"), "got: {p}");
-        // empty context → legacy hint-only prompt, no "Context:"
-        let legacy = build_prompt("", &terms);
-        assert!(!legacy.contains("Context:"));
-        assert_eq!(legacy, "Vocabulary hints for this audio: pencil, eraser.");
-        // context only, no terms → clean single line
-        assert_eq!(build_prompt("  drawing stationery  ", &[]), "Context: drawing stationery.");
-        // neither → empty prompt
-        assert_eq!(build_prompt("", &[]), "");
+        assert_eq!(build_prompt(&terms), "Vocabulary hints for this audio: pencil, eraser.");
+        assert_eq!(build_prompt(&Vec::new()), "");
     }
 
     #[test]

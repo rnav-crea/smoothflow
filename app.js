@@ -44,7 +44,6 @@ const autopasteToggle = document.getElementById("autopaste-toggle");
 const startupToggle = document.getElementById("startup-toggle");
 const hotkeyInput = document.getElementById("hotkey-input");
 const overlayTopToggle = document.getElementById("overlay-top-toggle");
-const dictationContextInput = document.getElementById("dictation-context");
 const settingsStatus = document.getElementById("settings-status");
 
 // Surface hotkey registration/parse errors from the backend at startup
@@ -127,27 +126,46 @@ else toggleKeyVisibility.addEventListener("click", () => {
   apiKeyInput.setAttribute("type", type);
 });
 
-// Test API connection (read-only, no config save)
-const testApiBtn = document.getElementById("test-api-btn");
+// Auto-validate API connection when key or URL is changed/pasted
 const testApiStatus = document.getElementById("test-api-status");
-if (!testApiBtn || !testApiStatus) {
-  console.warn("test-api-btn / test-api-status not found");
-} else {
-  testApiBtn.addEventListener("click", async () => {
-    testApiBtn.disabled = true;
-    testApiStatus.textContent = "Testing...";
-    testApiStatus.classList.remove("valid", "invalid");
-    try {
-      await invoke("test_api_connection", { baseUrl: apiUrlInput.value, apiKey: apiKeyInput.value });
-      testApiStatus.textContent = "Verified";
-      testApiStatus.classList.add("valid");
-    } catch (err) {
-      testApiStatus.textContent = err;
-      testApiStatus.classList.add("invalid");
-    } finally {
-      testApiBtn.disabled = false;
-    }
-  });
+let apiValidationTimer = null;
+
+async function validateApiKeyAuto() {
+  if (!testApiStatus) return;
+  const apiKey = apiKeyInput ? apiKeyInput.value.trim() : "";
+  const baseUrl = apiUrlInput ? apiUrlInput.value.trim() : "";
+
+  if (!apiKey) {
+    testApiStatus.textContent = "";
+    testApiStatus.className = "";
+    return;
+  }
+
+  testApiStatus.textContent = "Testing connection...";
+  testApiStatus.className = "testing";
+
+  try {
+    await invoke("test_api_connection", { baseUrl, apiKey });
+    testApiStatus.textContent = "Valid API Key";
+    testApiStatus.className = "valid";
+  } catch (err) {
+    testApiStatus.textContent = ("Invalid API Key");
+    testApiStatus.className = "invalid";
+  }
+}
+
+function triggerAutoApiValidation() {
+  if (apiValidationTimer) clearTimeout(apiValidationTimer);
+  apiValidationTimer = setTimeout(validateApiKeyAuto, 400);
+}
+
+if (apiKeyInput) {
+  apiKeyInput.addEventListener("input", triggerAutoApiValidation);
+  apiKeyInput.addEventListener("paste", triggerAutoApiValidation);
+}
+if (apiUrlInput) {
+  apiUrlInput.addEventListener("input", triggerAutoApiValidation);
+  apiUrlInput.addEventListener("paste", triggerAutoApiValidation);
 }
 
 // Config
@@ -166,8 +184,10 @@ async function loadConfig() {
     startupToggle.checked = config.launch_on_startup;
     if (hotkeyInput) hotkeyInput.value = config.hotkey || "Ctrl+Space";
     if (overlayTopToggle) overlayTopToggle.checked = config.overlay_position === "top";
-    if (dictationContextInput) dictationContextInput.value = config.dictation_context || "";
     log("Config loaded");
+    if (apiKeyInput.value) {
+      validateApiKeyAuto();
+    }
   } catch (err) {
     log(`Config load error: ${err}`);
   }
@@ -187,18 +207,34 @@ async function saveConfig() {
     dictionary: currentConfig.dictionary || [],
     hotkey: hotkeyInput ? hotkeyInput.value : "Ctrl+Space",
     overlay_position: overlayTopToggle && overlayTopToggle.checked ? "top" : "bottom",
-    dictation_context: dictationContextInput ? dictationContextInput.value : "",
   };
   try {
     await invoke("update_config", { newConfig: updatedConfig });
     currentConfig = updatedConfig;
-    settingsStatus.textContent = "Settings saved";
-    setTimeout(() => { settingsStatus.textContent = "Settings saved automatically"; }, 2000);
+    if (settingsStatus) {
+      settingsStatus.textContent = "Settings saved successfully";
+      setTimeout(() => {
+        if (settingsStatus.textContent === "Settings saved successfully") {
+          settingsStatus.textContent = "";
+        }
+      }, 3000);
+    }
     log("Config saved");
   } catch (err) {
     log(`Config save error: ${err}`);
-    settingsStatus.textContent = "Save failed: " + err;
+    if (settingsStatus) settingsStatus.textContent = "Save failed: " + err;
   }
+}
+
+const saveSettingsBtn = document.getElementById("save-settings-btn");
+if (saveSettingsBtn) {
+  saveSettingsBtn.addEventListener("click", async () => {
+    saveSettingsBtn.disabled = true;
+    saveSettingsBtn.textContent = "SAVING...";
+    await saveConfig();
+    saveSettingsBtn.textContent = "SAVE";
+    saveSettingsBtn.disabled = false;
+  });
 }
 
 try {
@@ -212,7 +248,6 @@ try {
   startupToggle.addEventListener("change", saveConfig);
   if (hotkeyInput) hotkeyInput.addEventListener("change", saveConfig);
   if (overlayTopToggle) overlayTopToggle.addEventListener("change", saveConfig);
-  if (dictationContextInput) dictationContextInput.addEventListener("change", saveConfig);
 } catch (e) { console.warn("Config bind error:", e); }
 
 // Personal Dictionary

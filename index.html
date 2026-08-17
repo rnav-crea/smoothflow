@@ -131,10 +131,7 @@
                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
                 </button>
               </div>
-              <div class="api-test-row">
-                <button id="test-api-btn" class="pill-nav-btn">Test Connection</button>
-                <span id="test-api-status"></span>
-              </div>
+              <div id="test-api-status"></div>
             </div>
 
             <div class="settings-group toggle-group">
@@ -199,12 +196,6 @@
             </div>
 
             <div class="settings-group">
-              <label for="dictation-context">Dictation Context</label>
-              <input type="text" id="dictation-context" placeholder="e.g. drawing stationery shopping list" />
-              <span class="settings-hint">What you'll be dictating — helps accuracy on quiet speech.</span>
-            </div>
-
-            <div class="settings-group">
               <label>Personal Dictionary</label>
               <span class="settings-hint">Words the transcriber should recognize (names, jargon, terms)</span>
               <div class="dictionary-tags" id="dictionary-tags"></div>
@@ -215,7 +206,8 @@
             </div>
 
             <div class="settings-footer">
-              <div id="settings-status">Settings saved automatically</div>
+              <button id="save-settings-btn" class="save-settings-btn">SAVE</button>
+              <div id="settings-status"></div>
             </div>
           </div>
         </div>

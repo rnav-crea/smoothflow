@@ -728,15 +728,9 @@ kbd {
   border: 2px solid #58264b;
   border-radius: 4px;
   box-shadow: 0px 10px 30px rgba(0, 0, 0, 0.6);
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
-  scrollbar-width: none;        /* Firefox */
-  -ms-overflow-style: none;     /* IE/Edge */
-}
-
-.modal-content::-webkit-scrollbar {
-  display: none;                /* Chrome/Safari/WebKit */
+  overflow: hidden;
 }
 
 .modal-header {
@@ -746,6 +740,10 @@ kbd {
   padding: 14px 20px;
   border-bottom: 2px solid #58264b;
   background: #58264b;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  flex-shrink: 0;
 }
 
 .modal-header h2 {
@@ -786,6 +784,14 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  overflow-y: auto;
+  flex: 1;
+  scrollbar-width: none;        /* Firefox */
+  -ms-overflow-style: none;     /* IE/Edge */
+}
+
+.modal-body::-webkit-scrollbar {
+  display: none;                /* Chrome/Safari/WebKit */
 }
 
 .settings-group {
@@ -865,24 +871,29 @@ select:focus {
   opacity: 1;
 }
 
-.api-test-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 8px;
-}
-
 #test-api-status {
+  display: block;
+  /* margin-top: 6px; */
+  padding-left: 1px;
   font-size: 12px;
   font-family: var(--font-mono);
+  min-height: 18px;
+  transition: color 150ms ease, opacity 150ms ease;
+}
+
+#test-api-status.testing {
+  color: #f4d1ba;
+  opacity: 0.8;
 }
 
 #test-api-status.valid {
-  color: #2e7d32;
+  color: #4caf50;
+  font-weight: 550;
 }
 
 #test-api-status.invalid {
-  color: #c62828;
+  color: #ff6b6b;
+  font-weight: 500;
 }
 
 /* Toggle Switches - Clean Row Separators */
@@ -964,8 +975,44 @@ input:checked+.slider::before {
 
 .settings-footer {
   border-top: 1.5px solid #58264b;
-  padding-top: 12px;
+  padding-top: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
   text-align: center;
+}
+
+.save-settings-btn {
+  background:#58264b;
+  color: #cdafa0;
+  border: 1.5px solid #58264b;
+  /* border-radius: 20px; */
+  padding: 10px 28px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: all 150ms ease;
+  width: 100%;
+  max-width: 220px;
+}
+
+.save-settings-btn:hover {
+  background: #73204f;
+  transform: translateY(-1px);
+  /* box-shadow: 0 4px 12px rgba(180, 91, 142, 0.3); */
+}
+
+.save-settings-btn:active {
+  transform: translateY(0);
+}
+
+.save-settings-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
 }
 
 #settings-status {
@@ -973,6 +1020,7 @@ input:checked+.slider::before {
   font-size: 12px;
   color: #f4d1ba;
   opacity: 0.85;
+  min-height: 16px;
 }
 
 /* ── Personal Dictionary UI ─────────────────────────────── */
