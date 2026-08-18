@@ -86,10 +86,11 @@ fn default_cleanup_fallback_model() -> String {
 }
 
 /// Per-OS default hotkey. macOS defaults to the bare Fn key, which is handled
-/// by a CGEventTap (the global-shortcut crate can't map Fn); everything else
-/// uses Alt+Space.
+/// by a CGEventTap (the global-shortcut crate can't map Fn); Windows/Linux use
+/// Ctrl+Space. Alt+Space and Win+Space are reserved by Windows and can't be
+/// registered as global hotkeys, so they're deliberately not defaults.
 fn default_hotkey() -> &'static str {
-    if cfg!(target_os = "macos") { "Fn" } else { "Alt+Space" }
+    if cfg!(target_os = "macos") { "Fn" } else { "Ctrl+Space" }
 }
 
 impl Default for Config {

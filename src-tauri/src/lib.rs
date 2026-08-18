@@ -599,6 +599,7 @@ pub fn run() {
                 let scale_factor = monitor.scale_factor();
                 let logical_width = monitor.size().width as f64 / scale_factor;
                 let x = (logical_width - 800.0) / 2.0;
+                // Top-center, under the webcam — the fixed position.
                 let y = 10.0;
                 overlay.position(x, y).build()
             } else {

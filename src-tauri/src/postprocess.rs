@@ -89,7 +89,8 @@ Developer syntax:
 - Keep OAuth, API, CLI, JSON, and similar acronyms capitalized.
 
 Output hygiene:
-- Never prepend boilerplate such as \"Here is the clean transcript\".
+- Never prepend boilerplate such as \"Here is the clean transcript\".\
+- Never output a thinking process, chain-of-thought, analysis, explanation, or step-by-step reasoning. Output only the cleaned text, directly, with no preamble.\
 - If the transcript is empty or only filler, return exactly: EMPTY";
 
 // In-memory per-model rate-limit cooldowns (minute-level). Not persisted —
@@ -705,10 +706,48 @@ fn call_cleanup_model(text: &str, config: &Config, model: &str, context: &str) -
     normalize_llm_output(&raw, text)
 }
 
+/// Reasoning-capable cleanup models occasionally leak a "Here's a thinking
+/// process: ..." block into the answer instead of returning just the cleaned
+/// text. When such a header is detected, drop everything through the last
+/// reasoning-artifact line (bullets, numbered steps, brackets, arrows) and
+/// keep only the trailing text. ponytail: only runs when a CoT header is
+/// found, so ordinary dictations are never touched.
+fn strip_reasoning_block(out: &str) -> String {
+    let head = out.get(..out.len().min(256)).map(str::to_lowercase).unwrap_or_default();
+    const HEADS: &[&str] = &[
+        "here's a thinking process",
+        "here is a thinking process",
+        "let me think through",
+        "let me walk through",
+        "chain of thought:",
+        "reasoning process:",
+    ];
+    if !HEADS.iter().any(|h| head.contains(h)) {
+        return out.to_string();
+    }
+
+    let lines: Vec<&str> = out.lines().collect();
+    let artifact = |t: &str| {
+        t.starts_with('-')
+            || t.starts_with('*')
+            || t.starts_with('[')
+            || t.starts_with('>')
+            || t.contains('✅')
+            || t.contains("->")
+            || t.contains('→')
+            || t.chars().next().is_some_and(|c| c.is_ascii_digit() && t.contains('.'))
+    };
+    match lines.iter().rposition(|l| artifact(l.trim_start())) {
+        Some(i) if i + 1 < lines.len() => lines[i + 1..].join("\n").trim().to_string(),
+        _ => out.to_string(),
+    }
+}
+
 /// Strip surrounding quotes, map the exact "EMPTY" sentinel to empty output,
 /// and run the instruction-execution guard.
 fn normalize_llm_output(raw: &str, original: &str) -> Result<String, CleanupError> {
-    let mut out = raw.trim().to_string();
+    let mut out = strip_reasoning_block(raw);
+    out = out.trim().to_string();
     if out.len() >= 2 {
         let first = out.chars().next().unwrap();
         let last = out.chars().last().unwrap();
@@ -1163,6 +1202,56 @@ mod tests {
         // raw transcript legitimately started with the phrase -> not execution
         assert!(!looks_like_assistant_execution("I think we should meet at 3", "i think we should meet at 3"));
         assert!(!looks_like_assistant_execution("Based on the transcript we meet at 3", "based on the transcript we meet at 3"));
+    }
+
+    #[test]
+    fn leaked_chain_of_thought_is_stripped() {
+        // gpt-oss-20b leaked its reasoning into content (from a real report)
+        let leaked = "\
+Here's a thinking process:
+
+1.  **Analyze User Input:**
+   - **Role:** Literal dictation cleanup layer.
+   - **RAW_TRANSCRIPTION:** \" Hello, what is the architecture for voice agency?\"
+
+2.  **Final Output Generation:**
+   - [Output] Hello, what is the architecture for voice agency?
+   - [Done]
+
+Hello, what is the architecture for voice agency?";
+        assert_eq!(
+            normalize_llm_output(leaked, "Hello, what is the architecture for voice agency?").unwrap(),
+            "Hello, what is the architecture for voice agency?"
+        );
+    }
+
+    #[test]
+    fn reasoning_strip_keeps_multiline_answers() {
+        // leaked email cleanup: the trailing multi-paragraph answer survives
+        let leaked = "\
+Here is a thinking process:
+- **Step 1:** analyze
+- **Step 2:** format
+- Final output:
+- Done.
+
+Hi Dana,
+
+Thanks for the update.
+
+Best,
+Sam";
+        assert_eq!(
+            normalize_llm_output(leaked, "hi dana thanks for the update best sam").unwrap(),
+            "Hi Dana,\n\nThanks for the update.\n\nBest,\nSam"
+        );
+    }
+
+    #[test]
+    fn reasoning_strip_leaves_clean_output_untouched() {
+        // no CoT header -> never stripped, even with markdown-ish content
+        let plain = "Hello, what is the architecture for voice agency?";
+        assert_eq!(normalize_llm_output(plain, plain).unwrap(), plain);
     }
 
     #[test]

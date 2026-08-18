@@ -87,7 +87,7 @@ when a new version is tagged. The buttons below download the latest installer di
 
 | Action | Result |
 |--------|--------|
-| **Hold `Meta+Space`, speak, release** | Your words are cleaned and typed into the focused app (`Cmd+Space` on macOS, `Win+Space` on Windows) |
+| **Hold `Ctrl+Space`, speak, release** | Your words are cleaned and typed into the focused app (`Fn` on macOS, `Ctrl+Space` on Windows/Linux — changeable in Settings) |
 | Click **Record** in the main window | Same, hands-free start/stop |
 | Hold **Space** (when the main window is focused) | Also starts dictation |
 

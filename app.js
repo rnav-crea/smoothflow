@@ -27,7 +27,6 @@ if (copyTranscriptBtn && transcriptEl) {
   });
 }
 
-const navHome = document.getElementById("nav-home");
 const settingsToggle = document.getElementById("settings-toggle");
 const settingsClose = document.getElementById("settings-close");
 const settingsModal = document.getElementById("settings-modal");
@@ -43,7 +42,6 @@ const fillersToggle = document.getElementById("fillers-toggle");
 const autopasteToggle = document.getElementById("autopaste-toggle");
 const startupToggle = document.getElementById("startup-toggle");
 const hotkeyInput = document.getElementById("hotkey-input");
-const overlayTopToggle = document.getElementById("overlay-top-toggle");
 const settingsStatus = document.getElementById("settings-status");
 
 // Surface hotkey registration/parse errors from the backend at startup
@@ -85,7 +83,6 @@ let isModalClosing = false;
 
 function openSettings() {
   if (!settingsModal) return;
-  if (navHome) navHome.classList.remove("active");
   if (settingsToggle) settingsToggle.classList.add("active");
   settingsModal.classList.remove("closing");
   settingsModal.classList.add("open");
@@ -96,7 +93,6 @@ function closeSettings() {
   if (!settingsModal || isModalClosing) return;
 
   isModalClosing = true;
-  if (navHome) navHome.classList.add("active");
   if (settingsToggle) settingsToggle.classList.remove("active");
   settingsModal.classList.remove("open");
   settingsModal.classList.add("closing");
@@ -110,7 +106,6 @@ function closeSettings() {
 window.openSettings = openSettings;
 window.closeSettings = closeSettings;
 
-if (navHome) navHome.addEventListener("click", closeSettings);
 if (settingsToggle) settingsToggle.addEventListener("click", openSettings);
 if (settingsClose) settingsClose.addEventListener("click", closeSettings);
 if (settingsModal) {
@@ -148,6 +143,9 @@ async function validateApiKeyAuto() {
     await invoke("test_api_connection", { baseUrl, apiKey });
     testApiStatus.textContent = "Valid API Key";
     testApiStatus.className = "valid";
+    if (currentConfig && apiKey !== currentConfig.api_key) {
+      saveConfig();
+    }
   } catch (err) {
     testApiStatus.textContent = ("Invalid API Key");
     testApiStatus.className = "invalid";
@@ -183,7 +181,6 @@ async function loadConfig() {
     autopasteToggle.checked = config.auto_paste;
     startupToggle.checked = config.launch_on_startup;
     if (hotkeyInput) hotkeyInput.value = config.hotkey || "Ctrl+Space";
-    if (overlayTopToggle) overlayTopToggle.checked = config.overlay_position === "top";
     log("Config loaded");
     if (apiKeyInput.value) {
       validateApiKeyAuto();
@@ -202,11 +199,11 @@ async function saveConfig() {
     api_key: apiKeyInput.value,
     auto_punctuation: punctuationToggle.checked,
     remove_fillers: fillersToggle.checked,
-    auto_paste:     autopasteToggle.checked,
+    auto_paste: autopasteToggle.checked,
     launch_on_startup: startupToggle.checked,
     dictionary: currentConfig.dictionary || [],
     hotkey: hotkeyInput ? hotkeyInput.value : "Ctrl+Space",
-    overlay_position: overlayTopToggle && overlayTopToggle.checked ? "top" : "bottom",
+    overlay_position: currentConfig.overlay_position || "bottom",
   };
   try {
     await invoke("update_config", { newConfig: updatedConfig });
@@ -247,7 +244,6 @@ try {
   autopasteToggle.addEventListener("change", saveConfig);
   startupToggle.addEventListener("change", saveConfig);
   if (hotkeyInput) hotkeyInput.addEventListener("change", saveConfig);
-  if (overlayTopToggle) overlayTopToggle.addEventListener("change", saveConfig);
 } catch (e) { console.warn("Config bind error:", e); }
 
 // Personal Dictionary
@@ -503,10 +499,18 @@ async function loadHistory() {
   if (statTodayDictations) statTodayDictations.textContent = todayEntries.length;
   if (statTotalWords) statTotalWords.textContent = padZero(data.total_words ?? 0, 3);
   if (statTotalDictations) statTotalDictations.textContent = padZero(data.total_dictations ?? 0, 2);
-  
+
   renderRecents(todayEntries);
 }
 
 loadHistory();
+
+// Refresh recents whenever a dictation completes (main window stays stale
+// otherwise — loadHistory() only runs once at startup)
+try {
+  listen("transcript-result", () => loadHistory());
+} catch (err) {
+  console.warn("transcript-result listener setup failed:", err);
+}
 
 loadConfig();
