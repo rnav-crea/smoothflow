@@ -31,6 +31,7 @@ when a new version is tagged. The buttons below download the latest installer di
 
 > The buttons link to the **latest** release, so they always fetch the current version — no need to update them per release.
 > Intel Macs (x86_64) aren't shipped yet; build from source for now (see Development below).
+> Once installed, SmoothFlow **auto-checks for updates** on launch and shows an in-app banner when a new version is available — no need to re-download from here.
 
 ---
 

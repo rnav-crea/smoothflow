@@ -23,6 +23,15 @@
         </nav>
       </header>
 
+      <!-- Update Banner (hidden until an update is available) -->
+      <div id="update-banner" style="display:none; background:var(--color-surface-muted); border-bottom:1px solid var(--color-border); padding:10px 20px; position:relative; text-align:center; font-family:var(--font-mono); font-size:12px; letter-spacing:0.5px; color:var(--color-text-secondary);">
+        <span id="update-info"></span>
+        <div style="position:absolute; right:20px; top:50%; transform:translateY(-50%); display:flex; gap:10px;">
+          <button id="update-btn" style="background:var(--color-accent); color:var(--color-accent-text); border:none; border-radius:var(--radius-sm); padding:5px 14px; font-family:var(--font-display); font-size:11px; font-weight:700; letter-spacing:1px; cursor:pointer;">UPDATE</button>
+          <button id="update-later-btn" style="background:transparent; color:var(--color-text-muted); border:1px solid var(--color-border); border-radius:var(--radius-sm); padding:5px 14px; font-family:var(--font-display); font-size:11px; font-weight:700; letter-spacing:1px; cursor:pointer;">LATER</button>
+        </div>
+      </div>
+
       <!-- Main Content -->
       <main class="main-content">
         <!-- Hero Section -->

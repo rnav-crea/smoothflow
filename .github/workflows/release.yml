@@ -47,26 +47,34 @@ jobs:
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build Tauri bundles
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: npm run tauri build
 
       - name: Collect and rename bundle artifacts
         shell: bash
         run: |
           mkdir -p release
-          find src-tauri/target/release/bundle -type f \( -name "*.exe" -o -name "*.msi" -o -name "*.dmg" -o -name "*.deb" -o -name "*.AppImage" \) -exec cp {} release/ \;
+          find src-tauri/target/release/bundle -type f \( -name "*.exe" -o -name "*.msi" -o -name "*.dmg" -o -name "*.deb" -o -name "*.AppImage" -o -name "*.tar.gz" -o -name "*.sig" \) -exec cp {} release/ \;
           cd release
           shopt -s nullglob
           case "${{ matrix.platform }}" in
             windows)
               mv *.exe SmoothFlow-Windows-x64-setup.exe 2>/dev/null || true
+              mv *.exe.sig SmoothFlow-Windows-x64-setup.exe.sig 2>/dev/null || true
               mv *.msi SmoothFlow-Windows-x64.msi 2>/dev/null || true
+              mv *.msi.sig SmoothFlow-Windows-x64.msi.sig 2>/dev/null || true
               ;;
             macos)
               mv *.dmg "SmoothFlow-macOS-$(uname -m).dmg"
+              mv *.tar.gz "SmoothFlow-macOS-$(uname -m).app.tar.gz" 2>/dev/null || true
+              mv *.tar.gz.sig "SmoothFlow-macOS-$(uname -m).app.tar.gz.sig" 2>/dev/null || true
               ;;
             linux)
               mv *.deb SmoothFlow-Linux-amd64.deb 2>/dev/null || true
+              mv *.deb.sig SmoothFlow-Linux-amd64.deb.sig 2>/dev/null || true
               mv *.AppImage SmoothFlow-Linux-x86_64.AppImage 2>/dev/null || true
+              mv *.AppImage.sig SmoothFlow-Linux-x86_64.AppImage.sig 2>/dev/null || true
               ;;
           esac
           ls -la
@@ -76,3 +84,40 @@ jobs:
         with:
           files: release/*
           generate_release_notes: true
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release assets
+        run: |
+          gh release download "${{ github.ref_name }}" --repo "${{ github.repository }}" --dir release
+
+      - name: Generate latest.json (updater manifest)
+        run: |
+          cd release
+          RELEASE="${{ github.ref_name }}"
+          VERSION="${RELEASE#v}"
+          NOTES="$(gh release view "$RELEASE" --repo "${{ github.repository }}" --json body --jq .body)"
+          PUB_DATE="$(gh release view "$RELEASE" --repo "${{ github.repository }}" --json createdAt --jq .createdAt)"
+          jq -n \
+            --arg v "$VERSION" \
+            --arg notes "$NOTES" \
+            --arg date "$PUB_DATE" \
+            --arg winSig "$(cat SmoothFlow-Windows-x64-setup.exe.sig)" \
+            --arg linSig "$(cat SmoothFlow-Linux-x86_64.AppImage.sig)" \
+            --arg macSig "$(cat SmoothFlow-macOS-arm64.app.tar.gz.sig)" \
+            '{version: $v, notes: $notes, pub_date: $date, platforms: {
+              "windows-x86_64": {url: "https://github.com/rnav-crea/smoothflow/releases/latest/download/SmoothFlow-Windows-x64-setup.exe", signature: $winSig},
+              "linux-x86_64":   {url: "https://github.com/rnav-crea/smoothflow/releases/latest/download/SmoothFlow-Linux-x86_64.AppImage", signature: $linSig},
+              "darwin-aarch64": {url: "https://github.com/rnav-crea/smoothflow/releases/latest/download/SmoothFlow-macOS-arm64.app.tar.gz", signature: $macSig}
+            }}' > latest.json
+          cat latest.json
+
+      - name: Upload latest.json
+        run: |
+          gh release upload "${{ github.ref_name }}" release/latest.json --repo "${{ github.repository }}" --clobber

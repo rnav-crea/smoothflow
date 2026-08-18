@@ -344,6 +344,11 @@ fn test_api_connection(base_url: String, api_key: String) -> Result<(), String> 
     transcription::verify_api(&base_url, &api_key)
 }
 
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 /// Start recording + show the overlay. Shared by the global-shortcut handler
 /// and the macOS Fn event tap. Returns whether recording actually started.
 pub(crate) fn hotkey_start(app: &tauri::AppHandle) -> bool {
@@ -534,6 +539,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
             recorder: Mutex::new(AudioRecorder::new()),
             config: Mutex::new(Config::load()),
@@ -687,6 +693,7 @@ pub fn run() {
             clear_history,
             inject_text,
             test_api_connection,
+            restart_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

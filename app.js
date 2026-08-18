@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { check } from "@tauri-apps/plugin-updater";
 const debug = document.getElementById("debug-bar");
 function log(msg) { if (debug) debug.textContent = msg; }
 log("App loaded");
@@ -514,3 +515,45 @@ try {
 }
 
 loadConfig();
+
+// Auto-updater
+async function checkForUpdates() {
+  const banner = document.getElementById("update-banner");
+  const info = document.getElementById("update-info");
+  const updateBtn = document.getElementById("update-btn");
+  const laterBtn = document.getElementById("update-later-btn");
+  if (!banner || !info) return; // banner DOM absent — keep the app working
+
+  try {
+    const update = await check();
+    if (!update) return; // no update available
+
+    info.textContent = update.body
+      ? `SmoothFlow v${update.version} is available — ${update.body}`
+      : `SmoothFlow v${update.version} is available`;
+    banner.style.display = "block";
+
+    if (updateBtn) {
+      updateBtn.addEventListener("click", async () => {
+        updateBtn.disabled = true;
+        updateBtn.textContent = "UPDATING...";
+        try {
+          await update.downloadAndInstall();
+          log("Update installed — restarting");
+          await invoke("restart_app");
+        } catch (err) {
+          log(`Update failed: ${err}`);
+          updateBtn.disabled = false;
+          updateBtn.textContent = "UPDATE";
+        }
+      });
+    }
+    if (laterBtn) {
+      laterBtn.addEventListener("click", () => { banner.style.display = "none"; });
+    }
+  } catch (err) {
+    console.warn("Update check failed:", err); // offline / endpoint not configured — non-fatal
+  }
+}
+
+checkForUpdates();
