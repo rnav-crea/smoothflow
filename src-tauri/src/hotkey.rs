@@ -4,9 +4,16 @@
 //!
 //! The global-shortcut crate's Carbon backend can't map the Fn key ("Unknown
 //! scancode"), so when the configured hotkey is a bare `Fn` we install an
-//! event tap that watches kVK_Function (keycode 63), swallows its key events
-//! so the OS never sees them, and drives the same `hotkey_start` /
+//! event tap that watches kVK_Function (keycode 63), swallows its events so
+//! the OS never sees them, and drives the same `hotkey_start` /
 //! `hotkey_finalize` helpers as the shortcut handler.
+//!
+//! Reality check: hardware Fn presses arrive as FlagsChanged events, not
+//! KeyDown/KeyUp — that's why macOS's own emoji picker hijacks Fn and why the
+//! tap masks FlagsChanged too. The KeyDown/KeyUp arm stays because some
+//! external keyboards emit those for Fn. Fn is still a poor default (macOS
+//! reserves it for Emoji & Symbols); Ctrl+Space is the default on all
+//! platforms and this tap only exists for users who explicitly pick Fn.
 
 use crate::{hotkey_finalize, hotkey_start};
 use std::sync::Mutex;
@@ -45,6 +52,7 @@ pub enum CGEventTapOptions {
 pub enum CGEventType {
     KeyDown = 10,
     KeyUp = 11,
+    FlagsChanged = 12,
     TapDisabledByTimeout = 0xFFFFFFFE,
     TapDisabledByUserInput = 0xFFFFFFFF,
 }
@@ -84,6 +92,7 @@ extern "C" {
     ) -> CFMachPortRef;
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGEventGetIntegerValueField(event: CGEventRef, field: CGEventField) -> i64;
+    fn CGEventGetFlags(event: CGEventRef) -> u64;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -113,6 +122,7 @@ const fn mask_bit(t: CGEventType) -> CGEventMask {
 
 const EVENT_MASK: CGEventMask = mask_bit(CGEventType::KeyDown)
     | mask_bit(CGEventType::KeyUp)
+    | mask_bit(CGEventType::FlagsChanged)
     | mask_bit(CGEventType::TapDisabledByTimeout)
     | mask_bit(CGEventType::TapDisabledByUserInput);
 
@@ -210,6 +220,30 @@ unsafe extern "C" fn tap_callback(
             } else {
                 event
             }
+        }
+        CGEventType::FlagsChanged => {
+            let keycode = unsafe { CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) };
+            if keycode != FN_KEYCODE {
+                return event;
+            }
+            // Hardware Fn toggles a flag instead of firing key events, so
+            // press/release comes from CGEventGetFlags: it's a press while
+            // the "already down" bit is clear AND either NX_FUNCTIONKEYMASK
+            // (0x800000) or the device-dependent left-Fn bit (0x20 in the
+            // device half) is set. hotkey_start/finalize tolerate repeats,
+            // so an edge case just becomes a no-op.
+            let flags = unsafe { CGEventGetFlags(event) };
+            let pressed = ((flags & 0x8000_0000_0000_0000u64) == 0)
+                && (((flags & 0x0080_0000) != 0) || (((flags >> 16) & 0x20) != 0));
+            // user_info is a leaked Box<AppHandle> — always valid here.
+            let app = (*(user_info as *const AppHandle)).clone();
+            if pressed {
+                hotkey_start(&app);
+            } else {
+                hotkey_finalize(&app);
+            }
+            // Swallow so macOS never sees Fn and the emoji picker stays shut.
+            std::ptr::null()
         }
     }
 }
