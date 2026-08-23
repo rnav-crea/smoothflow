@@ -1,8 +1,51 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
-const debug = document.getElementById("debug-bar");
-function log(msg) { if (debug) debug.textContent = msg; }
+const debug = document.getElementById("debug-text");
+const debugIcon = document.getElementById("debug-info-icon");
+const debugPopover = document.getElementById("debug-popover");
+let lastDebugMessage = "App loaded";
+
+function log(msg) {
+  if (!debug) return;
+  lastDebugMessage = msg;
+
+  // Color the text based on severity
+  const lower = msg.toLowerCase();
+  const isError = lower.includes("error") || lower.includes("fail") || lower.includes("invalid") || lower.includes("not found");
+
+  if (isError) {
+    debug.textContent = "Error";
+    debug.className = "status-error";
+    if (debugIcon) debugIcon.classList.add("has-error");
+  } else {
+    debug.textContent = msg;
+    debug.className = "status-ok";
+    if (debugIcon) debugIcon.classList.remove("has-error");
+  }
+
+  // Sync popover content
+  if (debugPopover) debugPopover.textContent = msg;
+}
+
+// Info icon hover — show/hide popover with full message
+if (debugIcon && debugPopover) {
+  debugIcon.addEventListener("mouseenter", () => {
+    debugPopover.textContent = lastDebugMessage;
+    debugPopover.classList.add("visible");
+  });
+  debugIcon.addEventListener("mouseleave", () => {
+    debugPopover.classList.remove("visible");
+  });
+  // Keep popover open when hovering over the popover itself
+  debugPopover.addEventListener("mouseenter", () => {
+    debugPopover.classList.add("visible");
+  });
+  debugPopover.addEventListener("mouseleave", () => {
+    debugPopover.classList.remove("visible");
+  });
+}
+
 log("App loaded");
 
 // DOM Elements
@@ -210,6 +253,7 @@ async function saveConfig() {
     await invoke("update_config", { newConfig: updatedConfig });
     currentConfig = updatedConfig;
     if (settingsStatus) {
+      settingsStatus.className = "";
       settingsStatus.textContent = "Settings saved successfully";
       setTimeout(() => {
         if (settingsStatus.textContent === "Settings saved successfully") {
@@ -220,7 +264,18 @@ async function saveConfig() {
     log("Config saved");
   } catch (err) {
     log(`Config save error: ${err}`);
-    if (settingsStatus) settingsStatus.textContent = "Save failed: " + err;
+    if (settingsStatus) {
+      settingsStatus.className = "error";
+      settingsStatus.replaceChildren();
+      const lbl = document.createElement("span");
+      lbl.className = "error-label";
+      lbl.textContent = "config error";
+      const info = document.createElement("span");
+      info.className = "info-dot";
+      info.textContent = "\u24D8";
+      info.setAttribute("data-tip", String(err));
+      settingsStatus.append(lbl, info);
+    }
   }
 }
 
@@ -513,6 +568,72 @@ try {
 } catch (err) {
   console.warn("transcript-result listener setup failed:", err);
 }
+
+const statsResetBtn = document.getElementById("stats-reset-btn");
+const resetModal = document.getElementById("reset-modal");
+const resetModalClose = document.getElementById("reset-modal-close");
+const resetCountersCheck = document.getElementById("reset-counters-check");
+const resetHistoryCheck = document.getElementById("reset-history-check");
+const resetConfirmBtn = document.getElementById("reset-confirm-btn");
+const resetCancelBtn = document.getElementById("reset-cancel-btn");
+
+function updateResetConfirmState() {
+  if (resetConfirmBtn) {
+    resetConfirmBtn.disabled = !((resetCountersCheck && resetCountersCheck.checked) || (resetHistoryCheck && resetHistoryCheck.checked));
+  }
+}
+
+function openResetModal() {
+  if (!resetModal || isModalClosing) return;
+  if (resetCountersCheck) resetCountersCheck.checked = false;
+  if (resetHistoryCheck) resetHistoryCheck.checked = false;
+  if (resetConfirmBtn) resetConfirmBtn.disabled = true;
+  resetModal.classList.remove("closing");
+  resetModal.classList.add("open");
+  log("Reset popup opened");
+}
+
+function closeResetModal() {
+  if (!resetModal || isModalClosing) return;
+
+  isModalClosing = true;
+  resetModal.classList.remove("open");
+  resetModal.classList.add("closing");
+
+  setTimeout(() => {
+    resetModal.classList.remove("closing");
+    isModalClosing = false;
+  }, 200);
+}
+
+async function confirmReset() {
+  if (resetConfirmBtn && resetConfirmBtn.disabled) return;
+  const counters = resetCountersCheck && resetCountersCheck.checked;
+  const history = resetHistoryCheck && resetHistoryCheck.checked;
+  if (resetConfirmBtn) resetConfirmBtn.disabled = true;
+  try {
+    if (counters) await invoke("reset_stats");
+    if (history) await invoke("clear_history");
+  } catch (err) {
+    log(`Reset failed: ${err}`);
+    updateResetConfirmState();
+    return;
+  }
+  closeResetModal();
+  await loadHistory();
+}
+
+if (statsResetBtn) statsResetBtn.addEventListener("click", openResetModal);
+if (resetCancelBtn) resetCancelBtn.addEventListener("click", closeResetModal);
+if (resetModalClose) resetModalClose.addEventListener("click", closeResetModal);
+if (resetModal) {
+  resetModal.addEventListener("click", (e) => {
+    if (e.target === resetModal) closeResetModal();
+  });
+}
+if (resetCountersCheck) resetCountersCheck.addEventListener("change", updateResetConfirmState);
+if (resetHistoryCheck) resetHistoryCheck.addEventListener("change", updateResetConfirmState);
+if (resetConfirmBtn) resetConfirmBtn.addEventListener("click", confirmReset);
 
 loadConfig();
 

@@ -332,6 +332,15 @@ fn clear_history(state: tauri::State<AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn reset_stats(state: tauri::State<AppState>) -> Result<(), String> {
+    let mut history = state.history.lock().unwrap();
+    history.total_dictations = 0;
+    history.total_words = 0;
+    history.save();
+    Ok(())
+}
+
+#[tauri::command]
 fn inject_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
@@ -691,6 +700,7 @@ pub fn run() {
             get_history,
             delete_history_entry,
             clear_history,
+            reset_stats,
             inject_text,
             test_api_connection,
             restart_app,
