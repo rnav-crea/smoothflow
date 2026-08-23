@@ -219,7 +219,7 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
         if config.auto_paste {
             let t2 = std::time::Instant::now();
             sf_log!("CMD: typing text...");
-            if let Err(e) = text_injection::type_text(&text) {
+            if let Err(e) = text_injection::type_text(&app, &text) {
                 show_error(&app, "transcription-error", e.clone());
                 return Err(e);
             }
@@ -332,11 +332,11 @@ fn clear_history(state: tauri::State<AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn inject_text(text: String) -> Result<(), String> {
+fn inject_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
     }
-    text_injection::type_text(&text)
+    text_injection::type_text(&app, &text)
 }
 
 #[tauri::command]
@@ -478,7 +478,7 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
                             }
                         }
                     }
-                    if let Err(e) = text_injection::type_text(&text) {
+                    if let Err(e) = text_injection::type_text(&app_clone, &text) {
                         sf_log!("HOTKEY: type_text error: {e}");
                         show_error(&app_clone, "transcription-error", e);
                     }
