@@ -2,6 +2,7 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 jobs:
@@ -41,3 +42,30 @@ jobs:
 
       - name: tauri build (no bundle)
         run: npm run tauri build -- --no-bundle
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Frontend deps
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LIBCLANG_PATH: 'C:\Program Files\LLVM\bin'
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'SmoothFlow ${{ github.ref_name }}'
+          releaseDraft: false
+          prerelease: false
