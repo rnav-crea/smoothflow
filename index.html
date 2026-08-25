@@ -20,15 +20,23 @@
 
         <nav class="header-nav">
           <button id="settings-toggle" class="pill-nav-btn" aria-label="Settings">SETTINGS</button>
+          <button id="update-bell" class="pill-nav-btn" aria-label="Updates">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"></path></svg>
+            <span id="update-bell-dot"></span>
+          </button>
         </nav>
       </header>
 
-      <!-- Update Banner (hidden until an update is available) -->
-      <div id="update-banner" style="display:none; background:var(--color-surface-muted); border-bottom:1px solid var(--color-border); padding:10px 20px; position:relative; text-align:center; font-family:var(--font-mono); font-size:12px; letter-spacing:0.5px; color:var(--color-text-secondary);">
-        <span id="update-info"></span>
-        <div style="position:absolute; right:20px; top:50%; transform:translateY(-50%); display:flex; gap:10px;">
-          <button id="update-btn" style="background:var(--color-accent); color:var(--color-accent-text); border:none; border-radius:var(--radius-sm); padding:5px 14px; font-family:var(--font-display); font-size:11px; font-weight:700; letter-spacing:1px; cursor:pointer;">UPDATE</button>
-          <button id="update-later-btn" style="background:transparent; color:var(--color-text-muted); border:1px solid var(--color-border); border-radius:var(--radius-sm); padding:5px 14px; font-family:var(--font-display); font-size:11px; font-weight:700; letter-spacing:1px; cursor:pointer;">LATER</button>
+      <!-- Update ticker. ponytail: <marquee> is deprecated but Chromium keeps it;
+           if a future WebView2 removes it, restore the CSS-keyframes version -->
+      <marquee id="update-marquee" style="display:none;" scrollamount="4" title="Update available"></marquee>
+
+      <!-- Update popover (anchored below the bell, hidden by default) -->
+      <div id="update-popover" style="display:none;">
+        <div id="update-info" class="update-popover-info"></div>
+        <div class="update-popover-actions">
+          <button id="update-btn" class="update-confirm-btn">CONFIRM</button>
+          <button id="update-later-btn" class="update-cancel-btn">CANCEL</button>
         </div>
       </div>
 

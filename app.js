@@ -638,42 +638,89 @@ if (resetConfirmBtn) resetConfirmBtn.addEventListener("click", confirmReset);
 loadConfig();
 
 // Auto-updater
-async function checkForUpdates() {
-  const banner = document.getElementById("update-banner");
+// TESTING: dummy update - set true only to retest the update UI without a real release
+const USE_DUMMY_UPDATE = false;
+
+const updateBell = document.getElementById("update-bell");
+const updateBellDot = document.getElementById("update-bell-dot");
+const updateMarquee = document.getElementById("update-marquee");
+const updatePopover = document.getElementById("update-popover");
+
+function toggleUpdatePopover(show) {
+  if (!updatePopover) return;
+  const open = show !== undefined ? show : updatePopover.style.display === "none";
+  updatePopover.style.display = open ? "block" : "none";
+}
+
+if (updateBell) {
+  updateBell.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleUpdatePopover();
+  });
+}
+if (updateMarquee) {
+  updateMarquee.addEventListener("click", () => toggleUpdatePopover(true));
+}
+
+// Close popover when clicking anywhere outside bell + popover
+document.addEventListener("click", (e) => {
+  if (!updatePopover || updatePopover.style.display === "none") return;
+  if (!updatePopover.contains(e.target) && !updateBell?.contains(e.target)) {
+    toggleUpdatePopover(false);
+  }
+});
+
+function showUpdateAvailable(version) {
+  if (updateBellDot) updateBellDot.classList.add("visible");
+  if (updateMarquee) {
+    updateMarquee.textContent = `UPDATE v${version} AVAILABLE — CLICK THE BELL TO VIEW`;
+    updateMarquee.style.display = "block";
+  }
   const info = document.getElementById("update-info");
+  if (info) info.textContent = `SMOOTHFLOW v${version} AVAILABLE`;
+}
+
+async function checkForUpdates() {
+  let update = null;
+  if (USE_DUMMY_UPDATE) {
+    // TESTING: dummy update - flip USE_DUMMY_UPDATE back to true to retest the UI
+    update = { version: "0.1.3", body: "", downloadAndInstall: async () => { await new Promise(r => setTimeout(r, 1000)); } };
+  } else {
+    try {
+      update = await check();
+    } catch (err) {
+      console.warn("Update check failed:", err); // offline / endpoint not configured — non-fatal
+      return;
+    }
+  }
+  if (!update) return; // no update available
+
+  showUpdateAvailable(update.version);
+
   const updateBtn = document.getElementById("update-btn");
   const laterBtn = document.getElementById("update-later-btn");
-  if (!banner || !info) return; // banner DOM absent — keep the app working
 
-  try {
-    const update = await check();
-    if (!update) return; // no update available
-
-    info.textContent = update.body
-      ? `SmoothFlow v${update.version} is available — ${update.body}`
-      : `SmoothFlow v${update.version} is available`;
-    banner.style.display = "block";
-
-    if (updateBtn) {
-      updateBtn.addEventListener("click", async () => {
-        updateBtn.disabled = true;
-        updateBtn.textContent = "UPDATING...";
-        try {
-          await update.downloadAndInstall();
-          log("Update installed — restarting");
-          await invoke("restart_app");
-        } catch (err) {
-          log(`Update failed: ${err}`);
-          updateBtn.disabled = false;
-          updateBtn.textContent = "UPDATE";
-        }
-      });
-    }
-    if (laterBtn) {
-      laterBtn.addEventListener("click", () => { banner.style.display = "none"; });
-    }
-  } catch (err) {
-    console.warn("Update check failed:", err); // offline / endpoint not configured — non-fatal
+  if (updateBtn) {
+    updateBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      updateBtn.disabled = true;
+      updateBtn.textContent = "UPDATING...";
+      try {
+        await update.downloadAndInstall();
+        log("Update installed — restarting");
+        await invoke("restart_app");
+      } catch (err) {
+        log(`Update failed: ${err}`);
+        updateBtn.disabled = false;
+        updateBtn.textContent = "CONFIRM";
+      }
+    });
+  }
+  if (laterBtn) {
+    laterBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleUpdatePopover(false); // marquee + dot stay until restart/successful update
+    });
   }
 }
 
