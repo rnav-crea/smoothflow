@@ -13,9 +13,6 @@
   <a href="https://github.com/rnav-crea/smoothflow/releases/latest/download/SmoothFlow-Windows-x64-setup.exe">
     <img src="https://img.shields.io/badge/Download_for-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows">
   </a>
-  <a href="https://github.com/rnav-crea/smoothflow/releases/latest/download/SmoothFlow-macOS-arm64.dmg">
-    <img src="https://img.shields.io/badge/Download_for-macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS">
-  </a>
   <a href="https://github.com/rnav-crea/smoothflow/releases/latest/download/SmoothFlow-Linux-x86_64.AppImage">
     <img src="https://img.shields.io/badge/Download_for-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download for Linux">
   </a>
@@ -23,7 +20,7 @@
 
 <p align="center">
   Built with <a href="https://tauri.app">Tauri 2</a> (Rust core + webview) and a framework-free vanilla JS frontend.<br>
-  Free &amp; open source · MIT licensed · Works on Windows, macOS (Apple Silicon), and Linux
+  Free &amp; open source · MIT licensed · Works on Windows and Linux (macOS build not yet released)
 </p>
 
 ---
@@ -52,10 +49,10 @@
 | Platform | Installer | First launch |
 |----------|-----------|--------------|
 | **Windows** | `SmoothFlow-Windows-x64-setup.exe` (or `.msi`) from the buttons above | Run it. If SmartScreen warns *"isn't commonly downloaded"*: **More info → Run anyway** (expected — the build is unsigned; this goes away once builds are code-signed or enough installs earn trust). Launch from the Start menu; it sits in the tray. |
-| **macOS** (Apple Silicon) | `SmoothFlow-macOS-arm64.dmg` | Open the `.dmg`, drag **SmoothFlow** to Applications. First launch: **right-click the app → Open → Open** (required because it's unsigned). On first dictation, grant the **Accessibility** permission when prompted (System Settings → Privacy & Security → Accessibility) — this is what lets SmoothFlow type into other apps. |
+| **macOS** (Apple Silicon) | **Download disabled** | The macOS build isn't being offered because it isn't fully tested/verified on real hardware yet — shipping an unverified installer would give a poor first experience. It will return once it's validated. In the meantime, build from source ([Development](#development)). |
 | **Linux** | `SmoothFlow-Linux-x86_64.AppImage` (or `.deb`) | `chmod +x` the AppImage and run it, or `sudo apt install ./SmoothFlow_<version>_amd64.deb`. If launch complains, install WebKitGTK: `sudo apt install libwebkit2gtk-4.1-0`. |
 
-Intel Macs aren't shipped yet — build from source ([Development](#development)).
+macOS downloads are currently disabled for Apple Silicon and Intel alike — the build isn't verified on real hardware yet. Build from source ([Development](#development)) if you need it now.
 
 Installers always come from the [latest release](https://github.com/rnav-crea/smoothflow/releases/latest).
 Once installed, SmoothFlow auto-checks for updates on launch and shows an in-app banner — no re-downloading.

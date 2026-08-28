@@ -15,6 +15,24 @@ src-tauri/WebView2Loader.dll
 skills-lock.json
 /styles.css
 
+# accidental vim swap file (tracked under a mangled name)
+*vimfilesundo/*
+!*vimfilesundo/
+
+# unused mobile assets — desktop-only app
+src-tauri/icons/android/
+src-tauri/icons/ios/
+
+# generated Tauri schema
+src-tauri/gen/
+
+# STT benchmark fixtures + binary
+src-tauri/test_data/
+src-tauri/src/bin/
+
+# internal doc not meant for public repo
+NOTICE
+
 *.md
 !README.md
 !PRIVACY.md

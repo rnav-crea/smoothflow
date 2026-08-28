@@ -168,8 +168,12 @@ else toggleKeyVisibility.addEventListener("click", () => {
 // Auto-validate API connection when key or URL is changed/pasted
 const testApiStatus = document.getElementById("test-api-status");
 let apiValidationTimer = null;
+// ponytail: at autostart the app can boot before the network is up, so a
+// failed check is retried with backoff instead of failing forever.
+const API_RETRY_ATTEMPTS = 8;
+const API_RETRY_BASE_MS = 1500;
 
-async function validateApiKeyAuto() {
+async function validateApiKeyAuto(attempt = 0) {
   if (!testApiStatus) return;
   const apiKey = apiKeyInput ? apiKeyInput.value.trim() : "";
   const baseUrl = apiUrlInput ? apiUrlInput.value.trim() : "";
@@ -191,8 +195,17 @@ async function validateApiKeyAuto() {
       saveConfig();
     }
   } catch (err) {
-    testApiStatus.textContent = ("Invalid API Key");
-    testApiStatus.className = "invalid";
+    if (attempt < API_RETRY_ATTEMPTS) {
+      testApiStatus.textContent = "Offline — retrying...";
+      testApiStatus.className = "testing";
+      setTimeout(
+        () => validateApiKeyAuto(attempt + 1),
+        API_RETRY_BASE_MS * (attempt + 1)
+      );
+    } else {
+      testApiStatus.textContent = "Invalid API Key";
+      testApiStatus.className = "invalid";
+    }
   }
 }
 
