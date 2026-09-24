@@ -6,6 +6,7 @@ mod history;
 mod hotkey;
 mod postprocess;
 mod text_injection;
+mod text_rules;
 pub mod transcription;
 
 use audio::AudioRecorder;

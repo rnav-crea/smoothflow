@@ -79,10 +79,18 @@ pub struct Config {
     pub dictionary: Vec<String>,
     pub hotkey: String,
     pub overlay_position: String,
+    #[serde(default = "default_casual_fast_path_words")]
+    pub casual_fast_path_words: usize,
+    #[serde(default)]
+    pub keep_audio_clips: bool,
 }
 
 fn default_cleanup_fallback_model() -> String {
     "qwen/qwen3.6-27b".into()
+}
+
+fn default_casual_fast_path_words() -> usize {
+    4
 }
 
 /// Ctrl+Space everywhere by default — macOS reserves Fn/Globe for the Emoji &
@@ -107,6 +115,8 @@ impl Default for Config {
             dictionary: Vec::new(),
             hotkey: default_hotkey().into(),
             overlay_position: "bottom".into(),
+            casual_fast_path_words: 4,
+            keep_audio_clips: false,
         }
     }
 }
@@ -170,6 +180,8 @@ mod tests {
         assert!(c.dictionary.is_empty());
         assert_eq!(c.hotkey, default_hotkey());
         assert_eq!(c.overlay_position, "bottom");
+        assert_eq!(c.casual_fast_path_words, 4);
+        assert!(!c.keep_audio_clips);
     }
 
     #[test]
@@ -187,6 +199,8 @@ mod tests {
             dictionary: vec!["foo".into(), "bar".into()],
             hotkey: "Alt+Shift+T".into(),
             overlay_position: "top".into(),
+            casual_fast_path_words: 7,
+            keep_audio_clips: true,
         };
         let json = serde_json::to_string(&c).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
@@ -196,6 +210,8 @@ mod tests {
         assert_eq!(back.dictionary, vec!["foo", "bar"]);
         assert_eq!(back.hotkey, "Alt+Shift+T");
         assert_eq!(back.overlay_position, "top");
+        assert_eq!(back.casual_fast_path_words, 7);
+        assert!(back.keep_audio_clips);
     }
 
     #[test]
@@ -206,6 +222,9 @@ mod tests {
         let c: Config = serde_json::from_str(json).unwrap();
         assert_eq!(c.cleanup_fallback_model, "qwen/qwen3.6-27b");
         assert_eq!(c.cleanup_model, "openai/gpt-oss-20b");
+        // fields added in Phase 1 load with their defaults from old files
+        assert_eq!(c.casual_fast_path_words, 4);
+        assert!(!c.keep_audio_clips);
     }
 
     #[test]
@@ -251,6 +270,8 @@ mod tests {
             dictionary: vec!["term".into()],
             hotkey: "Ctrl+Shift+Space".into(),
             overlay_position: "bottom".into(),
+            casual_fast_path_words: 5,
+            keep_audio_clips: true,
         };
         c.save();
         let loaded = Config::load();
@@ -264,6 +285,8 @@ mod tests {
         assert_eq!(loaded.dictionary, vec!["term"]);
         assert_eq!(loaded.hotkey, "Ctrl+Shift+Space");
         assert_eq!(loaded.overlay_position, "bottom");
+        assert_eq!(loaded.casual_fast_path_words, 5);
+        assert!(loaded.keep_audio_clips);
     }
 
     #[test]
