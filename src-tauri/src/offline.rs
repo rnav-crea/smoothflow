@@ -178,7 +178,11 @@ pub fn status(config_dir: &Path, custom_dir: &str) -> Result<ModelStatus, String
             Ok(metadata) if metadata.file_type().is_symlink() => (false, false, 0),
             Ok(metadata) if metadata.is_file() => {
                 let installed_bytes = metadata.len();
-                let verified = file_is_valid(&path, spec)?;
+                // ponytail: size-only here. `download` already SHA-256s every
+                // file (offline.rs:228), and re-hashing 3.4 GB on every Settings
+                // open is what froze the window. Hash the file here only if the
+                // size check is ever suspected of lying.
+                let verified = installed_bytes == spec.expected_size;
                 (true, verified, installed_bytes)
             }
             Ok(_) => return Err(format!("Model path '{}' is not a regular file.", path.display())),
