@@ -156,7 +156,7 @@ When switching providers, this is what changes:
 
 | Provider | Base URL | Transcription model | Cleanup model options | Cost |
 |----------|----------|--------------------|-----------------------|------|
-| **Groq** *(default)* | `https://api.groq.com/openai/v1` | `whisper-large-v3-turbo` or `whisper-large-v3` | `openai/gpt-oss-20b`, `llama-3.1-8b-instant`, `llama-3.3-70b-versatile` | Free tier |
+| **Groq** *(default)* | `https://api.groq.com/openai/v1` | `whisper-large-v3-turbo` or `whisper-large-v3` | `openai/gpt-oss-20b` (fast), `qwen/qwen3.6-27b` (best at self-corrections) | Free tier |
 | **OpenAI** | `https://api.openai.com/v1` | `whisper-1` | `gpt-4o-mini`, `gpt-4o` | Paid |
 | **Together AI** | `https://api.together.xyz/v1` | `openai/whisper-large-v3` | `meta-llama/Llama-3.3-70B-Instruct-Turbo`, etc. | Paid (~$0.0015/min) |
 | **Fireworks AI** | `https://audio-prod.api.fireworks.ai/v1` | `whisper-v3` or `whisper-v3-turbo` | ⚠️ none — see note | Paid |

@@ -204,10 +204,12 @@ const GROQ_MODELS = [
 
 const GROQ_CLEANUP_MODELS = [
   { value: "", label: "Disabled (no LLM cleanup)" },
-  { value: "llama-3.1-8b-instant", label: "llama-3.1-8b-instant (fast, free on Groq)" },
-  { value: "llama-3.3-70b-versatile", label: "llama-3.3-70b-versatile (best quality)" },
-  { value: "openai/gpt-oss-20b", label: "openai/gpt-oss-20b (Groq)" },
-  { value: "qwen/qwen3.6-27b", label: "qwen/qwen3.6-27b (Groq)" },
+  // Groq shut llama-3.1-8b-instant and llama-3.3-70b-versatile down on
+  // 2026-08-16. Offering them 404'd on every dictation and, because cleanup
+  // failures are silent, looked like the transcript was simply not cleaned.
+  { value: "openai/gpt-oss-20b", label: "openai/gpt-oss-20b (Groq, fast — recommended)" },
+  { value: "qwen/qwen3.6-27b", label: "qwen/qwen3.6-27b (Groq, best at self-corrections)" },
+  { value: "openai/gpt-oss-120b", label: "openai/gpt-oss-120b (Groq, highest quality)" },
 ];
 
 const OPENAI_MODELS = [

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmoothFlow</title>
-    <link rel="stylesheet" href="/public/styles.css" />
+    <link rel="stylesheet" href="/styles.css" />
   </head>
   <body class="theme-retro">
     <div id="app">
@@ -157,12 +157,11 @@
               <label for="cleanup-model-select">Cleanup Model</label>
               <select id="cleanup-model-select" class="settings-select">
                 <option value="">Disabled (no LLM cleanup)</option>
-                <option value="llama-3.1-8b-instant">llama-3.1-8b-instant (fast, free on Groq)</option>
-                <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile (best quality)</option>
+                <option value="openai/gpt-oss-20b">openai/gpt-oss-20b (Groq, fast — recommended)</option>
+                <option value="qwen/qwen3.6-27b">qwen/qwen3.6-27b (Groq, best at self-corrections)</option>
+                <option value="openai/gpt-oss-120b">openai/gpt-oss-120b (Groq, highest quality)</option>
                 <option value="gpt-4o-mini">gpt-4o-mini (OpenAI)</option>
                 <option value="gpt-4o">gpt-4o (OpenAI)</option>
-                <option value="openai/gpt-oss-20b">openai/gpt-oss-20b (Groq)</option>
-                <option value="qwen/qwen3.6-27b">qwen/qwen3.6-27b (Groq)</option>
                 <option value="">Custom...</option>
               </select>
               <input type="text" id="cleanup-model-input" class="settings-input-custom" placeholder="Custom model name" style="display:none;" />
