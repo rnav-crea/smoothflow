@@ -30,3 +30,10 @@ nnnoiseless = "0.5"
 arboard = "3"
 regex = "1"
 keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
+
+# ponytail: RNNoise is a neural net and the worst case for an unoptimized
+# build — at opt-level 0 denoise() ran 4.3s for 48s of audio and every
+# dictation felt broken. Optimizing just this one dependency makes dev
+# builds representative of release without slowing the edit/compile loop.
+[profile.dev.package.nnnoiseless]
+opt-level = 3
