@@ -79,6 +79,16 @@ pub struct Config {
     pub dictionary: Vec<String>,
     pub hotkey: String,
     pub overlay_position: String,
+    #[serde(default)]
+    pub offline_mode: bool,
+    #[serde(default = "default_stt_version")]
+    pub stt_version: String,
+    #[serde(default = "default_llm_model_size")]
+    pub llm_model_size: String,
+    #[serde(default)]
+    pub models_dir: String,
+    #[serde(default)]
+    pub auto_download_models: bool,
     #[serde(default = "default_casual_fast_path_words")]
     pub casual_fast_path_words: usize,
     #[serde(default)]
@@ -87,6 +97,14 @@ pub struct Config {
 
 fn default_cleanup_fallback_model() -> String {
     "qwen/qwen3.6-27b".into()
+}
+
+fn default_stt_version() -> String {
+    "v2".into()
+}
+
+fn default_llm_model_size() -> String {
+    "4b".into()
 }
 
 fn default_casual_fast_path_words() -> usize {
@@ -115,6 +133,11 @@ impl Default for Config {
             dictionary: Vec::new(),
             hotkey: default_hotkey().into(),
             overlay_position: "bottom".into(),
+            offline_mode: false,
+            stt_version: default_stt_version(),
+            llm_model_size: default_llm_model_size(),
+            models_dir: String::new(),
+            auto_download_models: false,
             casual_fast_path_words: 4,
             keep_audio_clips: false,
         }
@@ -180,6 +203,11 @@ mod tests {
         assert!(c.dictionary.is_empty());
         assert_eq!(c.hotkey, default_hotkey());
         assert_eq!(c.overlay_position, "bottom");
+        assert!(!c.offline_mode);
+        assert_eq!(c.stt_version, "v2");
+        assert_eq!(c.llm_model_size, "4b");
+        assert!(c.models_dir.is_empty());
+        assert!(!c.auto_download_models);
         assert_eq!(c.casual_fast_path_words, 4);
         assert!(!c.keep_audio_clips);
     }
@@ -199,6 +227,11 @@ mod tests {
             dictionary: vec!["foo".into(), "bar".into()],
             hotkey: "Alt+Shift+T".into(),
             overlay_position: "top".into(),
+            offline_mode: true,
+            stt_version: "v3".into(),
+            llm_model_size: "2b".into(),
+            models_dir: "D:/models".into(),
+            auto_download_models: true,
             casual_fast_path_words: 7,
             keep_audio_clips: true,
         };
@@ -210,6 +243,11 @@ mod tests {
         assert_eq!(back.dictionary, vec!["foo", "bar"]);
         assert_eq!(back.hotkey, "Alt+Shift+T");
         assert_eq!(back.overlay_position, "top");
+        assert!(back.offline_mode);
+        assert_eq!(back.stt_version, "v3");
+        assert_eq!(back.llm_model_size, "2b");
+        assert_eq!(back.models_dir, "D:/models");
+        assert!(back.auto_download_models);
         assert_eq!(back.casual_fast_path_words, 7);
         assert!(back.keep_audio_clips);
     }
@@ -225,6 +263,11 @@ mod tests {
         // fields added in Phase 1 load with their defaults from old files
         assert_eq!(c.casual_fast_path_words, 4);
         assert!(!c.keep_audio_clips);
+        assert!(!c.offline_mode);
+        assert_eq!(c.stt_version, "v2");
+        assert_eq!(c.llm_model_size, "4b");
+        assert!(c.models_dir.is_empty());
+        assert!(!c.auto_download_models);
     }
 
     #[test]
@@ -270,6 +313,11 @@ mod tests {
             dictionary: vec!["term".into()],
             hotkey: "Ctrl+Shift+Space".into(),
             overlay_position: "bottom".into(),
+            offline_mode: true,
+            stt_version: "v3".into(),
+            llm_model_size: "9b".into(),
+            models_dir: "C:/SmoothFlow/models".into(),
+            auto_download_models: true,
             casual_fast_path_words: 5,
             keep_audio_clips: true,
         };
@@ -285,6 +333,11 @@ mod tests {
         assert_eq!(loaded.dictionary, vec!["term"]);
         assert_eq!(loaded.hotkey, "Ctrl+Shift+Space");
         assert_eq!(loaded.overlay_position, "bottom");
+        assert!(loaded.offline_mode);
+        assert_eq!(loaded.stt_version, "v3");
+        assert_eq!(loaded.llm_model_size, "9b");
+        assert_eq!(loaded.models_dir, "C:/SmoothFlow/models");
+        assert!(loaded.auto_download_models);
         assert_eq!(loaded.casual_fast_path_words, 5);
         assert!(loaded.keep_audio_clips);
     }

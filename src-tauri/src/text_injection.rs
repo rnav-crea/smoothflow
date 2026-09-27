@@ -1,5 +1,7 @@
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::time::Duration;
+use std::sync::mpsc;
+use std::thread;
 
 // Ctrl+V on Windows/Linux, Cmd+V on macOS. enigo's letter keys (A-Z) only
 // exist on Windows, so the other platforms use the layout-mapped Unicode key.
@@ -11,6 +13,10 @@ fn paste_combo() -> (Key, Key) {
     #[cfg(all(unix, not(target_os = "macos")))]
     { (Key::Control, Key::Unicode('v')) }
 }
+
+/// Hard timeout for any clipboard operation. Windows clipboard IPC can block
+/// indefinitely if another app (clipboard manager, password manager) holds it open.
+const CLIPBOARD_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Paste `text` into the currently focused application.
 ///
@@ -47,16 +53,32 @@ fn do_paste(text: &str) -> Result<(), String> {
 }
 
 fn clipboard_paste(text: &str) -> Result<(), String> {
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|e| format!("[PST-001] Could not open clipboard. ({e})"))?;
+    let text = text.to_owned();
+    let (tx, rx) = mpsc::channel();
 
-    let old = clipboard.get_text().ok();
+    thread::spawn(move || {
+        let result: Result<Option<String>, String> = (|| {
+            let mut clipboard =
+                arboard::Clipboard::new().map_err(|e| format!("[PST-001] Could not open clipboard. ({e})"))?;
 
-    clipboard
-        .set_text(text.to_owned())
-        .map_err(|e| format!("[PST-001] Could not write to clipboard. ({e})"))?;
+            let old = clipboard.get_text().ok();
 
-    std::thread::sleep(Duration::from_millis(50));
+            clipboard
+                .set_text(text)
+                .map_err(|e| format!("[PST-001] Could not write to clipboard. ({e})"))?;
+
+            Ok(old)
+        })();
+        let _ = tx.send(result);
+    });
+
+    let old = match rx.recv_timeout(CLIPBOARD_TIMEOUT) {
+        Ok(Ok(old)) => old,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err("[PST-001] Clipboard operation timed out (500ms). Falling back to direct typing.".into()),
+    };
+
+    thread::sleep(Duration::from_millis(30));
 
     let (paste_mod, paste_key) = paste_combo();
 
@@ -66,19 +88,19 @@ fn clipboard_paste(text: &str) -> Result<(), String> {
     enigo
         .key(paste_mod, Direction::Press)
         .map_err(|e| format!("[PST-002] Auto-paste failed — click into the target app and retry. ({e})"))?;
-    std::thread::sleep(Duration::from_millis(10));
+    thread::sleep(Duration::from_millis(5));
     enigo
         .key(paste_key, Direction::Click)
         .map_err(|e| format!("[PST-002] Auto-paste failed — click into the target app and retry. ({e})"))?;
-    std::thread::sleep(Duration::from_millis(10));
+    thread::sleep(Duration::from_millis(5));
     enigo
         .key(paste_mod, Direction::Release)
         .map_err(|e| format!("[PST-002] Auto-paste failed — click into the target app and retry. ({e})"))?;
 
-    std::thread::sleep(Duration::from_millis(100));
+    thread::sleep(Duration::from_millis(50));
 
     if let Some(old_text) = old {
-        let _ = clipboard.set_text(old_text);
+        let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(old_text));
     }
 
     Ok(())

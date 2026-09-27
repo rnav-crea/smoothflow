@@ -2,9 +2,12 @@ mod accessibility;
 mod audio;
 pub mod config;
 mod history;
+mod llm_local;
+pub mod offline;
 #[cfg(target_os = "macos")]
 mod hotkey;
 mod postprocess;
+mod stt_local;
 mod text_injection;
 mod text_rules;
 pub mod transcription;
@@ -12,6 +15,7 @@ pub mod transcription;
 use audio::AudioRecorder;
 use config::Config;
 use history::History;
+use serde::Serialize;
 use std::sync::Mutex;
 use tauri::{
     image::Image,
@@ -23,6 +27,7 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
 /// Debug-only logging macro. Compiles to a no-op in release builds (VULN-006).
+#[macro_export]
 macro_rules! sf_log {
     ($($arg:tt)*) => {
         if cfg!(debug_assertions) {
@@ -185,7 +190,7 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
     let config = state.config.lock().unwrap();
     let t0 = std::time::Instant::now();
     sf_log!("CMD: transcribing...");
-    let raw = match transcription::transcribe(&samples, sample_rate, &config) {
+    let raw = match transcription::transcribe_any(&samples, sample_rate, &config) {
         Ok(r) => r,
         Err(e) => {
             show_error(&app, "transcription-error", e.clone());
@@ -239,14 +244,16 @@ fn get_config(state: tauri::State<AppState>) -> Result<Config, ()> {
 
 #[tauri::command]
 fn update_config(app: tauri::AppHandle, state: tauri::State<AppState>, new_config: Config) -> Result<(), String> {
-    if new_config.api_key.is_empty() {
-        return Err("[CFG-002] API key cannot be empty. Enter a valid key in Settings.".into());
-    }
-    if new_config.model.is_empty() {
-        return Err("[CFG-003] Model name cannot be empty. Enter a model (e.g. whisper-large-v3).".into());
-    }
-    if !new_config.api_base_url.starts_with("https://") {
-        return Err("[CFG-004] API base URL must use HTTPS (e.g. https://api.groq.com/openai/v1).".into());
+    if !new_config.offline_mode {
+        if new_config.api_key.is_empty() {
+            return Err("[CFG-002] API key cannot be empty. Enter a valid key in Settings.".into());
+        }
+        if new_config.model.is_empty() {
+            return Err("[CFG-003] Model name cannot be empty. Enter a model (e.g. whisper-large-v3).".into());
+        }
+        if !new_config.api_base_url.starts_with("https://") {
+            return Err("[CFG-004] API base URL must use HTTPS (e.g. https://api.groq.com/openai/v1).".into());
+        }
     }
     // VULN-003: the key goes into the OS vault before anything is saved;
     // Config::save() strips api_key from the JSON written to disk.
@@ -354,6 +361,67 @@ fn test_api_connection(base_url: String, api_key: String) -> Result<(), String> 
     transcription::verify_api(&base_url, &api_key)
 }
 
+#[derive(Clone, Serialize)]
+struct ModelDownloadProgress<'a> {
+    id: &'a str,
+    status: &'a str,
+    message: &'a str,
+}
+
+#[tauri::command]
+fn get_offline_status(state: tauri::State<AppState>) -> Result<offline::ModelStatus, String> {
+    let custom_dir = state.config.lock().unwrap().models_dir.clone();
+    let config_dir = Config::path()
+        .parent()
+        .ok_or_else(|| "Could not determine the SmoothFlow config directory.".to_string())?
+        .to_path_buf();
+    offline::status(&config_dir, &custom_dir)
+}
+
+#[tauri::command]
+fn download_models(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    stt_version: String,
+    llm_size: String,
+) -> Result<offline::ModelStatus, String> {
+    let custom_dir = state.config.lock().unwrap().models_dir.clone();
+    let config_dir = Config::path()
+        .parent()
+        .ok_or_else(|| "Could not determine the SmoothFlow config directory.".to_string())?
+        .to_path_buf();
+    offline::download_bundle(&stt_version, &llm_size, &config_dir, &custom_dir, |id, status, message| {
+        let _ = app.emit(
+            "model-download-progress",
+            ModelDownloadProgress { id, status, message },
+        );
+    })?;
+    offline::status(&config_dir, &custom_dir)
+}
+
+#[tauri::command]
+fn delete_models(state: tauri::State<AppState>) -> Result<offline::ModelStatus, String> {
+    let custom_dir = state.config.lock().unwrap().models_dir.clone();
+    let config_dir = Config::path()
+        .parent()
+        .ok_or_else(|| "Could not determine the SmoothFlow config directory.".to_string())?
+        .to_path_buf();
+    offline::delete(&config_dir, &custom_dir)?;
+    offline::status(&config_dir, &custom_dir)
+}
+
+/// Text-in / text-out check for the on-device pipeline: deterministic rules
+/// first, then local LLM cleanup. STT is audio-only, so it is not covered here.
+#[tauri::command]
+fn test_local_pipeline(state: tauri::State<AppState>, text: String) -> Result<String, String> {
+    if !state.config.lock().unwrap().offline_mode {
+        return Err("[OFF-001] Turn on Offline Mode first — this tests the local pipeline only.".into());
+    }
+    let config = state.config.lock().unwrap().clone();
+    let cleaned = llm_local::cleanup(&text, &config, "")?;
+    Ok(postprocess::postprocess(&cleaned, &config))
+}
+
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) {
     app.restart();
@@ -438,9 +506,11 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
     if !recorder.is_recording() {
         return;
     }
+    let t_stop = std::time::Instant::now();
     let samples = recorder.stop();
     let sample_rate = recorder.sample_rate();
     drop(recorder);
+    sf_log!("PERF: recorder.stop() took {:?}", t_stop.elapsed());
     let _ = app.emit("recording-state", false);
 
     if let Some(overlay) = state.overlay.lock().unwrap().as_ref() {
@@ -456,9 +526,13 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
     // ponytail: spawn to unblock shortcut thread during HTTP calls
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let raw = transcription::transcribe(&samples, sample_rate, &config)?;
+            let t_encode = std::time::Instant::now();
+            let raw = transcription::transcribe_any(&samples, sample_rate, &config)?;
+            sf_log!("PERF: STT (total) took {:?}", t_encode.elapsed());
             let _ = app_clone.emit("raw-transcript", raw.clone());
+            let t_pp = std::time::Instant::now();
             let text = postprocess::postprocess_with_context(&raw, &config, &transcription::active_window_title());
+            sf_log!("PERF: postprocess took {:?}", t_pp.elapsed());
             #[cfg(target_os = "macos")]
             if text.is_empty() {
                 show_error(&app_clone, "transcription-error", "No speech detected. Check SmoothFlow's Microphone permission in System Settings → Privacy & Security → Microphone, then try again.".into());
@@ -488,9 +562,13 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
                             }
                         }
                     }
+let t_inj = std::time::Instant::now();
                     if let Err(e) = text_injection::type_text(&app_clone, &text) {
+                        sf_log!("PERF: type_text took {:?}", t_inj.elapsed());
                         sf_log!("HOTKEY: type_text error: {e}");
                         show_error(&app_clone, "transcription-error", e);
+                    } else {
+                        sf_log!("PERF: type_text took {:?}", t_inj.elapsed());
                     }
                 } else {
                     sf_log!("HOTKEY: auto-paste enabled but text is empty, skipping");
@@ -690,6 +768,7 @@ pub fn run() {
                         recorder.stop();
                     }
                 }
+                llm_local::shutdown();
                 app.exit(0);
             }
         })
@@ -704,6 +783,10 @@ pub fn run() {
             reset_stats,
             inject_text,
             test_api_connection,
+            get_offline_status,
+            download_models,
+            delete_models,
+            test_local_pipeline,
             restart_app,
         ])
         .run(tauri::generate_context!())

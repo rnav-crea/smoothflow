@@ -4,10 +4,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmoothFlow</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400;1,500&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://fonts.cdnfonts.com/css/pp-neue-montreal" />
     <link rel="stylesheet" href="/public/styles.css" />
   </head>
   <body class="theme-retro">
@@ -146,14 +142,31 @@
             </div>
 
             <div class="settings-group">
-              <label for="model-input">Model</label>
-              <input type="text" id="model-input" placeholder="whisper-large-v3" />
+              <label for="model-select">Model</label>
+              <select id="model-select" class="settings-select">
+                <option value="whisper-large-v3-turbo">whisper-large-v3-turbo (fastest)</option>
+                <option value="whisper-large-v3">whisper-large-v3 (default)</option>
+                <option value="whisper-1">whisper-1 (OpenAI)</option>
+                <option value="distil-whisper-large-v3-en">distil-whisper-large-v3-en (English only)</option>
+                <option value="">Custom...</option>
+              </select>
+              <input type="text" id="model-input" class="settings-input-custom" placeholder="Custom model name" style="display:none;" />
             </div>
 
             <div class="settings-group">
-              <label for="cleanup-model-input">Cleanup Model</label>
-              <input type="text" id="cleanup-model-input" placeholder="llama-3.1-8b-instant" />
-              <span class="settings-hint">LLM that cleans up self-corrections and formatting</span>
+              <label for="cleanup-model-select">Cleanup Model</label>
+              <select id="cleanup-model-select" class="settings-select">
+                <option value="">Disabled (no LLM cleanup)</option>
+                <option value="llama-3.1-8b-instant">llama-3.1-8b-instant (fast, free on Groq)</option>
+                <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile (best quality)</option>
+                <option value="gpt-4o-mini">gpt-4o-mini (OpenAI)</option>
+                <option value="gpt-4o">gpt-4o (OpenAI)</option>
+                <option value="openai/gpt-oss-20b">openai/gpt-oss-20b (Groq)</option>
+                <option value="qwen/qwen3.6-27b">qwen/qwen3.6-27b (Groq)</option>
+                <option value="">Custom...</option>
+              </select>
+              <input type="text" id="cleanup-model-input" class="settings-input-custom" placeholder="Custom model name" style="display:none;" />
+              <span class="settings-hint">LLM that cleans up self-corrections and formatting. Leave empty to disable.</span>
             </div>
 
             <div class="settings-group">
@@ -165,6 +178,51 @@
                 </button>
               </div>
               <div id="test-api-status"></div>
+            </div>
+
+            <div class="settings-group toggle-group" style="border-top: 1.5px solid #58264b; padding-top: 16px;">
+              <div class="toggle-label-desc">
+                <label for="offline-mode-toggle">Offline Mode / Local Models</label>
+                <span>Use on-device speech recognition and cleanup models</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="offline-mode-toggle" />
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div id="offline-models-controls" class="settings-group" style="display: none; gap: 12px;">
+              <div class="settings-hint" style="margin-top: 0;">Models download only when you click Download. No automatic downloads or cloud fallback occur in offline mode.</div>
+
+              <div class="settings-group">
+                <label for="offline-stt-select">Speech Model</label>
+                <select id="offline-stt-select" class="settings-select">
+                  <option value="v2">Parakeet v2 — English</option>
+                  <option value="v3">Parakeet v3 — 25 languages</option>
+                </select>
+              </div>
+
+              <div class="settings-group">
+                <label for="offline-llm-select">Cleanup Model</label>
+                <select id="offline-llm-select" class="settings-select">
+                  <option value="2b">Qwen 2B — lighter devices</option>
+                  <option value="4b">Qwen 4B — recommended</option>
+                  <option value="9b">Qwen 9B — highest quality</option>
+                </select>
+              </div>
+
+              <div style="display: flex; gap: 10px; align-items: center;">
+                <button id="download-models-btn" class="save-settings-btn" type="button" style="max-width: none; flex: 1;">DOWNLOAD</button>
+                <button id="delete-models-btn" class="reset-cancel-btn" type="button" style="padding: 10px 14px;">DELETE DOWNLOADED</button>
+              </div>
+
+              <div class="settings-group">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+                  <span id="offline-model-status" class="settings-hint" aria-live="polite" style="margin-top: 0;">Checking local models...</span>
+                  <button id="refresh-models-btn" class="reset-cancel-btn" type="button" style="padding: 8px 12px; white-space: nowrap;">REFRESH</button>
+                </div>
+                <ul id="offline-model-files" aria-live="polite" style="max-height: 180px; overflow-y: auto; margin: 0; padding-left: 18px; font-family: var(--font-mono); font-size: 11px; color: #cdafa0;"></ul>
+              </div>
             </div>
 
             <div class="settings-group toggle-group">

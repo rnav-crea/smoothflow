@@ -25,6 +25,7 @@ cpal = "0.15"
 hound = "3"
 enigo = { version = "0.2", features = ["serde"] }
 reqwest = { version = "0.12", features = ["json", "multipart", "blocking"] }
+sha2 = "0.10"
 nnnoiseless = "0.5"
 arboard = "3"
 regex = "1"

@@ -1,8 +1,9 @@
 /* ── SmoothFlow — Clean Wispr Flow Design System ─────────────────── */
 
 :root {
-  --font-display: 'Space Grotesk', -apple-system, sans-serif;
-  --font-primary: 'Inter', -apple-system, sans-serif;
+  /* ponytail: no webfonts — remote font CDNs break strict offline mode. system-ui = Segoe UI Variable on Windows. */
+  --font-display: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  --font-primary: 'Inter', system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
 
   --color-bg: #24201f;
@@ -848,6 +849,10 @@ select:focus {
   outline: none;
   border-color: #b45b8e;
   box-shadow: 0 0 0 2px rgba(180, 91, 142, 0.25);
+}
+
+.settings-input-custom {
+  margin-top: 6px;
 }
 
 .input-wrapper {

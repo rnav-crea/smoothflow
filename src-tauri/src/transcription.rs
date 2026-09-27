@@ -1,4 +1,6 @@
 use crate::config::Config;
+use crate::sf_log;
+use crate::stt_local;
 use hound::{WavSpec, WavWriter};
 use std::io::Cursor;
 use std::sync::OnceLock;
@@ -167,7 +169,7 @@ fn normalize_gain(samples: &[f32]) -> Vec<f32> {
     samples.iter().map(|s| (s * gain).clamp(-1.0, 1.0)).collect()
 }
 
-fn resample_to_16k(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+pub(crate) fn resample_to_16k(samples: &[f32], sample_rate: u32) -> Vec<f32> {
     const TARGET: u32 = 16000;
     if samples.is_empty() || sample_rate == TARGET {
         return samples.to_vec();
@@ -219,7 +221,9 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
     }
 
     let samples = normalize_gain(samples);
+    let t_encode = std::time::Instant::now();
     let wav_bytes = encode_wav(&samples, sample_rate)?;
+    sf_log!("PERF: WAV encode took {:?}", t_encode.elapsed());
     let url = format!("{}/audio/transcriptions", config.api_base_url.trim_end_matches('/'));
 
     let client = http_client();
@@ -245,12 +249,14 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
         .text("language", "en")
         .text("prompt", prompt);
 
+    let t_http = std::time::Instant::now();
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", config.api_key))
         .multipart(form)
         .send()
         .map_err(|e| format!("[TXN-002] Network error — check your internet connection. ({e})"))?;
+    sf_log!("PERF: HTTP request took {:?}", t_http.elapsed());
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -294,6 +300,17 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
         Ok(String::new())
     } else {
         Ok(whisper_resp.text)
+    }
+}
+
+/// Cloud when `offline_mode` is false (default, unchanged behaviour), the local
+/// Parakeet helper when it is true. No silent fallback in either direction:
+/// a local failure surfaces as an error, it never retries over the network.
+pub fn transcribe_any(samples: &[f32], sample_rate: u32, config: &Config) -> Result<String, String> {
+    if config.offline_mode {
+        stt_local::transcribe(samples, sample_rate, config)
+    } else {
+        transcribe(samples, sample_rate, config)
     }
 }
 

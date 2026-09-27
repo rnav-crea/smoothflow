@@ -77,7 +77,9 @@ const settingsModal = document.getElementById("settings-modal");
 const themeSelect = document.getElementById("theme-select");
 
 const apiUrlInput = document.getElementById("api-url-input");
+const modelSelect = document.getElementById("model-select");
 const modelInput = document.getElementById("model-input");
+const cleanupModelSelect = document.getElementById("cleanup-model-select");
 const cleanupModelInput = document.getElementById("cleanup-model-input");
 const apiKeyInput = document.getElementById("api-key-input");
 const toggleKeyVisibility = document.getElementById("toggle-key-visibility");
@@ -87,6 +89,15 @@ const autopasteToggle = document.getElementById("autopaste-toggle");
 const startupToggle = document.getElementById("startup-toggle");
 const hotkeyInput = document.getElementById("hotkey-input");
 const settingsStatus = document.getElementById("settings-status");
+const offlineModeToggle = document.getElementById("offline-mode-toggle");
+const offlineModelsControls = document.getElementById("offline-models-controls");
+const offlineSttSelect = document.getElementById("offline-stt-select");
+const offlineLlmSelect = document.getElementById("offline-llm-select");
+const downloadModelsBtn = document.getElementById("download-models-btn");
+const deleteModelsBtn = document.getElementById("delete-models-btn");
+const refreshModelsBtn = document.getElementById("refresh-models-btn");
+const offlineModelStatus = document.getElementById("offline-model-status");
+const offlineModelFiles = document.getElementById("offline-model-files");
 
 // Surface hotkey registration/parse errors from the backend at startup
 try {
@@ -104,6 +115,9 @@ const dictionaryAddBtn = document.getElementById("dictionary-add-btn");
 
 let isRecording = false;
 let currentConfig = null;
+let offlineModelStatusData = null;
+let offlineModelProgress = new Map();
+let modelOperationRunning = false;
 
 // Theme Switcher & Persistence
 function applyTheme(themeName) {
@@ -130,6 +144,7 @@ function openSettings() {
   if (settingsToggle) settingsToggle.classList.add("active");
   settingsModal.classList.remove("closing");
   settingsModal.classList.add("open");
+  loadOfflineModelStatus();
   log("Settings opened");
 }
 
@@ -158,6 +173,123 @@ if (settingsModal) {
   });
 }
 
+// Model dropdown handlers - show custom input when "Custom" selected
+function setupModelSelect(selectEl, inputEl) {
+  if (!selectEl || !inputEl) return;
+  selectEl.addEventListener("change", () => {
+    const isCustom = selectEl.value === "";
+    inputEl.style.display = isCustom ? "block" : "none";
+    if (!isCustom) {
+      inputEl.value = selectEl.value;
+    }
+    saveConfig();
+  });
+  // Also sync when custom input changes
+  inputEl.addEventListener("change", () => {
+    if (selectEl.value === "") {
+      saveConfig();
+    }
+  });
+}
+
+setupModelSelect(modelSelect, modelInput);
+setupModelSelect(cleanupModelSelect, cleanupModelInput);
+
+// Provider detection & model filtering
+const GROQ_MODELS = [
+  { value: "whisper-large-v3-turbo", label: "whisper-large-v3-turbo (fastest)" },
+  { value: "whisper-large-v3", label: "whisper-large-v3 (default)" },
+  { value: "distil-whisper-large-v3-en", label: "distil-whisper-large-v3-en (English only)" },
+];
+
+const GROQ_CLEANUP_MODELS = [
+  { value: "", label: "Disabled (no LLM cleanup)" },
+  { value: "llama-3.1-8b-instant", label: "llama-3.1-8b-instant (fast, free on Groq)" },
+  { value: "llama-3.3-70b-versatile", label: "llama-3.3-70b-versatile (best quality)" },
+  { value: "openai/gpt-oss-20b", label: "openai/gpt-oss-20b (Groq)" },
+  { value: "qwen/qwen3.6-27b", label: "qwen/qwen3.6-27b (Groq)" },
+];
+
+const OPENAI_MODELS = [
+  { value: "whisper-1", label: "whisper-1 (OpenAI)" },
+  { value: "gpt-4o-transcribe", label: "gpt-4o-transcribe (OpenAI)" },
+  { value: "gpt-4o-mini-transcribe", label: "gpt-4o-mini-transcribe (OpenAI)" },
+];
+
+const OPENAI_CLEANUP_MODELS = [
+  { value: "", label: "Disabled (no LLM cleanup)" },
+  { value: "gpt-4o-mini", label: "gpt-4o-mini (OpenAI)" },
+  { value: "gpt-4o", label: "gpt-4o (OpenAI)" },
+];
+
+function detectProvider(baseUrl) {
+  const url = (baseUrl || "").toLowerCase();
+  if (url.includes("groq")) return "groq";
+  if (url.includes("openai")) return "openai";
+  return "custom";
+}
+
+function populateSelect(selectEl, options, currentValue) {
+  if (!selectEl) return;
+  const customShown = selectEl.value === "" && selectEl.querySelector('option[value=""]');
+  // Preserve the "Custom..." option at the end
+  const customOption = selectEl.querySelector('option[value=""]');
+  selectEl.innerHTML = "";
+  options.forEach(opt => {
+    const option = document.createElement("option");
+    option.value = opt.value;
+    option.textContent = opt.label;
+    selectEl.appendChild(option);
+  });
+  // Re-add Custom option
+  const customOpt = document.createElement("option");
+  customOpt.value = "";
+  customOpt.textContent = "Custom...";
+  selectEl.appendChild(customOpt);
+  // Restore value
+  if (currentValue && [...selectEl.options].some(o => o.value === currentValue)) {
+    selectEl.value = currentValue;
+  } else {
+    selectEl.value = "";
+  }
+}
+
+function updateModelDropdowns(baseUrl) {
+  const provider = detectProvider(baseUrl);
+  let sttModels, cleanupModels;
+  if (provider === "groq") {
+    sttModels = GROQ_MODELS;
+    cleanupModels = GROQ_CLEANUP_MODELS;
+  } else if (provider === "openai") {
+    sttModels = OPENAI_MODELS;
+    cleanupModels = OPENAI_CLEANUP_MODELS;
+  } else {
+    // Custom provider - keep current options, just ensure Custom is available
+    return;
+  }
+  const currentModel = modelSelect ? modelSelect.value : "";
+  const currentCleanup = cleanupModelSelect ? cleanupModelSelect.value : "";
+  populateSelect(modelSelect, sttModels, currentModel);
+  populateSelect(cleanupModelSelect, cleanupModels, currentCleanup);
+  // Sync custom inputs visibility
+  if (modelSelect && modelInput) {
+    modelInput.style.display = modelSelect.value === "" ? "block" : "none";
+  }
+  if (cleanupModelSelect && cleanupModelInput) {
+    cleanupModelInput.style.display = cleanupModelSelect.value === "" ? "block" : "none";
+  }
+}
+
+// Auto-update dropdowns when API URL changes
+if (apiUrlInput) {
+  apiUrlInput.addEventListener("input", () => {
+    updateModelDropdowns(apiUrlInput.value);
+  });
+  apiUrlInput.addEventListener("paste", () => {
+    setTimeout(() => updateModelDropdowns(apiUrlInput.value), 0);
+  });
+}
+
 // Toggle API key visibility
 if (!toggleKeyVisibility) console.warn("toggle-key-visibility not found");
 else toggleKeyVisibility.addEventListener("click", () => {
@@ -168,7 +300,7 @@ else toggleKeyVisibility.addEventListener("click", () => {
 // Auto-validate API connection when key or URL is changed/pasted
 const testApiStatus = document.getElementById("test-api-status");
 let apiValidationTimer = null;
-// ponytail: at autostart the app can boot before the network is up, so a
+// ponytail - at autostart the app can boot before the network is up, so a
 // failed check is retried with backoff instead of failing forever.
 const API_RETRY_ATTEMPTS = 8;
 const API_RETRY_BASE_MS = 1500;
@@ -229,14 +361,51 @@ async function loadConfig() {
     const config = await invoke("get_config");
     currentConfig = config;
     apiUrlInput.value = config.api_base_url;
-    modelInput.value = config.model;
-    cleanupModelInput.value = config.cleanup_model;
+    
+    // Model select
+    const modelVal = config.model || "";
+    if (modelSelect) {
+      const hasOption = [...modelSelect.options].some(o => o.value === modelVal);
+      if (hasOption && modelVal) {
+        modelSelect.value = modelVal;
+        modelInput.style.display = "none";
+      } else {
+        modelSelect.value = "";
+        modelInput.value = modelVal;
+        modelInput.style.display = "block";
+      }
+    }
+    
+    // Cleanup model select
+    const cleanupVal = config.cleanup_model || "";
+    if (cleanupModelSelect) {
+      const hasOption = [...cleanupModelSelect.options].some(o => o.value === cleanupVal);
+      if (hasOption || cleanupVal === "") {
+        cleanupModelSelect.value = cleanupVal;
+        cleanupModelInput.style.display = "none";
+      } else {
+        cleanupModelSelect.value = "";
+        cleanupModelInput.value = cleanupVal;
+        cleanupModelInput.style.display = "block";
+      }
+    }
+    
     apiKeyInput.value = config.api_key;
     renderDictionary(config.dictionary);
     punctuationToggle.checked = config.auto_punctuation;
     fillersToggle.checked = config.remove_fillers;
     autopasteToggle.checked = config.auto_paste;
     startupToggle.checked = config.launch_on_startup;
+    if (offlineModeToggle) offlineModeToggle.checked = !!config.offline_mode;
+    if (offlineSttSelect) {
+      offlineSttSelect.value = ["v2", "v3"].includes(config.stt_version) ? config.stt_version : "v2";
+      currentConfig.stt_version = offlineSttSelect.value;
+    }
+    if (offlineLlmSelect) {
+      offlineLlmSelect.value = ["2b", "4b", "9b"].includes(config.llm_model_size) ? config.llm_model_size : "4b";
+      currentConfig.llm_model_size = offlineLlmSelect.value;
+    }
+    updateOfflineModelControls();
     if (hotkeyInput) hotkeyInput.value = config.hotkey || "Ctrl+Space";
     log("Config loaded");
     if (apiKeyInput.value) {
@@ -251,8 +420,8 @@ async function saveConfig() {
   if (!currentConfig) return;
   const updatedConfig = {
     api_base_url: apiUrlInput.value,
-    model: modelInput.value,
-    cleanup_model: cleanupModelInput.value,
+    model: modelSelect && modelSelect.value ? modelSelect.value : modelInput.value,
+    cleanup_model: cleanupModelSelect && cleanupModelSelect.value ? cleanupModelSelect.value : cleanupModelInput.value,
     api_key: apiKeyInput.value,
     auto_punctuation: punctuationToggle.checked,
     remove_fillers: fillersToggle.checked,
@@ -261,6 +430,11 @@ async function saveConfig() {
     dictionary: currentConfig.dictionary || [],
     hotkey: hotkeyInput ? hotkeyInput.value : "Ctrl+Space",
     overlay_position: currentConfig.overlay_position || "bottom",
+    offline_mode: currentConfig.offline_mode,
+    stt_version: currentConfig.stt_version,
+    llm_model_size: currentConfig.llm_model_size,
+    models_dir: currentConfig.models_dir,
+    auto_download_models: currentConfig.auto_download_models,
   };
   try {
     await invoke("update_config", { newConfig: updatedConfig });
@@ -305,7 +479,9 @@ if (saveSettingsBtn) {
 
 try {
   apiUrlInput.addEventListener("change", saveConfig);
+  if (modelSelect) modelSelect.addEventListener("change", saveConfig);
   modelInput.addEventListener("change", saveConfig);
+  if (cleanupModelSelect) cleanupModelSelect.addEventListener("change", saveConfig);
   cleanupModelInput.addEventListener("change", saveConfig);
   apiKeyInput.addEventListener("change", saveConfig);
   punctuationToggle.addEventListener("change", saveConfig);
@@ -314,6 +490,161 @@ try {
   startupToggle.addEventListener("change", saveConfig);
   if (hotkeyInput) hotkeyInput.addEventListener("change", saveConfig);
 } catch (e) { console.warn("Config bind error:", e); }
+
+function formatModelSize(bytes) {
+  const size = Math.max(0, Number(bytes) || 0);
+  if (size >= 1_000_000_000) return `${(size / 1_000_000_000).toFixed(2)} GB`;
+  return `${(size / 1_000_000).toFixed(2)} MB`;
+}
+
+function updateOfflineModelControls() {
+  if (offlineModelsControls && offlineModeToggle) {
+    offlineModelsControls.style.display = offlineModeToggle.checked ? "flex" : "none";
+  }
+}
+
+function offlineStatusSummary() {
+  if (!offlineModelStatusData) return "";
+  const files = offlineModelStatusData.files || [];
+  const selectedFiles = files.filter((file) =>
+    (file.category === "stt" && file.directory === offlineSttSelect?.value)
+    || (file.category === "llm" && file.directory === offlineLlmSelect?.value)
+  );
+  const selectedBytes = selectedFiles.reduce((sum, file) => sum + (Number(file.expected_size) || 0), 0);
+  return `${offlineModelStatusData.installed_files || 0} of ${files.length} files installed · ${formatModelSize(offlineModelStatusData.total_bytes)} on disk · ${formatModelSize(selectedBytes)} selected`;
+}
+
+function setOfflineModelError(message) {
+  if (!offlineModelStatus) return;
+  offlineModelStatus.textContent = message;
+  offlineModelStatus.style.color = "#ff6b6b";
+}
+
+function renderOfflineModelStatus() {
+  if (offlineModelStatus) {
+    offlineModelStatus.textContent = modelOperationRunning
+      ? `${offlineStatusSummary()} · Model operation in progress`
+      : offlineStatusSummary() || "No local model status available.";
+    offlineModelStatus.style.color = modelOperationRunning ? "#f4d1ba" : "#cdafa0";
+  }
+  if (!offlineModelFiles) return;
+  offlineModelFiles.replaceChildren();
+  const files = offlineModelStatusData?.files || [];
+  for (const file of files) {
+    const item = document.createElement("li");
+    const size = formatModelSize(file.expected_size);
+    const progress = offlineModelProgress.get(file.id);
+    if (progress?.status === "starting") {
+      item.textContent = `${file.id} — Downloading (${size})`;
+    } else if (progress?.status === "complete") {
+      item.textContent = `${file.id} — Download complete (${size})`;
+    } else if (progress?.status === "failed") {
+      item.textContent = `${file.id} — Failed: ${progress.message || "Unknown error"}`;
+      item.style.color = "#ff6b6b";
+    } else if (file.installed) {
+      item.textContent = `${file.id} — ${file.verified ? "Installed" : "Installed, verification failed"} (${size})`;
+    } else {
+      item.textContent = `${file.id} — Missing (${size})`;
+    }
+    offlineModelFiles.appendChild(item);
+  }
+}
+
+function setModelOperationRunning(running, message = "") {
+  modelOperationRunning = running;
+  if (downloadModelsBtn) {
+    downloadModelsBtn.disabled = running;
+    downloadModelsBtn.textContent = running ? "WORKING..." : "DOWNLOAD";
+  }
+  if (deleteModelsBtn) deleteModelsBtn.disabled = running;
+  if (refreshModelsBtn) refreshModelsBtn.disabled = running;
+  if (offlineModeToggle) offlineModeToggle.disabled = running;
+  if (offlineSttSelect) offlineSttSelect.disabled = running;
+  if (offlineLlmSelect) offlineLlmSelect.disabled = running;
+  if (running && message) {
+    offlineModelStatus.textContent = message;
+    offlineModelStatus.style.color = "#f4d1ba";
+  } else {
+    renderOfflineModelStatus();
+  }
+}
+
+async function loadOfflineModelStatus(operationError = "") {
+  if (!offlineModelStatus || !offlineModelFiles) return;
+  offlineModelStatus.textContent = "Checking local models...";
+  offlineModelStatus.style.color = "#cdafa0";
+  try {
+    offlineModelStatusData = await invoke("get_offline_status");
+    offlineModelProgress.clear();
+    renderOfflineModelStatus();
+    if (operationError) setOfflineModelError(operationError);
+  } catch (err) {
+    setOfflineModelError(operationError || `Could not load local model status: ${err}`);
+  }
+}
+
+function updateOfflineConfig() {
+  if (!currentConfig) return;
+  currentConfig.offline_mode = !!offlineModeToggle?.checked;
+  if (offlineSttSelect) currentConfig.stt_version = offlineSttSelect.value;
+  if (offlineLlmSelect) currentConfig.llm_model_size = offlineLlmSelect.value;
+  updateOfflineModelControls();
+  saveConfig();
+}
+
+if (offlineModeToggle) offlineModeToggle.addEventListener("change", updateOfflineConfig);
+if (offlineSttSelect) offlineSttSelect.addEventListener("change", updateOfflineConfig);
+if (offlineLlmSelect) offlineLlmSelect.addEventListener("change", updateOfflineConfig);
+if (refreshModelsBtn) refreshModelsBtn.addEventListener("click", () => loadOfflineModelStatus());
+
+if (downloadModelsBtn) {
+  downloadModelsBtn.addEventListener("click", async () => {
+    if (modelOperationRunning) return;
+    setModelOperationRunning(true, "Starting model download...");
+    try {
+      const status = await invoke("download_models", {
+        sttVersion: offlineSttSelect.value,
+        llmSize: offlineLlmSelect.value,
+      });
+      offlineModelStatusData = status;
+      offlineModelProgress.clear();
+      setModelOperationRunning(false);
+      renderOfflineModelStatus();
+      if (offlineModelStatus) offlineModelStatus.textContent = `Download complete. ${offlineStatusSummary()}`;
+    } catch (err) {
+      setModelOperationRunning(false);
+      await loadOfflineModelStatus(`Model download failed: ${err}`);
+    }
+  });
+}
+
+if (deleteModelsBtn) {
+  deleteModelsBtn.addEventListener("click", async () => {
+    if (modelOperationRunning || !window.confirm("Delete all downloaded SmoothFlow models?")) return;
+    setModelOperationRunning(true, "Deleting downloaded models...");
+    try {
+      offlineModelStatusData = await invoke("delete_models");
+      offlineModelProgress.clear();
+      setModelOperationRunning(false);
+      renderOfflineModelStatus();
+      if (offlineModelStatus) offlineModelStatus.textContent = `Downloaded models deleted. ${offlineStatusSummary()}`;
+    } catch (err) {
+      setModelOperationRunning(false);
+      await loadOfflineModelStatus(`Model deletion failed: ${err}`);
+    }
+  });
+}
+
+try {
+  listen("model-download-progress", ({ payload }) => {
+    if (!payload?.id) return;
+    offlineModelProgress.set(payload.id, { status: payload.status, message: payload.message });
+    renderOfflineModelStatus();
+    if (payload.status === "failed") setOfflineModelError(`Model download failed: ${payload.message || "Unknown error"}`);
+  }).catch((err) => setOfflineModelError(`Could not listen for model download progress: ${err}`));
+} catch (err) {
+  setOfflineModelError(`Could not listen for model download progress: ${err}`);
+}
 
 // Personal Dictionary
 function renderDictionary(words) {
