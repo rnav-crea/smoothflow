@@ -1,3 +1,4 @@
+use crate::sf_log;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use nnnoiseless::DenoiseState;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -78,20 +79,42 @@ impl AudioRecorder {
     }
 
     pub fn stop(&mut self) -> Vec<f32> {
+        // ponytail: temporary PERF split — stop() was timing ~1.9s and we do
+        // not know which of these three steps owns it. Delete once fixed.
+        let t_total = std::time::Instant::now();
         *self.recording.lock().unwrap() = false;
         if let Some(s) = self.stream.take() {
             let _ = s.pause();
         }
         let raw = std::mem::take(&mut *self.samples.lock().unwrap());
+        let t_take = t_total.elapsed();
+
         // ponytail: RNNoise is hardcoded to 48kHz internally; at any other sample
         // rate its 480-sample frames aren't 10ms and it corrupts speech, which
         // Whisper hallucinates on. Raw passthrough beats corrupted denoising.
-        let samples = if self.sample_rate == 48000 {
+        let t_denoise = std::time::Instant::now();
+        let ran_denoise = self.sample_rate == 48000;
+        let samples = if ran_denoise {
             denoise(raw, self.channels as usize)
         } else {
             raw
         };
-        trim_silence(&samples, self.sample_rate)
+        let denoise_took = t_denoise.elapsed();
+
+        let t_trim = std::time::Instant::now();
+        let out = trim_silence(&samples, self.sample_rate);
+        sf_log!(
+            "PERF: stop breakdown | take {:?} | denoise {:?} | trim {:?} | total {:?} ({} Hz, {} ch, {} samples, denoise_ran={})",
+            t_take,
+            denoise_took,
+            t_trim.elapsed(),
+            t_total.elapsed(),
+            self.sample_rate,
+            self.channels,
+            samples.len(),
+            ran_denoise
+        );
+        out
     }
 
     pub fn channels(&self) -> u16 {
