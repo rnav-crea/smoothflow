@@ -2,10 +2,10 @@ mod accessibility;
 mod audio;
 pub mod config;
 mod history;
-mod llm_local;
-pub mod offline;
 #[cfg(target_os = "macos")]
 mod hotkey;
+mod llm_local;
+pub mod offline;
 mod postprocess;
 mod stt_local;
 mod text_injection;
@@ -16,6 +16,7 @@ use audio::AudioRecorder;
 use config::Config;
 use history::History;
 use serde::Serialize;
+use std::path::Path;
 use std::sync::Mutex;
 use tauri::{
     image::Image,
@@ -59,7 +60,9 @@ fn spawn_vu_meter(
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(std::time::Duration::from_millis(80));
-            if !*recording.lock().unwrap() { break; }
+            if !*recording.lock().unwrap() {
+                break;
+            }
             let raw = peak_level.load(std::sync::atomic::Ordering::Relaxed);
             let level = raw as f32 / 100000.0;
             let _ = app_clone.emit("audio-level", level);
@@ -80,7 +83,10 @@ fn show_error(app: &tauri::AppHandle, event: &str, msg: String) {
 fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
     let parts: Vec<&str> = s.split('+').collect();
     if parts.is_empty() {
-        return Err(format!("[CFG-005] Invalid hotkey '{}'. Use format like 'Ctrl+Space' or a bare key like 'Fn'.", s));
+        return Err(format!(
+            "[CFG-005] Invalid hotkey '{}'. Use format like 'Ctrl+Space' or a bare key like 'Fn'.",
+            s
+        ));
     }
     let mut mods = Modifiers::empty();
     for m in &parts[..parts.len() - 1] {
@@ -89,7 +95,13 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
             "alt" | "option" => mods |= Modifiers::ALT,
             "shift" => mods |= Modifiers::SHIFT,
             "win" | "meta" | "super" | "logo" | "cmd" | "command" => mods |= Modifiers::SUPER,
-            _ => return Err(format!("[CFG-005] Invalid hotkey '{}'. Unknown modifier '{}'.", s, m.trim())),
+            _ => {
+                return Err(format!(
+                    "[CFG-005] Invalid hotkey '{}'. Unknown modifier '{}'.",
+                    s,
+                    m.trim()
+                ))
+            }
         }
     }
     // key_raw keeps the user's original text for error messages; key is trimmed+lowercased for matching.
@@ -126,28 +138,89 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
         _ if key.len() == 1 => {
             let c = key.chars().next().unwrap().to_ascii_uppercase();
             match c {
-                '0'..='9' => [Code::Digit0, Code::Digit1, Code::Digit2, Code::Digit3, Code::Digit4,
-                    Code::Digit5, Code::Digit6, Code::Digit7, Code::Digit8, Code::Digit9][c.to_digit(10).unwrap() as usize],
-                'A'..='Z' => [Code::KeyA, Code::KeyB, Code::KeyC, Code::KeyD, Code::KeyE, Code::KeyF,
-                    Code::KeyG, Code::KeyH, Code::KeyI, Code::KeyJ, Code::KeyK, Code::KeyL,
-                    Code::KeyM, Code::KeyN, Code::KeyO, Code::KeyP, Code::KeyQ, Code::KeyR,
-                    Code::KeyS, Code::KeyT, Code::KeyU, Code::KeyV, Code::KeyW, Code::KeyX,
-                    Code::KeyY, Code::KeyZ][(c as u8 - b'A') as usize],
-                _ => return Err(format!("[CFG-005] Invalid hotkey. Unknown key '{}'.", key_raw)),
+                '0'..='9' => [
+                    Code::Digit0,
+                    Code::Digit1,
+                    Code::Digit2,
+                    Code::Digit3,
+                    Code::Digit4,
+                    Code::Digit5,
+                    Code::Digit6,
+                    Code::Digit7,
+                    Code::Digit8,
+                    Code::Digit9,
+                ][c.to_digit(10).unwrap() as usize],
+                'A'..='Z' => [
+                    Code::KeyA,
+                    Code::KeyB,
+                    Code::KeyC,
+                    Code::KeyD,
+                    Code::KeyE,
+                    Code::KeyF,
+                    Code::KeyG,
+                    Code::KeyH,
+                    Code::KeyI,
+                    Code::KeyJ,
+                    Code::KeyK,
+                    Code::KeyL,
+                    Code::KeyM,
+                    Code::KeyN,
+                    Code::KeyO,
+                    Code::KeyP,
+                    Code::KeyQ,
+                    Code::KeyR,
+                    Code::KeyS,
+                    Code::KeyT,
+                    Code::KeyU,
+                    Code::KeyV,
+                    Code::KeyW,
+                    Code::KeyX,
+                    Code::KeyY,
+                    Code::KeyZ,
+                ][(c as u8 - b'A') as usize],
+                _ => {
+                    return Err(format!(
+                        "[CFG-005] Invalid hotkey. Unknown key '{}'.",
+                        key_raw
+                    ))
+                }
             }
         }
         _ if key.starts_with('f') && key[1..].parse::<u8>().is_ok() => {
             match key[1..].parse::<u8>().unwrap() {
-                1 => Code::F1, 2 => Code::F2, 3 => Code::F3, 4 => Code::F4,
-                5 => Code::F5, 6 => Code::F6, 7 => Code::F7, 8 => Code::F8,
-                9 => Code::F9, 10 => Code::F10, 11 => Code::F11, 12 => Code::F12,
-                13 => Code::F13, 14 => Code::F14, 15 => Code::F15, 16 => Code::F16,
-                17 => Code::F17, 18 => Code::F18, 19 => Code::F19, 20 => Code::F20,
-                21 => Code::F21, 22 => Code::F22, 23 => Code::F23, 24 => Code::F24,
+                1 => Code::F1,
+                2 => Code::F2,
+                3 => Code::F3,
+                4 => Code::F4,
+                5 => Code::F5,
+                6 => Code::F6,
+                7 => Code::F7,
+                8 => Code::F8,
+                9 => Code::F9,
+                10 => Code::F10,
+                11 => Code::F11,
+                12 => Code::F12,
+                13 => Code::F13,
+                14 => Code::F14,
+                15 => Code::F15,
+                16 => Code::F16,
+                17 => Code::F17,
+                18 => Code::F18,
+                19 => Code::F19,
+                20 => Code::F20,
+                21 => Code::F21,
+                22 => Code::F22,
+                23 => Code::F23,
+                24 => Code::F24,
                 n => return Err(format!("[CFG-005] Invalid hotkey. Unknown F-key F{}.", n)),
             }
         }
-        _ => return Err(format!("[CFG-005] Invalid hotkey. Unknown key '{}'.", key_raw)),
+        _ => {
+            return Err(format!(
+                "[CFG-005] Invalid hotkey. Unknown key '{}'.",
+                key_raw
+            ))
+        }
     };
     Ok((mods, code))
 }
@@ -186,7 +259,7 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
     drop(recorder);
     sf_log!("CMD: got {} samples at {} Hz", samples.len(), sample_rate);
     let _ = app.emit("recording-state", false);
-    
+
     let config = state.config.lock().unwrap();
     let t0 = std::time::Instant::now();
     sf_log!("CMD: transcribing...");
@@ -197,10 +270,15 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
             return Err(e);
         }
     };
-    sf_log!("CMD: transcript received in {:?}: {:?}", t0.elapsed(), &raw[..raw.len().min(50)]);
+    sf_log!(
+        "CMD: transcript received in {:?}: {:?}",
+        t0.elapsed(),
+        &raw[..raw.len().min(50)]
+    );
     let _ = app.emit("raw-transcript", raw.clone());
     let t1 = std::time::Instant::now();
-                                    let text = postprocess::postprocess_with_context(&raw, &config, &transcription::active_window_title());
+    let text =
+        postprocess::postprocess_with_context(&raw, &config, &transcription::active_window_title());
     sf_log!("CMD: cleanup took {:?}", t1.elapsed());
 
     // macOS: near-silent audio (typically missing Mic permission) yields empty
@@ -220,7 +298,7 @@ fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
     }
 
     let _ = app.emit("transcript-result", text.clone());
-    
+
     if !text.is_empty() {
         if config.auto_paste {
             let t2 = std::time::Instant::now();
@@ -243,16 +321,26 @@ fn get_config(state: tauri::State<AppState>) -> Result<Config, ()> {
 }
 
 #[tauri::command]
-fn update_config(app: tauri::AppHandle, state: tauri::State<AppState>, new_config: Config) -> Result<(), String> {
+fn update_config(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    new_config: Config,
+) -> Result<(), String> {
     if !new_config.offline_mode {
         if new_config.api_key.is_empty() {
             return Err("[CFG-002] API key cannot be empty. Enter a valid key in Settings.".into());
         }
         if new_config.model.is_empty() {
-            return Err("[CFG-003] Model name cannot be empty. Enter a model (e.g. whisper-large-v3).".into());
+            return Err(
+                "[CFG-003] Model name cannot be empty. Enter a model (e.g. whisper-large-v3)."
+                    .into(),
+            );
         }
         if !new_config.api_base_url.starts_with("https://") {
-            return Err("[CFG-004] API base URL must use HTTPS (e.g. https://api.groq.com/openai/v1).".into());
+            return Err(
+                "[CFG-004] API base URL must use HTTPS (e.g. https://api.groq.com/openai/v1)."
+                    .into(),
+            );
         }
     }
     // VULN-003: the key goes into the OS vault before anything is saved;
@@ -273,12 +361,13 @@ fn update_config(app: tauri::AppHandle, state: tauri::State<AppState>, new_confi
         let (nm, nc) = parse_hotkey_str(&new_hotkey)?;
         if cfg!(target_os = "macos") && nm.is_empty() && nc == Code::Fn {
             #[cfg(target_os = "macos")]
-            hotkey::start_fn_tap(app.clone()).map_err(|e| {
-                format!("Failed to register hotkey '{}': {}", new_hotkey, e)
-            })?;
+            hotkey::start_fn_tap(app.clone())
+                .map_err(|e| format!("Failed to register hotkey '{}': {}", new_hotkey, e))?;
             // Old hotkey was a global-shortcut chord — drop it.
             if let Ok((om, oc)) = parse_hotkey_str(&old_hotkey) {
-                let _ = app.global_shortcut().unregister(Shortcut::new(Some(om), oc));
+                let _ = app
+                    .global_shortcut()
+                    .unregister(Shortcut::new(Some(om), oc));
             }
         } else {
             // Leaving the Fn tap (macOS) — stop it before registering a chord.
@@ -294,7 +383,9 @@ fn update_config(app: tauri::AppHandle, state: tauri::State<AppState>, new_confi
                 msg
             })?;
             if let Ok((om, oc)) = parse_hotkey_str(&old_hotkey) {
-                let _ = app.global_shortcut().unregister(Shortcut::new(Some(om), oc));
+                let _ = app
+                    .global_shortcut()
+                    .unregister(Shortcut::new(Some(om), oc));
             }
         }
         sf_log!("HOTKEY: re-registered to {}", new_hotkey);
@@ -378,6 +469,35 @@ fn get_offline_status(state: tauri::State<AppState>) -> Result<offline::ModelSta
     offline::status(&config_dir, &custom_dir)
 }
 
+/// Where models are read from right now. Separate from `get_offline_status`
+/// so the existing settings payload stays byte-identical.
+#[derive(Clone, Serialize)]
+pub struct ModelsLocation {
+    /// Absolute path files are actually loaded from.
+    pub resolved: String,
+    /// True when `models_dir` in config overrides the default location.
+    pub is_custom: bool,
+}
+
+fn models_location(config_dir: &Path, models_dir: &str) -> ModelsLocation {
+    ModelsLocation {
+        resolved: offline::models_dir(config_dir, models_dir)
+            .display()
+            .to_string(),
+        is_custom: !models_dir.trim().is_empty(),
+    }
+}
+
+#[tauri::command]
+fn get_models_dir(state: tauri::State<AppState>) -> Result<ModelsLocation, String> {
+    let custom_dir = state.config.lock().unwrap().models_dir.clone();
+    let config_dir = Config::path()
+        .parent()
+        .ok_or_else(|| "Could not determine the SmoothFlow config directory.".to_string())?
+        .to_path_buf();
+    Ok(models_location(&config_dir, &custom_dir))
+}
+
 #[tauri::command]
 fn download_models(
     app: tauri::AppHandle,
@@ -390,12 +510,22 @@ fn download_models(
         .parent()
         .ok_or_else(|| "Could not determine the SmoothFlow config directory.".to_string())?
         .to_path_buf();
-    offline::download_bundle(&stt_version, &llm_size, &config_dir, &custom_dir, |id, status, message| {
-        let _ = app.emit(
-            "model-download-progress",
-            ModelDownloadProgress { id, status, message },
-        );
-    })?;
+    offline::download_bundle(
+        &stt_version,
+        &llm_size,
+        &config_dir,
+        &custom_dir,
+        |id, status, message| {
+            let _ = app.emit(
+                "model-download-progress",
+                ModelDownloadProgress {
+                    id,
+                    status,
+                    message,
+                },
+            );
+        },
+    )?;
     offline::status(&config_dir, &custom_dir)
 }
 
@@ -415,7 +545,9 @@ fn delete_models(state: tauri::State<AppState>) -> Result<offline::ModelStatus, 
 #[tauri::command]
 fn test_local_pipeline(state: tauri::State<AppState>, text: String) -> Result<String, String> {
     if !state.config.lock().unwrap().offline_mode {
-        return Err("[OFF-001] Turn on Offline Mode first — this tests the local pipeline only.".into());
+        return Err(
+            "[OFF-001] Turn on Offline Mode first — this tests the local pipeline only.".into(),
+        );
     }
     let config = state.config.lock().unwrap().clone();
     let cleaned = llm_local::cleanup(&text, &config, "")?;
@@ -531,7 +663,11 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
             sf_log!("PERF: STT (total) took {:?}", t_encode.elapsed());
             let _ = app_clone.emit("raw-transcript", raw.clone());
             let t_pp = std::time::Instant::now();
-            let text = postprocess::postprocess_with_context(&raw, &config, &transcription::active_window_title());
+            let text = postprocess::postprocess_with_context(
+                &raw,
+                &config,
+                &transcription::active_window_title(),
+            );
             sf_log!("PERF: postprocess took {:?}", t_pp.elapsed());
             #[cfg(target_os = "macos")]
             if text.is_empty() {
@@ -557,12 +693,15 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
                         if let Some(name) = front {
                             if !name.is_empty() && name != "SmoothFlow" {
                                 sf_log!("HOTKEY: reactivating frontmost app: {}", name);
-                                let _ = std::process::Command::new("open").arg("-a").arg(&name).spawn();
+                                let _ = std::process::Command::new("open")
+                                    .arg("-a")
+                                    .arg(&name)
+                                    .spawn();
                                 std::thread::sleep(std::time::Duration::from_millis(250));
                             }
                         }
                     }
-let t_inj = std::time::Instant::now();
+                    let t_inj = std::time::Instant::now();
                     if let Err(e) = text_injection::type_text(&app_clone, &text) {
                         sf_log!("PERF: type_text took {:?}", t_inj.elapsed());
                         sf_log!("HOTKEY: type_text error: {e}");
@@ -605,13 +744,21 @@ pub fn run() {
                     let state = app.state::<AppState>();
                     let cfg = state.config.lock().unwrap();
                     if let Ok((m, c)) = parse_hotkey_str(&cfg.hotkey) {
-                        if !shortcut.matches(m, c) { return; }
-                    } else { return; }
+                        if !shortcut.matches(m, c) {
+                            return;
+                        }
+                    } else {
+                        return;
+                    }
                     drop(cfg);
                     sf_log!("HOTKEY: event state={:?}", event.state);
                     match event.state {
-                        ShortcutState::Pressed => { hotkey_start(app); }
-                        ShortcutState::Released => { hotkey_finalize(app); }
+                        ShortcutState::Pressed => {
+                            hotkey_start(app);
+                        }
+                        ShortcutState::Released => {
+                            hotkey_finalize(app);
+                        }
                     }
                 })
                 .build(),
@@ -628,6 +775,7 @@ pub fn run() {
             Some(vec![]),
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             recorder: Mutex::new(AudioRecorder::new()),
             config: Mutex::new(Config::load()),
@@ -657,7 +805,10 @@ pub fn run() {
                             Ok(_) => sf_log!("SUCCESS: Registered {} Fn event tap!", hotkey_str),
                             Err(e) => {
                                 sf_log!("ERROR: Failed to register {}: {}", hotkey_str, e);
-                                let _ = app.emit("hotkey-error", format!("Failed to register hotkey '{}': {}", hotkey_str, e));
+                                let _ = app.emit(
+                                    "hotkey-error",
+                                    format!("Failed to register hotkey '{}': {}", hotkey_str, e),
+                                );
                             }
                         }
                     } else {
@@ -665,14 +816,20 @@ pub fn run() {
                             Ok(_) => sf_log!("SUCCESS: Registered {} global shortcut!", hotkey_str),
                             Err(e) => {
                                 sf_log!("ERROR: Failed to register {}: {}", hotkey_str, e);
-                                let _ = app.emit("hotkey-error", format!("Failed to register hotkey '{}': {}", hotkey_str, e));
+                                let _ = app.emit(
+                                    "hotkey-error",
+                                    format!("Failed to register hotkey '{}': {}", hotkey_str, e),
+                                );
                             }
                         }
                     }
                 }
                 Err(e) => {
                     sf_log!("ERROR: Invalid hotkey '{}': {}", hotkey_str, e);
-                    let _ = app.emit("hotkey-error", format!("Invalid hotkey '{}': {}", hotkey_str, e));
+                    let _ = app.emit(
+                        "hotkey-error",
+                        format!("Invalid hotkey '{}': {}", hotkey_str, e),
+                    );
                 }
             }
 
@@ -702,13 +859,17 @@ pub fn run() {
 
             let state = app.state::<AppState>();
             match &overlay {
-                Ok(w) => { let _ = w.hide(); let _ = w.set_ignore_cursor_events(true); sf_log!("SETUP: overlay created"); }
+                Ok(w) => {
+                    let _ = w.hide();
+                    let _ = w.set_ignore_cursor_events(true);
+                    sf_log!("SETUP: overlay created");
+                }
                 Err(e) => sf_log!("SETUP: overlay creation error: {e}"),
             }
             *state.overlay.lock().unwrap() = overlay.ok();
 
             sf_log!("SETUP: app ready — tray, overlay, hotkey all configured");
-            
+
             // Sync autostart with config
             {
                 let config = state.config.lock().unwrap();
@@ -735,25 +896,23 @@ pub fn run() {
             TrayIconBuilder::new()
                 .icon(icon)
                 .menu(&menu)
-                .on_menu_event(|app, event| {
-                    match event.id().as_ref() {
-                        "settings" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "settings" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
                         }
-                        "quit" => {
-                            if let Some(state) = app.try_state::<AppState>() {
-                                let mut recorder = state.recorder.lock().unwrap();
-                                if recorder.is_recording() {
-                                    recorder.stop();
-                                }
-                            }
-                            app.exit(0);
-                        }
-                        _ => {}
                     }
+                    "quit" => {
+                        if let Some(state) = app.try_state::<AppState>() {
+                            let mut recorder = state.recorder.lock().unwrap();
+                            if recorder.is_recording() {
+                                recorder.stop();
+                            }
+                        }
+                        app.exit(0);
+                    }
+                    _ => {}
                 })
                 .build(app)?;
 
@@ -784,6 +943,7 @@ pub fn run() {
             inject_text,
             test_api_connection,
             get_offline_status,
+            get_models_dir,
             download_models,
             delete_models,
             test_local_pipeline,
@@ -829,9 +989,24 @@ mod tests {
     }
 
     #[test]
+    fn models_location_reports_the_resolved_dir_and_custom_flag() {
+        let root = Path::new("C:/appdata/SmoothFlow");
+        let loc = models_location(root, "");
+        assert_eq!(loc.resolved, root.join("models").display().to_string());
+        assert!(!loc.is_custom);
+        // Whitespace-only is not a custom dir; it resolves to the default.
+        assert!(!models_location(root, "   ").is_custom);
+        let loc = models_location(root, "D:/elsewhere");
+        assert_eq!(
+            loc.resolved,
+            Path::new("D:/elsewhere").display().to_string()
+        );
+        assert!(loc.is_custom);
+    }
+
+    #[test]
     fn parse_hotkey_lowercase_letter() {
         let (_, code) = parse_hotkey_str("a").expect("single lowercase letter should parse");
         assert_eq!(code, Code::KeyA);
     }
 }
-

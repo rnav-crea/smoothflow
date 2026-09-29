@@ -18,7 +18,7 @@ use crate::offline;
 use crate::postprocess::{categorize_window, strip_reasoning_block, system_prompt, user_message};
 use crate::sf_log;
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -51,10 +51,17 @@ static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 /// error when the server binary, the model, or the server itself is unhappy.
 /// Never falls back to the network.
 pub fn cleanup(text: &str, config: &Config, context: &str) -> Result<String, String> {
+    // Checked here too: model_path would otherwise report a missing model on a
+    // platform that has no engines at all.
+    if !platform_supported() {
+        return Err(unsupported_platform_message());
+    }
     let model = model_path(config)?;
     let server = server_path()?;
 
-    let mut guard = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = SESSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // A different model means a different process: the old one is holding
     // several GB of RAM on a file we no longer need.
     if guard.as_ref().is_some_and(|s| s.model != model) {
@@ -82,13 +89,18 @@ pub fn cleanup(text: &str, config: &Config, context: &str) -> Result<String, Str
 /// Kill and reap the server. Safe with no session and safe to call twice —
 /// an orphaned `llama-server` would hold the model in RAM after we exit.
 pub fn shutdown() {
-    let mut guard = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = SESSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(mut session) = guard.take() {
         session.shutdown();
     }
 }
 
 fn spawn(server: &PathBuf, model: &PathBuf) -> Result<Session, String> {
+    if !platform_supported() {
+        return Err(unsupported_platform_message());
+    }
     if !server.is_file() {
         return Err(format!(
             "[LLM-001] Local cleanup engine not found at {}. Reinstall SmoothFlow or enable cloud mode in Settings.",
@@ -133,7 +145,12 @@ fn spawn(server: &PathBuf, model: &PathBuf) -> Result<Session, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("[LLM-001] Could not start the local cleanup engine at {}: {e}", server.display()))?;
+        .map_err(|e| {
+            format!(
+                "[LLM-001] Could not start the local cleanup engine at {}: {e}",
+                server.display()
+            )
+        })?;
 
     if let Err(err) = wait_ready(&mut child, port) {
         let _ = child.kill();
@@ -150,7 +167,12 @@ fn spawn(server: &PathBuf, model: &PathBuf) -> Result<Session, String> {
 
 /// One completion round trip. `Err` always means the caller must drop the
 /// session. No transcript, prompt, or output is logged.
-fn request(session: &Session, text: &str, config: &Config, context: &str) -> Result<String, String> {
+fn request(
+    session: &Session,
+    text: &str,
+    config: &Config,
+    context: &str,
+) -> Result<String, String> {
     let body = build_body(
         system_prompt(config, categorize_window(context)),
         user_message(text, context),
@@ -240,24 +262,78 @@ fn resolve_model_name(size: &str) -> Result<&'static str, String> {
 }
 
 /// `<models root>/llm/<llm_model_size>/<filename>` — the layout
-/// `offline::download_bundle` writes to.
+/// `offline::download_bundle` writes to. A non-empty `custom_llm_path` wins, so
+/// a user who already owns a .gguf (e.g. from Ollama) never re-downloads 2.55 GB.
 fn model_path(config: &Config) -> Result<PathBuf, String> {
+    let custom = config.custom_llm_path.trim();
+    if !custom.is_empty() {
+        let path = PathBuf::from(custom);
+        return if path.is_file() {
+            Ok(path)
+        } else {
+            Err(missing_model(
+                &path,
+                "Pick an existing .gguf in Settings, or enable cloud mode in Settings.",
+            ))
+        };
+    }
     let filename = resolve_model_name(&config.llm_model_size)?;
     let config_dir = Config::path()
         .parent()
-        .ok_or_else(|| "[LLM-001] Could not determine the SmoothFlow config directory.".to_string())?
+        .ok_or_else(|| {
+            "[LLM-001] Could not determine the SmoothFlow config directory.".to_string()
+        })?
         .to_path_buf();
-    let path = offline::models_dir(&config_dir, &config.models_dir)
-        .join("llm")
-        .join(&config.llm_model_size)
-        .join(filename);
+    let root = offline::models_dir(&config_dir, &config.models_dir).join("llm");
+    let path = root.join(&config.llm_model_size).join(filename);
     if !path.is_file() {
-        return Err(format!(
-            "[LLM-001] Cleanup model not found at {}. Download the Qwen models in Settings, or enable cloud mode in Settings.",
-            path.display()
-        ));
+        let generic = missing_model(
+            &path,
+            "Download the Qwen models in Settings, or enable cloud mode in Settings.",
+        );
+        // A size that is installed but not the configured one is almost always a
+        // Settings typo — name it instead of telling the user to re-download.
+        return match *installed_sizes(&root) {
+            [only] => Err(format!(
+                "{generic} Cleanup Model is set to {}, and the {} model is installed — change Cleanup Model in Settings to {}.",
+                config.llm_model_size, only, only
+            )),
+            _ => Err(generic),
+        };
     }
     Ok(path)
+}
+
+/// Catalog LLM sizes that have their model file on disk under `<root>`.
+/// Zero or more than one means no single actionable suggestion, so the caller
+/// falls back to the generic error.
+fn installed_sizes(root: &Path) -> Vec<&'static str> {
+    let mut sizes: Vec<&'static str> = offline::catalog()
+        .iter()
+        .filter(|spec| spec.category == "llm")
+        .filter(|spec| root.join(spec.directory).join(spec.filename).is_file())
+        .map(|spec| spec.directory)
+        .collect();
+    sizes.sort_unstable();
+    sizes.dedup();
+    sizes
+}
+
+fn missing_model(path: &Path, hint: &str) -> String {
+    format!(
+        "[LLM-001] Cleanup model not found at {}. {hint}",
+        path.display()
+    )
+}
+
+/// The llama.cpp build is Windows-only for now; nothing to look for elsewhere.
+fn platform_supported() -> bool {
+    cfg!(target_os = "windows")
+}
+
+fn unsupported_platform_message() -> String {
+    // Fixed string, not `consts::OS`: the user should read "macOS", not "macos".
+    "[LLM-001] Offline mode is not yet available on macOS or Linux. Please use cloud mode in Settings.".to_string()
 }
 
 /// `<app dir>/llama/llama-server[.exe]`. The llama.cpp build ships as a 9 KB
@@ -265,10 +341,12 @@ fn model_path(config: &Config) -> Result<PathBuf, String> {
 fn server_path() -> Result<PathBuf, String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("[LLM-001] Could not locate the SmoothFlow executable: {e}"))?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| "[LLM-001] Could not locate the SmoothFlow installation directory.".to_string())?;
-    Ok(dir.join("llama").join(format!("llama-server{}", std::env::consts::EXE_SUFFIX)))
+    let dir = exe.parent().ok_or_else(|| {
+        "[LLM-001] Could not locate the SmoothFlow installation directory.".to_string()
+    })?;
+    Ok(dir
+        .join("llama")
+        .join(format!("llama-server{}", std::env::consts::EXE_SUFFIX)))
 }
 
 /// OpenAI-compatible body. `cache_prompt` keeps the system prompt resident
@@ -378,6 +456,78 @@ mod tests {
     }
 
     #[test]
+    fn a_custom_path_that_is_not_there_fails_loudly() {
+        for custom in [
+            "C:/definitely/not/here.gguf",
+            "   C:/definitely/not/here.gguf   ",
+        ] {
+            let config = Config {
+                custom_llm_path: custom.to_string(),
+                ..Config::default()
+            };
+            let err = model_path(&config).unwrap_err();
+            assert!(
+                err.starts_with("[LLM-001]"),
+                "custom {custom:?} gave: {err}"
+            );
+            assert!(
+                err.contains("not/here.gguf"),
+                "custom {custom:?} gave: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_path_that_exists_bypasses_the_catalog() {
+        let file = std::env::temp_dir().join("smoothflow-bring-your-own.gguf");
+        std::fs::write(&file, b"GGUF").unwrap();
+        // A bogus llm_model_size would fail the catalog lookup, so this also
+        // proves the custom path short-circuits it.
+        let config = Config {
+            custom_llm_path: file.to_string_lossy().into_owned(),
+            llm_model_size: "12b".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(model_path(&config).unwrap(), file);
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// A throwaway `<root>/llm` tree: the given sizes get their catalog file.
+    fn fake_llm_root(name: &str, sizes: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("smoothflow-llm-drift-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        for size in sizes {
+            let dir = root.join(size);
+            std::fs::create_dir_all(&dir).unwrap();
+            let filename = resolve_model_name(size).unwrap();
+            std::fs::write(dir.join(filename), b"GGUF").unwrap();
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn one_installed_size_is_the_only_actionable_drift_suggestion() {
+        let root = fake_llm_root("one", &["4b"]);
+        assert_eq!(installed_sizes(&root), vec!["4b"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_or_several_installed_sizes_leave_the_generic_error() {
+        // Empty root, an empty size directory, and a stray file must not count.
+        let empty = fake_llm_root("none", &[]);
+        assert!(installed_sizes(&empty).is_empty());
+        std::fs::create_dir_all(empty.join("2b")).unwrap();
+        assert!(installed_sizes(&empty).is_empty());
+        let _ = std::fs::remove_dir_all(&empty);
+
+        let many = fake_llm_root("many", &["4b", "9b"]);
+        assert_eq!(installed_sizes(&many), vec!["4b", "9b"]);
+        let _ = std::fs::remove_dir_all(&many);
+    }
+
+    #[test]
     fn request_body_is_deterministic_offline_and_unauthenticated() {
         let body = build_body("sys".to_string(), "user".to_string());
         assert_eq!(body["temperature"], 0);
@@ -437,6 +587,14 @@ mod tests {
         shutdown();
         // Still empty — a failed request must not have cached a dead session.
         assert!(SESSION.lock().unwrap().is_none());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn an_unsupported_platform_says_so_instead_of_missing_the_engine() {
+        assert!(!platform_supported());
+        assert!(unsupported_platform_message().starts_with("[LLM-001]"));
+        assert!(unsupported_platform_message().contains("macOS or Linux"));
     }
 
     #[test]

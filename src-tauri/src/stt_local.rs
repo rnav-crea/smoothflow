@@ -94,6 +94,9 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
 }
 
 fn spawn(config: &Config) -> Result<Session, String> {
+    if !platform_supported() {
+        return Err(unsupported_platform_message());
+    }
     let helper = helper_path()?;
     if !helper.is_file() {
         return Err(format!(
@@ -162,6 +165,16 @@ fn spawn(config: &Config) -> Result<Session, String> {
         return Err(format!("[STT-004] The local speech helper did not report a loaded model: {}", line.trim()));
     }
     Ok(session)
+}
+
+/// The helper is a Windows build; there is nothing to look for elsewhere.
+fn platform_supported() -> bool {
+    cfg!(target_os = "windows")
+}
+
+fn unsupported_platform_message() -> String {
+    // Fixed string, not `consts::OS`: the user should read "macOS", not "macos".
+    "[STT-001] Offline mode is not yet available on macOS or Linux. Please use cloud mode in Settings.".to_string()
 }
 
 /// `<app dir>/smoothflow-stt[.exe]`, next to the running binary.
@@ -264,6 +277,14 @@ mod tests {
         // short-circuit before any of that is resolved.
         let config = Config::default();
         assert_eq!(transcribe(&[], 16000, &config).unwrap(), "");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn an_unsupported_platform_says_so_instead_of_missing_the_helper() {
+        assert!(!platform_supported());
+        assert!(unsupported_platform_message().starts_with("[STT-001]"));
+        assert!(unsupported_platform_message().contains("macOS or Linux"));
     }
 
     #[test]

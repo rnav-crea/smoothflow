@@ -21,7 +21,9 @@ fn config_dir() -> PathBuf {
 pub fn store_secret(key: &str) -> Result<(), String> {
     keyring::Entry::new("SmoothFlow", "api_key")
         .and_then(|entry| entry.set_password(key))
-        .map_err(|e| format!("[CFG-001] Could not save API key to Windows Credential Manager. ({e})"))
+        .map_err(|e| {
+            format!("[CFG-001] Could not save API key to Windows Credential Manager. ({e})")
+        })
 }
 
 #[cfg(not(test))]
@@ -87,6 +89,10 @@ pub struct Config {
     pub llm_model_size: String,
     #[serde(default)]
     pub models_dir: String,
+    /// Absolute path to a user-supplied .gguf, used instead of the catalog
+    /// download. Empty = download the catalog model for `llm_model_size`.
+    #[serde(default)]
+    pub custom_llm_path: String,
     #[serde(default)]
     pub auto_download_models: bool,
     #[serde(default = "default_casual_fast_path_words")]
@@ -137,6 +143,7 @@ impl Default for Config {
             stt_version: default_stt_version(),
             llm_model_size: default_llm_model_size(),
             models_dir: String::new(),
+            custom_llm_path: String::new(),
             auto_download_models: false,
             casual_fast_path_words: 4,
             keep_audio_clips: false,
@@ -207,6 +214,7 @@ mod tests {
         assert_eq!(c.stt_version, "v2");
         assert_eq!(c.llm_model_size, "4b");
         assert!(c.models_dir.is_empty());
+        assert!(c.custom_llm_path.is_empty());
         assert!(!c.auto_download_models);
         assert_eq!(c.casual_fast_path_words, 4);
         assert!(!c.keep_audio_clips);
@@ -231,6 +239,7 @@ mod tests {
             stt_version: "v3".into(),
             llm_model_size: "2b".into(),
             models_dir: "D:/models".into(),
+            custom_llm_path: "C:/my-model.gguf".into(),
             auto_download_models: true,
             casual_fast_path_words: 7,
             keep_audio_clips: true,
@@ -247,6 +256,7 @@ mod tests {
         assert_eq!(back.stt_version, "v3");
         assert_eq!(back.llm_model_size, "2b");
         assert_eq!(back.models_dir, "D:/models");
+        assert_eq!(back.custom_llm_path, "C:/my-model.gguf");
         assert!(back.auto_download_models);
         assert_eq!(back.casual_fast_path_words, 7);
         assert!(back.keep_audio_clips);
@@ -267,11 +277,13 @@ mod tests {
         assert_eq!(c.stt_version, "v2");
         assert_eq!(c.llm_model_size, "4b");
         assert!(c.models_dir.is_empty());
+        assert!(c.custom_llm_path.is_empty());
         assert!(!c.auto_download_models);
     }
 
     #[test]
-    fn load_missing_file_returns_default() {        let path = Config::path();
+    fn load_missing_file_returns_default() {
+        let path = Config::path();
         let backup = std::fs::read_to_string(&path).ok();
         let _ = std::fs::remove_file(&path);
         let c = Config::load();
@@ -317,6 +329,7 @@ mod tests {
             stt_version: "v3".into(),
             llm_model_size: "9b".into(),
             models_dir: "C:/SmoothFlow/models".into(),
+            custom_llm_path: "C:/ollama/mistral.gguf".into(),
             auto_download_models: true,
             casual_fast_path_words: 5,
             keep_audio_clips: true,
@@ -324,7 +337,10 @@ mod tests {
         c.save();
         let loaded = Config::load();
         assert_eq!(loaded.api_base_url, "https://custom.example.com");
-        assert!(loaded.api_key.is_empty(), "api_key must not persist to disk (VULN-003)");
+        assert!(
+            loaded.api_key.is_empty(),
+            "api_key must not persist to disk (VULN-003)"
+        );
         assert_eq!(loaded.model, "whisper-custom");
         assert_eq!(loaded.cleanup_fallback_model, "qwen-fallback");
         assert!(!loaded.auto_punctuation);
@@ -337,6 +353,7 @@ mod tests {
         assert_eq!(loaded.stt_version, "v3");
         assert_eq!(loaded.llm_model_size, "9b");
         assert_eq!(loaded.models_dir, "C:/SmoothFlow/models");
+        assert_eq!(loaded.custom_llm_path, "C:/ollama/mistral.gguf");
         assert!(loaded.auto_download_models);
         assert_eq!(loaded.casual_fast_path_words, 5);
         assert!(loaded.keep_audio_clips);

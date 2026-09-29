@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
+import { open } from "@tauri-apps/plugin-dialog";
 const debug = document.getElementById("debug-text");
 const debugIcon = document.getElementById("debug-info-icon");
 const debugPopover = document.getElementById("debug-popover");
@@ -98,6 +99,13 @@ const deleteModelsBtn = document.getElementById("delete-models-btn");
 const refreshModelsBtn = document.getElementById("refresh-models-btn");
 const offlineModelStatus = document.getElementById("offline-model-status");
 const offlineModelFiles = document.getElementById("offline-model-files");
+const modelsDirInput = document.getElementById("models-dir-input");
+const browseModelsDirBtn = document.getElementById("browse-models-dir-btn");
+const modelsDirDefaultBtn = document.getElementById("models-dir-default-btn");
+const modelsDirHint = document.getElementById("models-dir-hint");
+const customLlmPathInput = document.getElementById("custom-llm-path-input");
+const browseCustomLlmBtn = document.getElementById("browse-custom-llm-btn");
+const customLlmBypassNote = document.getElementById("custom-llm-bypass-note");
 
 // Surface hotkey registration/parse errors from the backend at startup
 try {
@@ -407,6 +415,10 @@ async function loadConfig() {
       offlineLlmSelect.value = ["2b", "4b", "9b"].includes(config.llm_model_size) ? config.llm_model_size : "4b";
       currentConfig.llm_model_size = offlineLlmSelect.value;
     }
+    currentConfig.models_dir = config.models_dir || "";
+    currentConfig.custom_llm_path = config.custom_llm_path || "";
+    if (customLlmPathInput) customLlmPathInput.value = currentConfig.custom_llm_path;
+    renderModelsDir();
     updateOfflineModelControls();
     if (hotkeyInput) hotkeyInput.value = config.hotkey || "Ctrl+Space";
     log("Config loaded");
@@ -421,6 +433,7 @@ async function loadConfig() {
 async function saveConfig() {
   if (!currentConfig) return;
   const updatedConfig = {
+    ...currentConfig,
     api_base_url: apiUrlInput.value,
     model: modelSelect && modelSelect.value ? modelSelect.value : modelInput.value,
     cleanup_model: cleanupModelSelect && cleanupModelSelect.value ? cleanupModelSelect.value : cleanupModelInput.value,
@@ -431,12 +444,11 @@ async function saveConfig() {
     launch_on_startup: startupToggle.checked,
     dictionary: currentConfig.dictionary || [],
     hotkey: hotkeyInput ? hotkeyInput.value : "Ctrl+Space",
-    overlay_position: currentConfig.overlay_position || "bottom",
-    offline_mode: currentConfig.offline_mode,
-    stt_version: currentConfig.stt_version,
-    llm_model_size: currentConfig.llm_model_size,
-    models_dir: currentConfig.models_dir,
-    auto_download_models: currentConfig.auto_download_models,
+    offline_mode: !!offlineModeToggle?.checked,
+    stt_version: offlineSttSelect ? offlineSttSelect.value : currentConfig.stt_version,
+    llm_model_size: offlineLlmSelect ? offlineLlmSelect.value : currentConfig.llm_model_size,
+    models_dir: currentConfig.models_dir || "",
+    custom_llm_path: customLlmPathInput ? customLlmPathInput.value.trim() : (currentConfig.custom_llm_path || ""),
   };
   try {
     await invoke("update_config", { newConfig: updatedConfig });
@@ -503,7 +515,90 @@ function updateOfflineModelControls() {
   if (offlineModelsControls && offlineModeToggle) {
     offlineModelsControls.style.display = offlineModeToggle.checked ? "flex" : "none";
   }
+  if (customLlmBypassNote && customLlmPathInput) {
+    customLlmBypassNote.style.display = customLlmPathInput.value.trim() ? "block" : "none";
+  }
 }
+
+let modelsDirResolved = "";
+let modelsDirIsCustom = false;
+
+function renderModelsDir() {
+  if (modelsDirInput) {
+    modelsDirInput.value = (currentConfig?.models_dir || "").trim() || modelsDirResolved;
+  }
+  if (modelsDirHint) {
+    modelsDirHint.textContent = modelsDirIsCustom
+      ? `Custom location — models are read from ${modelsDirResolved || "the path above"}. Clear it to go back to the default.`
+      : `By default models are stored in ${modelsDirResolved || "the app data folder"}. You can move them to another drive if C: is short on space.`;
+  }
+}
+
+async function loadModelsDir() {
+  try {
+    const location = await invoke("get_models_dir");
+    modelsDirResolved = location?.resolved || "";
+    modelsDirIsCustom = !!location?.is_custom;
+    renderModelsDir();
+  } catch (err) {
+    if (modelsDirHint) modelsDirHint.textContent = `Could not read models folder: ${err}`;
+    log(`Models folder error: ${err}`);
+  }
+}
+
+function modelsDirFromInput() {
+  const value = (modelsDirInput?.value || "").trim();
+  if (!value) return "";
+  if (modelsDirIsCustom) return value;
+  return value === modelsDirResolved ? "" : value;
+}
+
+async function applyModelsDir() {
+  if (!currentConfig) return;
+  currentConfig.models_dir = modelsDirFromInput();
+  await saveConfig();
+  await loadModelsDir();
+  await loadOfflineModelStatus();
+}
+
+function applyCustomLlmPath() {
+  if (!currentConfig) return;
+  currentConfig.custom_llm_path = (customLlmPathInput?.value || "").trim();
+  updateOfflineModelControls();
+  saveConfig();
+}
+
+if (browseModelsDirBtn) {
+  browseModelsDirBtn.addEventListener("click", async () => {
+    const picked = await open({ directory: true, multiple: false, defaultPath: modelsDirInput?.value || undefined });
+    if (!picked) return;
+    if (modelsDirInput) modelsDirInput.value = picked;
+    await applyModelsDir();
+  });
+}
+
+if (modelsDirDefaultBtn) {
+  modelsDirDefaultBtn.addEventListener("click", async () => {
+    if (modelsDirInput) modelsDirInput.value = modelsDirResolved;
+    currentConfig.models_dir = "";
+    await saveConfig();
+    await loadModelsDir();
+    await loadOfflineModelStatus();
+  });
+}
+
+if (modelsDirInput) modelsDirInput.addEventListener("change", applyModelsDir);
+
+if (browseCustomLlmBtn) {
+  browseCustomLlmBtn.addEventListener("click", async () => {
+    const picked = await open({ multiple: false, filters: [{ name: "GGUF model", extensions: ["gguf"] }] });
+    if (!picked) return;
+    if (customLlmPathInput) customLlmPathInput.value = picked;
+    applyCustomLlmPath();
+  });
+}
+
+if (customLlmPathInput) customLlmPathInput.addEventListener("change", applyCustomLlmPath);
 
 function offlineStatusSummary() {
   if (!offlineModelStatusData) return "";
@@ -982,6 +1077,7 @@ if (resetHistoryCheck) resetHistoryCheck.addEventListener("change", updateResetC
 if (resetConfirmBtn) resetConfirmBtn.addEventListener("click", confirmReset);
 
 loadConfig();
+loadModelsDir();
 
 // Auto-updater
 // TESTING: dummy update - set true only to retest the update UI without a real release

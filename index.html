@@ -210,6 +210,26 @@
                 </select>
               </div>
 
+              <div class="settings-group">
+                <label for="custom-llm-path-input">Custom cleanup model (.gguf)</label>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  <input type="text" id="custom-llm-path-input" placeholder="Leave empty to use the downloaded model" />
+                  <button id="browse-custom-llm-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">BROWSE</button>
+                </div>
+                <span class="settings-hint">Already have a .gguf from Ollama or another provider? Point SmoothFlow at it and skip the download. Leave empty to use the downloaded model.</span>
+                <span id="custom-llm-bypass-note" class="settings-hint" style="display: none; color: #f4d1ba;">A custom .gguf is set — it overrides the Cleanup Model dropdown above and no Qwen download is needed.</span>
+              </div>
+
+              <div class="settings-group">
+                <label for="models-dir-input">Models folder</label>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  <input type="text" id="models-dir-input" placeholder="Loading..." />
+                  <button id="browse-models-dir-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">BROWSE</button>
+                  <button id="models-dir-default-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">USE DEFAULT</button>
+                </div>
+                <span id="models-dir-hint" class="settings-hint">Loading models folder...</span>
+              </div>
+
               <div style="display: flex; gap: 10px; align-items: center;">
                 <button id="download-models-btn" class="save-settings-btn" type="button" style="max-width: none; flex: 1;">DOWNLOAD</button>
                 <button id="delete-models-btn" class="reset-cancel-btn" type="button" style="padding: 10px 14px;">DELETE DOWNLOADED</button>

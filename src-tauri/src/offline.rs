@@ -386,13 +386,13 @@ fn validate_spec(spec: &ModelSpec) -> Result<(), String> {
     if repository_parts.len() != 2 || repository_parts.iter().any(|part| part.is_empty() || *part == "." || *part == ".." || part.contains('\\')) {
         return Err(format!("Model '{}' has an unsafe repository path.", spec.id));
     }
+    if has_unsafe_url_path(spec.url) {
+        return Err(format!("Model '{}' has unsafe URL path components.", spec.id));
+    }
     let url = reqwest::Url::parse(spec.url)
         .map_err(|_| format!("Model '{}' has an invalid URL.", spec.id))?;
     if url.scheme() != "https" || url.host_str() != Some("huggingface.co") || url.port().is_some() || url.username() != "" || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
         return Err(format!("Model '{}' has an unsafe URL.", spec.id));
-    }
-    if url.path_segments().map(|mut segments| segments.any(|segment| segment == ".." || segment == ".")).unwrap_or(true) {
-        return Err(format!("Model '{}' has unsafe URL path components.", spec.id));
     }
     if spec.expected_size == 0 {
         return Err(format!("Model '{}' has an invalid expected size.", spec.id));
@@ -403,6 +403,20 @@ fn validate_spec(spec: &ModelSpec) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Rejects `.`/`..` path segments in the raw URL string. `Url::parse` resolves
+/// dot segments (including `%2e%2e`) while parsing, so a check on the parsed
+/// `path_segments()` can never see them. This is the only place they exist.
+fn has_unsafe_url_path(raw: &str) -> bool {
+    let Some((_, after_scheme)) = raw.split_once("://") else {
+        return true;
+    };
+    let path = &after_scheme[after_scheme.find('/').unwrap_or(after_scheme.len())..];
+    path.split('/').any(|segment| {
+        let segment = segment.to_ascii_lowercase().replace("%2e", ".");
+        segment == "." || segment == ".."
+    })
 }
 
 fn validate_component(name: &str, value: &str) -> Result<(), String> {
@@ -506,6 +520,20 @@ mod tests {
         assert!(validate_spec(&spec).is_err());
         spec.directory = "v2";
         spec.url = "https://huggingface.co/models/../secret";
-        assert!(validate_spec(&spec).is_err());
+        assert!(validate_spec(&spec).is_err(), "raw `..` segment must be rejected");
+        spec.url = "https://huggingface.co/models/./secret";
+        assert!(validate_spec(&spec).is_err(), "raw `.` segment must be rejected");
+        // `Url::parse` also collapses `%2e%2e` to `/secret`, so the raw check decodes it.
+        spec.url = "https://huggingface.co/models/%2e%2e/secret";
+        assert!(validate_spec(&spec).is_err(), "percent-encoded traversal must be rejected");
+        spec.url = "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf";
+        assert!(validate_spec(&spec).is_ok(), "a real catalog URL must stay valid");
+    }
+
+    #[test]
+    fn every_catalog_entry_passes_validation() {
+        for spec in CATALOG {
+            assert!(validate_spec(spec).is_ok(), "catalog entry '{}' is invalid", spec.id);
+        }
     }
 }
