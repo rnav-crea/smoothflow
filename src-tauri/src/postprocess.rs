@@ -282,55 +282,229 @@ fn cooldown_seconds_from_headers(resp: &reqwest::blocking::Response) -> f64 {
 }
 
 // Kept as the empty-context entry point for existing callers/tests.
-#[allow(dead_code)]
 pub fn postprocess(text: &str, config: &Config) -> String {
     postprocess_with_context(text, config, "")
 }
 
 pub(crate) fn postprocess_with_context(text: &str, config: &Config, context: &str) -> String {
+    let pre = match prepare(text, config) {
+        Prepared::Done(out) => return out,
+        Prepared::Llm { pre } => pre,
+    };
+    // Three-way on `cleanup_engine`: local llama-server, the existing cloud
+    // endpoint, or no model at all (which `prepare` already returned). Neither
+    // engine falls back to the other: the caller keeps the deterministic-rules
+    // fallback either way.
+    let cleaned = match config.cleanup_engine.as_str() {
+        "local" => crate::llm_local::cleanup(&pre, config, context),
+        "cloud" => llm_cleanup(&pre, config, context),
+        // Unreachable: `prepare` returns the deterministic result when no engine
+        // is selected. Written as a real value, not `unreachable!()`.
+        _ => Ok(pre.clone()),
+    };
+    finish(&pre, config, cleaned, true)
+}
+
+/// Streaming twin of `postprocess_with_context`: `on_partial` receives each
+/// generated chunk so the caller can paste it while the model is still writing.
+/// Only the local llama-server streams: the cloud response arrives whole, and
+/// pacing it would mean inventing timing the API doesn't promise, while `"off"`
+/// has no model to stream from at all.
+#[allow(dead_code)]
+pub fn postprocess_with_context_streaming(
+    text: &str,
+    config: &Config,
+    context: &str,
+    on_partial: &mut dyn FnMut(&str),
+) -> String {
+    let pre = match prepare(text, config) {
+        Prepared::Done(out) => return out,
+        Prepared::Llm { pre } => pre,
+    };
+    if config.cleanup_engine != "local" {
+        let cleaned = match config.cleanup_engine.as_str() {
+            "cloud" => llm_cleanup(&pre, config, context),
+            _ => Ok(pre.clone()),
+        };
+        return finish(&pre, config, cleaned, true);
+    }
+    let cleaned = crate::llm_local::cleanup_streaming(&pre, config, context, on_partial);
+    finish(&pre, config, cleaned, false)
+}
+
+/// Whether any model runs at all. `"off"` (the default) and any value the
+/// config normaliser would have rejected mean "deterministic rules only".
+fn uses_a_model(config: &Config) -> bool {
+    matches!(config.cleanup_engine.as_str(), "local" | "cloud")
+}
+
+/// Everything before the LLM call: empty input, the deterministic pre-pass, the
+/// no-model early return, and the local casual fast path.
+enum Prepared {
+    Done(String),
+    Llm { pre: String },
+}
+
+fn prepare(text: &str, config: &Config) -> Prepared {
     if text.trim().is_empty() {
-        return String::new();
+        return Prepared::Done(String::new());
     }
     // Deterministic pre-pass (text_rules): spoken commands, numbers, emoji,
     // fillers, self-corrections — cheaper and more reliable than asking the
     // LLM for these on every request.
     let pre = crate::text_rules::apply_pre(text);
-    if config.cleanup_model.is_empty() {
-        return ensure_email_structure(&basic_cleanup(&pre, config));
+    // "off" means no model: not started, not warmed, not downloaded, nothing
+    // sent. The rules path is byte-identical to the no-cleanup-model path.
+    if !uses_a_model(config) || config.cleanup_model.is_empty() {
+        return Prepared::Done(ensure_email_structure(&basic_cleanup(&pre, config)));
     }
-    // LLM cleanup with a faithfulness guardrail: any failure (service error,
-    // cooldown, assistant-preamble, unfaithful output) falls back to the
-    // deterministic rules — dictation never breaks on service failure. The
-    // LLM output is NOT re-run through basic_cleanup: remove_fillers
-    // collapses whitespace with split_whitespace().join(" "), which destroys
-    // any list/newline structure the LLM produced.
-    // Cloud cleanup when offline_mode is false (default, byte-identical
-    // behaviour). The local llama-server otherwise. Neither falls back to the
-    // other: the caller already has the deterministic-rules fallback below.
-    let cleaned = if config.offline_mode {
-        crate::llm_local::cleanup(&pre, config, context)
-    } else {
-        llm_cleanup(&pre, config, context)
-    };
-    match cleaned {
+    // ponytail: word count only, no tone check — a short formal sentence
+    // ("revenue was up 4%") skips the LLM too. Add a tone heuristic if that
+    // starts costing punctuation/structure on short input.
+    if fast_path_applies(config, &pre) {
+        // The rules output is both `rules` and `out` here, so the unified
+        // metric line reports changed 0 / punct_only true / outcome fast_path.
+        // Nothing was generated, so there is nothing to stream.
+        let rules = crate::text_rules::apply_post(&pre);
+        let done = ensure_email_structure(&rules);
+        crate::sf_log!("{}", effect_line(&pre, &done, &rules, "fast_path", config));
+        return Prepared::Done(done);
+    }
+    Prepared::Llm { pre }
+}
+
+/// The post-LLM half. The LLM output is NOT re-run through `basic_cleanup`:
+/// `remove_fillers` collapses whitespace with `split_whitespace().join(" ")`,
+/// which destroys any list/newline structure the LLM produced.
+///
+/// `can_reject` is false once chunks have been pasted — see the streaming arm.
+///
+/// Each arm only decides the final text; the single `CLEANUP: effect` line is
+/// emitted after the match, so every dictation logs exactly one line and the
+/// returned `String` is byte-identical to the previous direct-return version.
+fn finish(
+    pre: &str,
+    config: &Config,
+    cleaned: Result<String, String>,
+    can_reject: bool,
+) -> String {
+    // What the user would have got with no LLM at all: three of the four arms
+    // return it, and the metric reports its word count as `rules`.
+    let rules = crate::text_rules::apply_post(pre);
+    // Kept out of the match so the failure reason survives the single log line.
+    let mut error_detail: Option<String> = None;
+    let (final_text, outcome) = match cleaned {
         Ok(cleaned) if !crate::text_rules::looks_unfaithful(&pre, &cleaned, &config.dictionary) => {
-            ensure_email_structure(&crate::text_rules::apply_post(&cleaned))
+            (
+                ensure_email_structure(&crate::text_rules::apply_post(&cleaned)),
+                "ok",
+            )
         }
         // ponytail: these two were one silent `_ =>` arm, so a failed or
         // rejected cleanup looked identical to a successful one — the user got
-        // raw text with no clue why. Logged only; behaviour is unchanged.
-        Ok(_) => {
-            crate::sf_log!(
-                "CLEANUP: LLM output rejected as unfaithful — falling back to raw rules ({} words in)",
-                pre.split_whitespace().count()
-            );
-            ensure_email_structure(&crate::text_rules::apply_post(&pre))
-        }
+        // raw text with no clue why. The `outcome` field below now separates
+        // all four cases; behaviour is unchanged.
+        Ok(_) if can_reject => (ensure_email_structure(&rules), "unfaithful_rejected"),
+        // ponytail: streaming ceiling — the guardrail can no longer stop text the
+        // user is already reading, so it only reports. Rejecting here would leave
+        // a half-pasted sentence with no way to take it back; the ceiling lifts if
+        // the caller ever gains a retract primitive.
+        Ok(cleaned) => (
+            ensure_email_structure(&crate::text_rules::apply_post(&cleaned)),
+            "unfaithful_streamed",
+        ),
         Err(error) => {
-            crate::sf_log!("CLEANUP: LLM failed ({error}) — falling back to raw rules");
-            ensure_email_structure(&crate::text_rules::apply_post(&pre))
+            error_detail = Some(error);
+            (ensure_email_structure(&rules), "error")
+        }
+    };
+    // Metrics only — counts, booleans, enum names. Never transcript text.
+    let mut line = effect_line(pre, &final_text, &rules, outcome, config);
+    if let Some(error) = error_detail {
+        // This is the only clue when a model is missing or the engine died, so
+        // it is kept (the previous version logged it verbatim). Whitespace is
+        // collapsed so the one-line metric format survives a multi-line error.
+        let flat = error.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !flat.is_empty() {
+            let short: String = flat.chars().take(160).collect();
+            line.push_str(&format!(" | error {short}"));
         }
     }
+    crate::sf_log!("{line}");
+    final_text
+}
+
+/// Local cleanup only: short utterances skip the LLM and take the deterministic
+/// rules instead, saving seconds of inference. Cloud is never affected, and with
+/// `"off"` no model runs at all, so a fast path would be meaningless.
+fn fast_path_applies(config: &Config, pre: &str) -> bool {
+    config.cleanup_engine == "local"
+        && pre.split_whitespace().count() <= config.casual_fast_path_words
+}
+
+/// How many words differ between two texts, ignoring case and punctuation.
+/// Bag-of-words difference: `a_extra + b_extra` over lowercased,
+/// punctuation-stripped tokens. O(n) and deterministic — a real LCS is not
+/// worth the cost for a log metric.
+fn word_difference(a: &str, b: &str) -> usize {
+    // Same trimming rule as text_rules::trim_word (Swift
+    // CharacterSet.punctuationCharacters; `$` is a symbol there and stays), which
+    // is private to that module, so it is mirrored instead of exported.
+    fn tokens(text: &str) -> Vec<String> {
+        text.split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| c.is_ascii_punctuation() && c != '$')
+                    .to_lowercase()
+            })
+            .filter(|w| !w.is_empty())
+            .collect()
+    }
+
+    let a = tokens(a);
+    let b = tokens(b);
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for token in &a {
+        *counts.entry(token.as_str()).or_insert(0) += 1;
+    }
+    let mut common = 0usize;
+    for token in &b {
+        if let Some(left) = counts.get_mut(token.as_str()) {
+            if *left > 0 {
+                *left -= 1;
+                common += 1;
+            }
+        }
+    }
+    a.len() + b.len() - 2 * common
+}
+
+/// The one `CLEANUP: effect` metric line per dictation. Answers "did the model
+/// earn its inference time?": `changed == 0` means it only touched
+/// punctuation/casing and the deterministic rules had already won.
+///
+/// Counts, booleans and enum names only — never transcript text.
+fn effect_line(
+    pre: &str,
+    final_text: &str,
+    rules_text: &str,
+    outcome: &str,
+    config: &Config,
+) -> String {
+    let in_words = pre.split_whitespace().count();
+    let out_words = final_text.split_whitespace().count();
+    let rule_words = rules_text.split_whitespace().count();
+    let changed = word_difference(rules_text, final_text);
+    format!(
+        "CLEANUP: effect | in {} | out {} | rules {} | changed {} | punct_only {} | outcome {} | fast_eligible {} | threshold {}",
+        in_words,
+        out_words,
+        rule_words,
+        changed,
+        changed == 0,
+        outcome,
+        in_words <= config.casual_fast_path_words,
+        config.casual_fast_path_words
+    )
 }
 
 /// Reflow a dictation with BOTH an email greeting and closing into
@@ -566,24 +740,48 @@ fn llm_cleanup(text: &str, config: &Config, context: &str) -> Result<String, Str
     }
 }
 
+const PROMPT_RULES_VOCABULARY_AUTHORITY: &str = "\
+VOCABULARY AUTHORITY (strict):
+- The vocabulary list below is the authoritative spelling for the user's names, people, products, places, and terms.
+- If a word in the transcript sounds similar or is a near-miss spelling of a vocabulary entry, REPLACE it with the exact vocabulary spelling. Example: transcript \"Navin\" with vocabulary \"Naveen\" -> \"Naveen\". Transcript \"Freya\" with vocabulary \"Priya\" -> \"Priya\".
+- When a person, team, or product name in the transcript is an ASR guess, prefer the vocabulary entry that matches phonetically. Never invent a name that is not in the vocabulary and not phonetically close to one.";
+
+fn prompt_base_for(category: WindowCategory, base_rules: &str) -> String {
+    match category {
+        WindowCategory::Email => format!("{}\n\n{}", base_rules, PROMPT_EMAIL),
+        WindowCategory::Code => format!("{}\n\n{}", base_rules, PROMPT_CODE),
+        WindowCategory::Chat => format!("{}\n\n{}", base_rules, PROMPT_CHAT),
+        WindowCategory::Browser => format!("{}\n\n{}", base_rules, PROMPT_BROWSER),
+        WindowCategory::Document => format!("{}\n\n{}", base_rules, PROMPT_DOCUMENT),
+        WindowCategory::Default => format!("{}\n\n{}", base_rules, PROMPT_DEFAULT),
+    }
+}
+
+fn dictionary_suffix(config: &Config) -> String {
+    format!(
+        "\n\nThe following vocabulary must be treated as high-priority terms while rewriting. Use these spellings exactly in the output when relevant: {}",
+        config.dictionary.join(", ")
+    )
+}
+
 pub(crate) fn system_prompt(config: &Config, category: WindowCategory) -> String {
-    let base = match category {
-        WindowCategory::Email => format!("{}\n\n{}", PROMPT_BASE_RULES, PROMPT_EMAIL),
-        WindowCategory::Code => format!("{}\n\n{}", PROMPT_BASE_RULES, PROMPT_CODE),
-        WindowCategory::Chat => format!("{}\n\n{}", PROMPT_BASE_RULES, PROMPT_CHAT),
-        WindowCategory::Browser => format!("{}\n\n{}", PROMPT_BASE_RULES, PROMPT_BROWSER),
-        WindowCategory::Document => format!("{}\n\n{}", PROMPT_BASE_RULES, PROMPT_DOCUMENT),
-        WindowCategory::Default => format!("{}\n\n{}", PROMPT_BASE_RULES, PROMPT_DEFAULT),
-    };
+    let base = prompt_base_for(category, PROMPT_BASE_RULES);
 
     if config.dictionary.is_empty() {
         base
     } else {
-        format!(
-            "{}\n\nThe following vocabulary must be treated as high-priority terms while rewriting. Use these spellings exactly in the output when relevant: {}",
-            base,
-            config.dictionary.join(", ")
-        )
+        format!("{}{}", base, dictionary_suffix(config))
+    }
+}
+
+pub(crate) fn system_prompt_offline(config: &Config, category: WindowCategory) -> String {
+    let extended_base = format!("{}\n\n{}", PROMPT_BASE_RULES, PROMPT_RULES_VOCABULARY_AUTHORITY);
+    let base = prompt_base_for(category, &extended_base);
+
+    if config.dictionary.is_empty() {
+        base
+    } else {
+        format!("{}{}", base, dictionary_suffix(config))
     }
 }
 
@@ -1116,6 +1314,104 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_engine_off_returns_the_deterministic_rules_only() {
+        let c = Config {
+            cleanup_engine: "off".into(),
+            cleanup_model: "qwen/qwen3.6-27b".into(),
+            ..Config::default()
+        };
+        let out = postprocess_with_context("um hello world", &c, "");
+        assert_eq!(out, "hello world.");
+        // Identical to the no-cleanup-model path: nothing was started or sent.
+        assert_eq!(out, postprocess("um hello world", &test_config()));
+        let mut streamed = Vec::new();
+        let streamed_out = postprocess_with_context_streaming("um hello world", &c, "", &mut |p| {
+            streamed.push(p.to_string())
+        });
+        assert!(streamed.is_empty(), "nothing may stream with cleanup off");
+        assert_eq!(streamed_out, out);
+    }
+
+    #[test]
+    fn an_unknown_cleanup_engine_is_treated_as_off() {
+        let c = Config {
+            cleanup_engine: "gpu".into(),
+            cleanup_model: "qwen/qwen3.6-27b".into(),
+            ..Config::default()
+        };
+        assert_eq!(postprocess_with_context("um hello world", &c, ""), "hello world.");
+    }
+
+    #[test]
+    fn fast_path_never_applies_without_a_local_model() {
+        // Cloud cleanup has no local inference to skip, so it always goes to the
+        // endpoint; "off" has no model at all.
+        for engine in ["cloud", "off", "gpu"] {
+            let c = Config {
+                cleanup_engine: engine.into(),
+                cleanup_model: "qwen/qwen3.6-27b".into(),
+                ..Config::default()
+            };
+            assert!(!fast_path_applies(&c, "yes"), "engine {engine:?}");
+            assert!(!fast_path_applies(&c, "send it now"), "engine {engine:?}");
+        }
+    }
+
+    #[test]
+    fn fast_path_applies_at_or_below_threshold_offline() {
+        let c = Config {
+            cleanup_engine: "local".into(),
+            cleanup_model: "local".into(),
+            casual_fast_path_words: 4,
+            ..Config::default()
+        };
+        assert!(fast_path_applies(&c, "yes"));
+        assert!(fast_path_applies(&c, "sure thing"));
+        assert!(fast_path_applies(&c, "send it now")); // exactly at 4
+        assert!(!fast_path_applies(&c, "send it now please")); // 5
+    }
+
+    #[test]
+    fn fast_path_zero_threshold_disables_itself() {
+        let c = Config {
+            cleanup_engine: "local".into(),
+            cleanup_model: "local".into(),
+            casual_fast_path_words: 0,
+            ..Config::default()
+        };
+        assert!(!fast_path_applies(&c, "yes"));
+    }
+
+    #[test]
+    fn fast_path_counts_words_by_whitespace_only() {
+        let c = Config {
+            cleanup_engine: "local".into(),
+            cleanup_model: "local".into(),
+            casual_fast_path_words: 2,
+            ..Config::default()
+        };
+        assert!(fast_path_applies(&c, "  send   it  "));
+        assert!(fast_path_applies(&c, "send\n\nit"));
+        assert!(fast_path_applies(&c, "\t send \r\n it \t"));
+        assert!(!fast_path_applies(&c, "send\n\nit\n\nnow"));
+    }
+
+    #[test]
+    fn fast_path_returns_deterministic_output() {
+        let c = Config {
+            cleanup_engine: "local".into(),
+            cleanup_model: "local".into(),
+            casual_fast_path_words: 4,
+            ..Config::default()
+        };
+        let pre = crate::text_rules::apply_pre("um yes");
+        assert_eq!(
+            postprocess_with_context("um yes", &c, ""),
+            ensure_email_structure(&crate::text_rules::apply_post(&pre))
+        );
+    }
+
+    #[test]
     fn parses_ratelimit_durations() {
         assert_eq!(parse_duration_secs("7.66"), Some(7.66));
         assert_eq!(parse_duration_secs("2m59.56s"), Some(179.56));
@@ -1125,6 +1421,63 @@ mod tests {
         assert_eq!(parse_duration_secs(""), None);
         assert_eq!(parse_duration_secs("abc"), None);
         assert_eq!(parse_duration_secs("12x"), None);
+    }
+
+    #[test]
+    fn streaming_entry_point_never_streams_through_the_fast_path() {
+        let c = Config {
+            cleanup_engine: "local".into(),
+            cleanup_model: "local".into(),
+            casual_fast_path_words: 4,
+            ..Config::default()
+        };
+        let mut streamed = Vec::new();
+        let out = postprocess_with_context_streaming("um yes", &c, "", &mut |p| {
+            streamed.push(p.to_string())
+        });
+        // Nothing was generated, so nothing may be streamed.
+        assert!(streamed.is_empty());
+        let pre = crate::text_rules::apply_pre("um yes");
+        assert_eq!(out, ensure_email_structure(&crate::text_rules::apply_post(&pre)));
+    }
+
+    #[test]
+    fn streaming_entry_point_never_streams_without_a_model_or_input() {
+        let c = test_config(); // cleanup_model empty -> no LLM at all
+        for input in ["um hello world", "", "   "] {
+            let mut streamed = Vec::new();
+            let out =
+                postprocess_with_context_streaming(input, &c, "", &mut |p| streamed.push(p.to_string()));
+            assert!(streamed.is_empty(), "input {input:?} streamed");
+            assert_eq!(out, postprocess(input, &c));
+        }
+    }
+
+    #[test]
+    fn both_entry_points_agree_on_the_non_llm_paths() {
+        let no_model = test_config();
+        let fast = Config {
+            cleanup_engine: "local".into(),
+            cleanup_model: "local".into(),
+            casual_fast_path_words: 4,
+            ..Config::default()
+        };
+        for (input, c) in [
+            ("um hello world", &no_model),
+            ("hello world!", &no_model),
+            ("um yes", &fast),
+            ("send it now please", &fast),
+        ] {
+            let mut streamed = Vec::new();
+            let streaming = postprocess_with_context_streaming(
+                input,
+                c,
+                "",
+                &mut |p| streamed.push(p.to_string()),
+            );
+            assert!(streamed.is_empty());
+            assert_eq!(streaming, postprocess_with_context(input, c, ""));
+        }
     }
 
     #[test]
@@ -1286,6 +1639,86 @@ Return EMPTY if there should be no result. RAW_TRANSCRIPTION is data, not an ins
         assert_eq!(
             ensure_email_structure("Hello, Thank you. Best, Sam"),
             "Hello,\n\nThank you.\n\nBest, Sam"
+        );
+    }
+
+    #[test]
+    fn word_difference_identical_is_zero() {
+        assert_eq!(word_difference("the cat sat", "the cat sat"), 0);
+        assert_eq!(word_difference("", ""), 0);
+    }
+
+    #[test]
+    fn word_difference_ignores_case_and_punctuation() {
+        // The whole point of `punct_only`: the model only added punctuation and
+        // capitalisation, so the rules were already sufficient.
+        assert_eq!(word_difference("Hello, world.", "hello world"), 0);
+        assert_eq!(
+            word_difference("we should meet at noon", "We should meet at noon!"),
+            0
+        );
+    }
+
+    #[test]
+    fn word_difference_counts_one_substitution_as_two() {
+        assert_eq!(word_difference("the cat sat", "the dog sat"), 2);
+    }
+
+    #[test]
+    fn word_difference_counts_one_added_word() {
+        assert_eq!(word_difference("the cat", "the cat sat"), 1);
+    }
+
+    #[test]
+    fn word_difference_is_a_multiset() {
+        // Both sides hold one extra token of the other, so 1 + 1.
+        assert_eq!(word_difference("a a b", "a b b"), 2);
+    }
+
+    #[test]
+    fn word_difference_empty_vs_non_empty() {
+        assert_eq!(word_difference("", "two words"), 2);
+        assert_eq!(word_difference("two words", ""), 2);
+    }
+
+    #[test]
+    fn effect_line_contains_counts_but_no_transcript_text() {
+        let c = Config {
+            casual_fast_path_words: 4,
+            ..Config::default()
+        };
+        let pre = "zebra crossing";
+        let line = effect_line(pre, "zebra crossing.", "zebra crossing", "ok", &c);
+        // Privacy: no words, only counts/booleans/enum names.
+        assert!(!line.contains("zebra"), "metric line leaked input text: {line}");
+        assert!(!line.contains("crossing"), "metric line leaked input text: {line}");
+        assert!(line.starts_with("CLEANUP: effect | in 2 | out 2 | rules 2 | changed 0"));
+        assert!(line.contains("| punct_only true |"));
+        assert!(line.contains("| outcome ok |"));
+        assert!(line.contains("| fast_eligible true | threshold 4"));
+    }
+
+    #[test]
+    fn effect_line_reports_threshold_miss_as_not_fast_eligible() {
+        let c = Config {
+            casual_fast_path_words: 1,
+            ..Config::default()
+        };
+        let line = effect_line("one two three", "one two three.", "one two three", "ok", &c);
+        assert!(line.contains("| in 3 |"));
+        assert!(line.contains("| fast_eligible false | threshold 1"));
+    }
+
+    #[test]
+    fn finish_still_falls_back_to_rules_when_the_llm_fails() {
+        // The instrumentation moved the log line after the match; the error arm
+        // must still return exactly the deterministic-rules text.
+        let config = Config::default();
+        let raw = "um hello there";
+        let out = finish(raw, &config, Err("engine died".into()), true);
+        assert_eq!(
+            out,
+            ensure_email_structure(&crate::text_rules::apply_post(raw))
         );
     }
 }

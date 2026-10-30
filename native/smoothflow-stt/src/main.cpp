@@ -23,23 +23,67 @@ struct Options {
   std::string decoder;
   std::string joiner;
   std::string tokens;
+  std::string hotwords;
+  float hotwords_score = 1.5F;
+  bool hotwords_score_set = false;
+  // Empty means "not passed"; resolved to greedy_search at use so the
+  // duplicate-argument check sees every destination start empty.
+  std::string decoding_method;
+  // 0 means "not passed": the caller decides how many cores to spend, so the
+  // policy lives in one place (stt_local.rs) and never drifts from it.
+  int threads = 0;
 };
 
 std::string ParseOptions(int argc, char** argv, Options& options) {
   for (int i = 1; i < argc; ++i) {
     std::string name = argv[i];
-    if (name != "--encoder" && name != "--decoder" && name != "--joiner" &&
-        name != "--tokens") {
+    const bool takes_value =
+        name == "--encoder" || name == "--decoder" || name == "--joiner" ||
+        name == "--tokens" || name == "--hotwords" ||
+        name == "--hotwords-score" || name == "--decoding-method" ||
+        name == "--threads";
+    if (!takes_value) {
       return "unknown argument";
     }
     if (i + 1 >= argc || argv[i + 1][0] == '\0') {
       return "missing value for " + name;
     }
+    if (name == "--threads") {
+      if (options.threads != 0) {
+        return "duplicate argument: " + name;
+      }
+      try {
+        const int threads = std::stoi(argv[++i]);
+        // Above 64 the value is a mistake, not a request; the encoder would
+        // just spend its time context-switching.
+        if (threads < 1 || threads > 64) {
+          return "invalid value for " + name;
+        }
+        options.threads = threads;
+      } catch (const std::exception&) {
+        return "invalid value for " + name;
+      }
+      continue;
+    }
+    if (name == "--hotwords-score") {
+      if (options.hotwords_score_set) {
+        return "duplicate argument: " + name;
+      }
+      try {
+        options.hotwords_score = std::stof(argv[++i]);
+        options.hotwords_score_set = true;
+      } catch (const std::exception&) {
+        return "invalid value for " + name;
+      }
+      continue;
+    }
     std::string& destination =
         name == "--encoder"   ? options.encoder
         : name == "--decoder" ? options.decoder
         : name == "--joiner"  ? options.joiner
-                              : options.tokens;
+        : name == "--tokens"  ? options.tokens
+        : name == "--hotwords" ? options.hotwords
+                               : options.decoding_method;
     if (!destination.empty()) {
       return "duplicate argument: " + name;
     }
@@ -148,6 +192,10 @@ int main(int argc, char** argv) {
     std::cerr << "error: " << error << '\n'
               << "usage: smoothflow-stt --encoder <path> --decoder <path> "
                  "--joiner <path> --tokens <path>\n"
+                 "                     [--hotwords <path>] "
+                 "[--hotwords-score <float>] "
+                 "[--decoding-method <greedy_search|modified_beam_search>] "
+                 "[--threads <int>]\n"
                  << "protocol: ready line, then repeated "
                     "<uint32 LE sample count><float32 LE samples>; "
                     "one JSON line per request\n";
@@ -157,7 +205,9 @@ int main(int argc, char** argv) {
   if (!ValidateFile(options.encoder, "encoder", error) ||
       !ValidateFile(options.decoder, "decoder", error) ||
       !ValidateFile(options.joiner, "joiner", error) ||
-      !ValidateFile(options.tokens, "tokens", error)) {
+      !ValidateFile(options.tokens, "tokens", error) ||
+      (!options.hotwords.empty() &&
+       !ValidateFile(options.hotwords, "hotwords", error))) {
     std::cerr << "error: " << error << '\n';
     return 1;
   }
@@ -172,7 +222,26 @@ int main(int argc, char** argv) {
   config.model_config.tokens = options.tokens;
   config.model_config.model_type = "nemo_transducer";
   config.model_config.provider = "cpu";
-  config.model_config.num_threads = 2;
+  config.model_config.num_threads = options.threads > 0 ? options.threads : 2;
+  // Absent --hotwords leaves hotwords_file at its empty default, so the
+  // recognizer is configured exactly as it was before this flag existed.
+  if (!options.hotwords.empty()) {
+    config.hotwords_file = options.hotwords;
+    config.hotwords_score = options.hotwords_score;
+    // sherpa-onnx rejects hotwords under greedy_search outright ("Please use
+    // --decoding-method=modified_beam_search if you provide
+    // --hotwords-file"), so hotwords imply beam search rather than erroring.
+    // Transducer hotwords reach the decoder through the modified-beam-search
+    // context graph; there is no greedy path that can apply them.
+    if (options.decoding_method == "greedy_search" ||
+        options.decoding_method.empty()) {
+      options.decoding_method = "modified_beam_search";
+    }
+  }
+  if (options.decoding_method.empty()) {
+    options.decoding_method = "greedy_search";
+  }
+  config.decoding_method = options.decoding_method;
 
   auto recognizer = sherpa_onnx::cxx::OfflineRecognizer::Create(config);
   if (recognizer.Get() == nullptr) {

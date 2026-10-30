@@ -297,6 +297,33 @@ pub fn download(id: &str, config_dir: &Path, custom_dir: &str) -> Result<PathBuf
     Ok(target)
 }
 
+/// Catalog ids for one download run, in the order they are fetched.
+///
+/// An empty `stt_version` or `llm_size` means "skip that bundle": a user who
+/// turned AI cleanup off must not be made to download 1.3–5.7 GB of Qwen.
+fn bundle_ids(stt_version: &str, llm_size: &str) -> Result<Vec<&'static str>, String> {
+    let stt_ids: &[&str] = match stt_version {
+        "v2" => &["parakeet-v2-encoder", "parakeet-v2-decoder", "parakeet-v2-joiner", "parakeet-v2-tokens"],
+        "v3" => &["parakeet-v3-encoder", "parakeet-v3-decoder", "parakeet-v3-joiner", "parakeet-v3-tokens"],
+        "" => &[],
+        _ => return Err(format!("Unknown STT model variant '{}'.", stt_version)),
+    };
+    let llm_id = match llm_size {
+        "2b" => Some("qwen-2b"),
+        "4b" => Some("qwen-4b"),
+        "9b" => Some("qwen-9b"),
+        "" => None,
+        _ => return Err(format!("Unknown LLM model size '{}'.", llm_size)),
+    };
+    if stt_ids.is_empty() && llm_id.is_none() {
+        return Err(
+            "Nothing was selected to download. Pick a speech model, an AI cleanup model, or both."
+                .to_string(),
+        );
+    }
+    Ok(stt_ids.iter().copied().chain(llm_id).collect())
+}
+
 pub fn download_bundle(
     stt_version: &str,
     llm_size: &str,
@@ -304,18 +331,7 @@ pub fn download_bundle(
     custom_dir: &str,
     mut progress: impl FnMut(&str, &str, &str),
 ) -> Result<(), String> {
-    let stt_ids: &[&str] = match stt_version {
-        "v2" => &["parakeet-v2-encoder", "parakeet-v2-decoder", "parakeet-v2-joiner", "parakeet-v2-tokens"],
-        "v3" => &["parakeet-v3-encoder", "parakeet-v3-decoder", "parakeet-v3-joiner", "parakeet-v3-tokens"],
-        _ => return Err(format!("Unknown STT model variant '{}'.", stt_version)),
-    };
-    let llm_id = match llm_size {
-        "2b" => "qwen-2b",
-        "4b" => "qwen-4b",
-        "9b" => "qwen-9b",
-        _ => return Err(format!("Unknown LLM model size '{}'.", llm_size)),
-    };
-    for id in stt_ids.iter().copied().chain(std::iter::once(llm_id)) {
+    for id in bundle_ids(stt_version, llm_size)? {
         progress(id, "starting", "Download starting.");
         match download(id, config_dir, custom_dir) {
             Ok(_) => progress(id, "complete", "Download complete."),
@@ -535,5 +551,31 @@ mod tests {
         for spec in CATALOG {
             assert!(validate_spec(spec).is_ok(), "catalog entry '{}' is invalid", spec.id);
         }
+    }
+
+    #[test]
+    fn an_empty_bundle_selection_downloads_only_what_was_asked_for() {
+        // Both chosen: unchanged behaviour, speech first then cleanup.
+        let both = bundle_ids("v2", "4b").unwrap();
+        assert_eq!(both.len(), 5);
+        assert_eq!(both[0], "parakeet-v2-encoder");
+        assert_eq!(both[4], "qwen-4b");
+
+        // Speech only: no Qwen bytes at all.
+        let stt_only = bundle_ids("v3", "").unwrap();
+        assert_eq!(stt_only.len(), 4);
+        assert!(stt_only.iter().all(|id| id.starts_with("parakeet-v3-")));
+
+        // Cleanup only: no speech bytes at all.
+        assert_eq!(bundle_ids("", "9b").unwrap(), vec!["qwen-9b"]);
+
+        // Nothing selected is an error, not a silent no-op.
+        for (stt, llm) in [("", ""), (" ", ""), ("", " ")] {
+            assert!(bundle_ids(stt, llm).is_err(), "{stt:?}/{llm:?} should fail");
+        }
+
+        // Unknown values still fail, so a typo is never read as "skip".
+        assert!(bundle_ids("v4", "4b").is_err());
+        assert!(bundle_ids("v2", "12b").is_err());
     }
 }

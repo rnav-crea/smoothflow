@@ -105,7 +105,44 @@ const modelsDirDefaultBtn = document.getElementById("models-dir-default-btn");
 const modelsDirHint = document.getElementById("models-dir-hint");
 const customLlmPathInput = document.getElementById("custom-llm-path-input");
 const browseCustomLlmBtn = document.getElementById("browse-custom-llm-btn");
+const findLocalModelsBtn = document.getElementById("find-local-models-btn");
+const localModelsList = document.getElementById("local-models-list");
+const localModelsEmpty = document.getElementById("local-models-empty");
+const localModelsEmptyText = localModelsEmpty ? localModelsEmpty.textContent : "";
 const customLlmBypassNote = document.getElementById("custom-llm-bypass-note");
+const cleanupEnabledToggle = document.getElementById("cleanup-enabled-toggle");
+const cleanupModelRows = document.getElementById("cleanup-model-rows");
+const customSttDirInput = document.getElementById("custom-stt-dir-input");
+const browseCustomSttBtn = document.getElementById("browse-custom-stt-btn");
+const customSttStatus = document.getElementById("custom-stt-status");
+const customSttStatusText = customSttStatus ? customSttStatus.textContent : "";
+
+// ── Click-to-expand "?" help panels ──────────────────────────────────
+// One delegated listener drives every `.help-dot` in the app: the button names
+// its panel with aria-controls, and the panel is a `.help-panel[hidden]` div.
+// New panels need markup only, no extra JS.
+function setHelpPanelOpen(button, open) {
+  if (!button) return;
+  const panelId = button.getAttribute("aria-controls");
+  const panel = panelId ? document.getElementById(panelId) : null;
+  if (!panel) return;
+  panel.hidden = !open;
+  button.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+// Escape closes every open panel. Clicking another `?` deliberately leaves
+// sibling panels open — collapsing them would hide whatever the reader
+// already opened.
+document.addEventListener("click", (e) => {
+  const dot = e.target instanceof Element ? e.target.closest(".help-dot") : null;
+  if (!dot) return;
+  setHelpPanelOpen(dot, dot.getAttribute("aria-expanded") !== "true");
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  document.querySelectorAll('.help-dot[aria-expanded="true"]').forEach((dot) => setHelpPanelOpen(dot, false));
+});
 
 // Surface hotkey registration/parse errors from the backend at startup
 try {
@@ -418,8 +455,13 @@ async function loadConfig() {
     currentConfig.models_dir = config.models_dir || "";
     currentConfig.custom_llm_path = config.custom_llm_path || "";
     if (customLlmPathInput) customLlmPathInput.value = currentConfig.custom_llm_path;
+    // Folder of Parakeet files, when the user brought their own. Saved by the
+    // Rust side as `custom_stt_dir`; absent from older configs -> "".
+    currentConfig.custom_stt_dir = config.custom_stt_dir || "";
+    if (customSttDirInput) customSttDirInput.value = currentConfig.custom_stt_dir;
     renderModelsDir();
     updateOfflineModelControls();
+    renderCleanupToggle();
     if (hotkeyInput) hotkeyInput.value = config.hotkey || "Ctrl+Space";
     log("Config loaded");
     if (apiKeyInput.value) {
@@ -449,6 +491,7 @@ async function saveConfig() {
     llm_model_size: offlineLlmSelect ? offlineLlmSelect.value : currentConfig.llm_model_size,
     models_dir: currentConfig.models_dir || "",
     custom_llm_path: customLlmPathInput ? customLlmPathInput.value.trim() : (currentConfig.custom_llm_path || ""),
+    custom_stt_dir: (currentConfig.custom_stt_dir || "").trim(),
   };
   try {
     await invoke("update_config", { newConfig: updatedConfig });
@@ -495,8 +538,8 @@ try {
   apiUrlInput.addEventListener("change", saveConfig);
   if (modelSelect) modelSelect.addEventListener("change", saveConfig);
   modelInput.addEventListener("change", saveConfig);
-  if (cleanupModelSelect) cleanupModelSelect.addEventListener("change", saveConfig);
-  cleanupModelInput.addEventListener("change", saveConfig);
+  if (cleanupModelSelect) cleanupModelSelect.addEventListener("change", () => { renderCleanupToggle(); saveConfig(); });
+  cleanupModelInput.addEventListener("change", () => { renderCleanupToggle(); saveConfig(); });
   apiKeyInput.addEventListener("change", saveConfig);
   punctuationToggle.addEventListener("change", saveConfig);
   fillersToggle.addEventListener("change", saveConfig);
@@ -518,6 +561,78 @@ function updateOfflineModelControls() {
   if (customLlmBypassNote && customLlmPathInput) {
     customLlmBypassNote.style.display = customLlmPathInput.value.trim() ? "block" : "none";
   }
+}
+
+// ── Optional: AI cleanup ─────────────────────────────────────────────
+// `cleanup_model` is the single switch the Rust side checks: when it is empty
+// `postprocess::prepare` returns the deterministic rules and never calls a
+// model (offline or cloud). So the toggle drives that field, and the value it
+// restores lives in localStorage so turning it back on reuses the last choice.
+const CLEANUP_MODEL_STORAGE_KEY = "smoothflow_cleanup_model";
+const DEFAULT_CLEANUP_MODEL = "4b"; // matches the "Qwen 4B" option of #offline-llm-select
+
+function readCleanupModel() {
+  if (cleanupModelSelect && cleanupModelSelect.value) return cleanupModelSelect.value;
+  // Only a *visible* custom box counts — a hidden stale value must not read as "enabled".
+  if (cleanupModelInput && cleanupModelInput.style.display !== "none") {
+    return (cleanupModelInput.value || "").trim();
+  }
+  return "";
+}
+
+function writeCleanupModel(value) {
+  const next = (value || "").trim();
+  if (!cleanupModelSelect) {
+    if (cleanupModelInput) cleanupModelInput.value = next;
+    return;
+  }
+  const hasOption = [...cleanupModelSelect.options].some((option) => option.value === next);
+  if (hasOption) {
+    cleanupModelSelect.value = next;
+    if (cleanupModelInput) {
+      cleanupModelInput.value = "";
+      cleanupModelInput.style.display = "none";
+    }
+    return;
+  }
+  // Not one of the listed models (e.g. "4b" restored in cloud mode) -> custom box.
+  cleanupModelSelect.value = "";
+  if (cleanupModelInput) {
+    cleanupModelInput.value = next;
+    cleanupModelInput.style.display = next ? "block" : "none";
+  }
+}
+
+function storedCleanupModel() {
+  try {
+    return (localStorage.getItem(CLEANUP_MODEL_STORAGE_KEY) || "").trim();
+  } catch (err) {
+    return "";
+  }
+}
+
+function renderCleanupToggle() {
+  const enabled = !!readCleanupModel();
+  if (cleanupEnabledToggle) cleanupEnabledToggle.checked = enabled;
+  if (cleanupModelRows) cleanupModelRows.style.display = enabled ? "flex" : "none";
+}
+
+if (cleanupEnabledToggle) {
+  cleanupEnabledToggle.addEventListener("change", () => {
+    if (!currentConfig) return;
+    if (cleanupEnabledToggle.checked) {
+      writeCleanupModel(storedCleanupModel() || DEFAULT_CLEANUP_MODEL);
+    } else {
+      const previous = readCleanupModel();
+      if (previous) {
+        try { localStorage.setItem(CLEANUP_MODEL_STORAGE_KEY, previous); } catch (err) { /* storage blocked: the default still restores */ }
+      }
+      writeCleanupModel("");
+    }
+    currentConfig.cleanup_model = readCleanupModel();
+    renderCleanupToggle();
+    saveConfig();
+  });
 }
 
 let modelsDirResolved = "";
@@ -591,7 +706,7 @@ if (modelsDirInput) modelsDirInput.addEventListener("change", applyModelsDir);
 
 if (browseCustomLlmBtn) {
   browseCustomLlmBtn.addEventListener("click", async () => {
-    const picked = await open({ multiple: false, filters: [{ name: "GGUF model", extensions: ["gguf"] }] });
+    const picked = await open({ multiple: false, filters: [{ name: "GGUF model", extensions: ["gguf"] }, { name: "All files", extensions: ["*"] }] });
     if (!picked) return;
     if (customLlmPathInput) customLlmPathInput.value = picked;
     applyCustomLlmPath();
@@ -599,6 +714,155 @@ if (browseCustomLlmBtn) {
 }
 
 if (customLlmPathInput) customLlmPathInput.addEventListener("change", applyCustomLlmPath);
+
+// ── Speech model folder (bring your own Parakeet files) ──────────────
+function setCustomSttStatus(message, isError) {
+  if (!customSttStatus) return;
+  // textContent only: this can carry a path or an error string from Rust.
+  customSttStatus.textContent = message;
+  customSttStatus.style.color = isError ? "#ff6b6b" : "";
+}
+
+async function saveCustomSttDir(dir) {
+  if (!currentConfig) return;
+  const next = (dir || "").trim();
+  currentConfig.custom_stt_dir = next;
+  if (customSttDirInput) customSttDirInput.value = next;
+  await saveConfig();
+}
+
+// Validates before saving: an incomplete folder is reported and never stored.
+async function checkCustomSttDir(dir) {
+  const next = (dir || "").trim();
+  if (!next) {
+    await saveCustomSttDir("");
+    setCustomSttStatus(customSttStatusText, false);
+    return;
+  }
+  try {
+    await invoke("inspect_stt_dir", { path: next });
+    await saveCustomSttDir(next);
+    setCustomSttStatus("All 4 files found.", false);
+  } catch (err) {
+    // The app answers with the exact files it could not find.
+    setCustomSttStatus(String(err), true);
+  }
+}
+
+if (browseCustomSttBtn) {
+  browseCustomSttBtn.addEventListener("click", async () => {
+    let picked = null;
+    try {
+      picked = await open({
+        directory: true,
+        multiple: false,
+        defaultPath: (customSttDirInput?.value || "").trim() || undefined,
+      });
+    } catch (err) {
+      setCustomSttStatus(`Could not open the folder picker: ${err}`, true);
+      return;
+    }
+    if (!picked) return;
+    browseCustomSttBtn.disabled = true;
+    setCustomSttStatus("Checking the folder...", false);
+    try {
+      await checkCustomSttDir(picked);
+    } finally {
+      browseCustomSttBtn.disabled = false;
+    }
+  });
+}
+
+if (customSttDirInput) {
+  customSttDirInput.addEventListener("change", async () => {
+    if (!currentConfig) return;
+    await checkCustomSttDir(customSttDirInput.value);
+  });
+}
+
+function hideLocalModelsList() {
+  if (localModelsList) {
+    localModelsList.replaceChildren();
+    localModelsList.style.display = "none";
+  }
+  if (localModelsEmpty) localModelsEmpty.style.display = "none";
+}
+
+function pickLocalModel(model) {
+  if (!model || !model.path) return;
+  if (customLlmPathInput) customLlmPathInput.value = model.path;
+  hideLocalModelsList();
+  // Runs the same update + save path the BROWSE button uses.
+  applyCustomLlmPath();
+}
+
+function renderLocalModels(models) {
+  if (!localModelsList || !localModelsEmpty) return;
+  localModelsList.replaceChildren();
+  if (!models.length) {
+    localModelsList.style.display = "none";
+    localModelsEmpty.textContent = localModelsEmptyText;
+    localModelsEmpty.style.display = "block";
+    return;
+  }
+  for (const model of models) {
+    const item = document.createElement("li");
+    item.style.cssText = "display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 8px 10px; cursor: pointer;";
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.addEventListener("mouseenter", () => { item.style.background = "rgba(255, 255, 255, 0.06)"; });
+    item.addEventListener("mouseleave", () => { item.style.background = ""; });
+
+    const label = document.createElement("span");
+    label.textContent = model.label || model.path;
+    label.style.cssText = "font-family: var(--font-mono); font-size: 11px; color: #e8d6c8; word-break: break-all;";
+    label.title = model.path || "";
+
+    const meta = document.createElement("span");
+    const parts = [];
+    if (Number(model.size_bytes) > 0) parts.push(formatModelSize(model.size_bytes));
+    if (model.parameters) parts.push(String(model.parameters));
+    if (model.quant) parts.push(String(model.quant));
+    meta.textContent = parts.join(" · ");
+    meta.style.cssText = "color: #8a7a70; font-size: 11px; white-space: nowrap;";
+
+    item.append(label, meta);
+    item.addEventListener("click", () => pickLocalModel(model));
+    item.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        pickLocalModel(model);
+      }
+    });
+    localModelsList.appendChild(item);
+  }
+  localModelsEmpty.style.display = "none";
+  localModelsList.style.display = "block";
+}
+
+async function findLocalModels() {
+  if (!findLocalModelsBtn) return;
+  const idleLabel = findLocalModelsBtn.textContent;
+  findLocalModelsBtn.disabled = true;
+  findLocalModelsBtn.textContent = "Looking...";
+  hideLocalModelsList();
+  try {
+    const found = await invoke("list_local_models");
+    renderLocalModels(Array.isArray(found) ? found : []);
+  } catch (err) {
+    if (localModelsEmpty) {
+      localModelsEmpty.textContent = `Could not look for local models: ${err}. Browse for a .gguf file instead.`;
+      localModelsEmpty.style.display = "block";
+    }
+    console.warn("list_local_models failed:", err);
+    log(`Local models lookup failed: ${err}`);
+  } finally {
+    findLocalModelsBtn.disabled = false;
+    findLocalModelsBtn.textContent = idleLabel || "FIND MODELS";
+  }
+}
+
+if (findLocalModelsBtn) findLocalModelsBtn.addEventListener("click", findLocalModels);
 
 function offlineStatusSummary() {
   if (!offlineModelStatusData) return "";
@@ -697,11 +961,24 @@ if (refreshModelsBtn) refreshModelsBtn.addEventListener("click", () => loadOffli
 if (downloadModelsBtn) {
   downloadModelsBtn.addEventListener("click", async () => {
     if (modelOperationRunning) return;
+    // Download only what the user asked for. An empty string tells the backend
+    // to skip that bundle (offline::bundle_ids), so turning AI cleanup off never
+    // hands someone a 1.3-5.7 GB Qwen download, and a custom speech folder
+    // means the Parakeet files are already on disk.
+    const wantStt = !(customSttDirInput?.value || "").trim();
+    const wantLlm = cleanupEnabledToggle ? cleanupEnabledToggle.checked : true;
+    if (!wantStt && !wantLlm) {
+      if (offlineModelStatus) {
+        offlineModelStatus.textContent =
+          "Nothing to download — you are already using your own models.";
+      }
+      return;
+    }
     setModelOperationRunning(true, "Starting model download...");
     try {
       const status = await invoke("download_models", {
-        sttVersion: offlineSttSelect.value,
-        llmSize: offlineLlmSelect.value,
+        sttVersion: wantStt ? offlineSttSelect.value : "",
+        llmSize: wantLlm ? offlineLlmSelect.value : "",
       });
       offlineModelStatusData = status;
       offlineModelProgress.clear();

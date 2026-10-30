@@ -114,6 +114,98 @@ fn enigo_text(text: &str) -> Result<(), String> {
         .map_err(|e| format!("[PST-003] Auto-paste failed — click into the target app and retry. ({e})"))
 }
 
+/// A paste that arrives in pieces. `clipboard_paste` saves and restores the
+/// user's clipboard on every call, which is wasteful and racy at one round trip
+/// per generated token — here the clipboard is saved once and restored once.
+// allow(dead_code) markers come off with the lib.rs wiring.
+pub struct PasteSession {
+    saved: Option<String>,
+}
+
+#[allow(dead_code)]
+impl PasteSession {
+    /// Captures the current clipboard. A clipboard we cannot read (empty, an
+    /// image, locked by another app) is `None`, which simply means nothing is
+    /// restored later.
+    pub fn begin() -> Self {
+        PasteSession {
+            saved: thread::spawn(|| {
+                arboard::Clipboard::new()
+                    .ok()
+                    .and_then(|mut c| c.get_text().ok())
+            })
+            .join()
+            .ok()
+            .flatten(),
+        }
+    }
+
+    /// Paste one more piece of text at the cursor. No save, no restore.
+    pub fn append(&mut self, text: &str) -> Result<(), String> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let text = text.to_owned();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result: Result<(), String> = (|| {
+                let mut clipboard = arboard::Clipboard::new()
+                    .map_err(|e| format!("[PST-001] Could not open clipboard. ({e})"))?;
+                clipboard
+                    .set_text(text)
+                    .map_err(|e| format!("[PST-001] Could not write to clipboard. ({e}"))
+            })();
+            let _ = tx.send(result);
+        });
+        match rx.recv_timeout(CLIPBOARD_TIMEOUT) {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(
+                    "[PST-001] Clipboard operation timed out (500ms). Falling back to direct typing."
+                        .into(),
+                )
+            }
+        }
+
+        thread::sleep(Duration::from_millis(30));
+        let (paste_mod, paste_key) = paste_combo();
+        let mut enigo = Enigo::new(&Settings::default())
+            .map_err(|e| format!("[PST-002] Keyboard init failed. ({e})"))?;
+        enigo
+            .key(paste_mod, Direction::Press)
+            .map_err(|e| format!("[PST-002] Auto-paste failed — click into the target app and retry. ({e})"))?;
+        thread::sleep(Duration::from_millis(5));
+        enigo
+            .key(paste_key, Direction::Click)
+            .map_err(|e| format!("[PST-002] Auto-paste failed — click into the target app and retry. ({e})"))?;
+        thread::sleep(Duration::from_millis(5));
+        enigo
+            .key(paste_mod, Direction::Release)
+            .map_err(|e| format!("[PST-002] Auto-paste failed — click into the target app and retry. ({e})"))?;
+        thread::sleep(Duration::from_millis(50));
+        Ok(())
+    }
+
+    /// Put the user's clipboard back.
+    pub fn finish(mut self) {
+        Self::restore(&mut self.saved);
+    }
+
+    fn restore(saved: &mut Option<String>) {
+        if let Some(old) = saved.take() {
+            let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(old));
+        }
+    }
+}
+
+impl Drop for PasteSession {
+    /// Restores on drop too, so a caller that forgets `finish()` on an error
+    /// path still leaves the clipboard alone. `take()` makes it run at most once.
+    fn drop(&mut self) {
+        Self::restore(&mut self.saved);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +241,20 @@ mod tests {
             Ok(_) => assert!(true),
             Err(e) => assert!(e.contains("init") || e.contains("error") || e.contains("clipboard")),
         }
+    }
+
+    #[cfg_attr(target_os = "macos", ignore = "clipboard access can SIGABRT the process on macOS CI runners")]
+    #[test]
+    fn paste_session_appends_several_pieces_and_restores_the_clipboard() {
+        let mut session = PasteSession::begin();
+        for piece in ["Hi Dana", ",", " see you"] {
+            match session.append(piece) {
+                Ok(()) => assert!(true),
+                Err(e) => assert!(e.contains("init") || e.contains("error") || e.contains("clipboard")),
+            }
+        }
+        // An empty chunk is a no-op, not an error and not a stray paste.
+        assert!(session.append("").is_ok());
+        session.finish();
     }
 }

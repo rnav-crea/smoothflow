@@ -303,11 +303,11 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
     }
 }
 
-/// Cloud when `offline_mode` is false (default, unchanged behaviour), the local
-/// Parakeet helper when it is true. No silent fallback in either direction:
-/// a local failure surfaces as an error, it never retries over the network.
+/// The local Parakeet helper when `stt_local` is true, the cloud endpoint when
+/// it is false (default). No silent fallback in either direction: a local
+/// failure surfaces as an error, it never retries over the network.
 pub fn transcribe_any(samples: &[f32], sample_rate: u32, config: &Config) -> Result<String, String> {
-    if config.offline_mode {
+    if config.stt_local {
         stt_local::transcribe(samples, sample_rate, config)
     } else {
         transcribe(samples, sample_rate, config)

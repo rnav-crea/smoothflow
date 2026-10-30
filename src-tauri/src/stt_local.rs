@@ -16,7 +16,7 @@ use crate::offline;
 use crate::sf_log;
 use crate::transcription::resample_to_16k;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
 
@@ -93,6 +93,45 @@ pub fn transcribe(samples: &[f32], sample_rate: u32, config: &Config) -> Result<
     outcome
 }
 
+/// Load the helper in the background so the ~4 s model load overlaps the user
+/// speaking instead of landing after the first utterance. Best-effort: a warm
+/// that fails is not a user error, and `transcribe` respawns and reports the
+/// real one. Safe to call concurrently with a dictation and with itself.
+pub fn prewarm(config: &Config) {
+    // ponytail: holds the session mutex for the whole model load, so a
+    // dictation arriving mid-warm waits it out. Same total wait as spawning on
+    // that dictation, so nothing is lost.
+    let mut guard = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.is_some() {
+        return;
+    }
+    *guard = spawn(config).ok();
+}
+
+/// Cap on cores handed to the speech engine.
+///
+/// The cap is not arbitrary: ONNX encoder sessions stop scaling past a handful
+/// of threads and start competing with the audio callback, so a 32-thread
+/// workstation must not ask for 31. Six matches the point where the measured
+/// gain flattened out on the development machine (6 cores / 12 threads).
+const STT_MAX_THREADS: usize = 6;
+
+/// Cores the speech engine may use, given how many the machine has.
+///
+/// One core is always left over for Windows, the capture stream and the UI:
+/// taking every core makes the whole app stutter while the model decodes.
+fn threads_for(logical: usize) -> usize {
+    logical.saturating_sub(1).clamp(2, STT_MAX_THREADS)
+}
+
+/// `threads_for` applied to the real machine.
+fn stt_threads() -> usize {
+    let logical = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    threads_for(logical)
+}
+
 fn spawn(config: &Config) -> Result<Session, String> {
     if !platform_supported() {
         return Err(unsupported_platform_message());
@@ -105,20 +144,14 @@ fn spawn(config: &Config) -> Result<Session, String> {
         ));
     }
 
-    let models = model_dir(config)?;
-    let encoder = models.join(ENCODER);
-    let decoder = models.join(DECODER);
-    let joiner = models.join(JOINER);
-    let tokens = models.join(TOKENS);
-    for path in [&encoder, &decoder, &joiner, &tokens] {
-        if !path.is_file() {
-            return Err(format!(
-                "[STT-002] Speech model file not found at {}. Download the Parakeet models in Settings, or enable cloud mode in Settings.",
-                path.display()
-            ));
-        }
-    }
+    let files = model_files(config)?;
+    let encoder = files.encoder.as_path();
+    let decoder = files.decoder.as_path();
+    let joiner = files.joiner.as_path();
+    let tokens = files.tokens.as_path();
 
+    let threads = stt_threads();
+    sf_log!("STT: local helper decoding with {threads} threads");
     let mut child = Command::new(&helper)
         .arg("--encoder")
         .arg(&encoder)
@@ -128,6 +161,8 @@ fn spawn(config: &Config) -> Result<Session, String> {
         .arg(&joiner)
         .arg("--tokens")
         .arg(&tokens)
+        .arg("--threads")
+        .arg(threads.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -199,6 +234,78 @@ fn model_dir(config: &Config) -> Result<PathBuf, String> {
         .join(&config.stt_version))
 }
 
+/// The four files handed to the helper. Paths are resolved but not yet checked.
+#[derive(Debug)]
+struct ModelFiles {
+    encoder: PathBuf,
+    decoder: PathBuf,
+    joiner: PathBuf,
+    tokens: PathBuf,
+}
+
+/// The four parts found in `dir`, `None` where a part is missing.
+///
+/// Prefix matching, not the exact catalog filenames: a bundle ships as
+/// `encoder.onnx`, `encoder.int8.onnx` or with a language suffix. This must
+/// agree with what `inspect_stt_dir` accepts in Settings — otherwise a folder
+/// the UI reports as complete would fail at spawn instead.
+fn resolve_in(dir: &Path) -> [Option<PathBuf>; 4] {
+    let files = match std::fs::read_dir(dir) {
+        Ok(entries) => crate::local_models::collect_files(entries),
+        Err(_) => Vec::new(),
+    };
+    let mut found: [Option<PathBuf>; 4] = [None, None, None, None];
+    for (slot, (prefix, extension)) in found.iter_mut().zip(crate::local_models::STT_PARTS) {
+        *slot = crate::local_models::pick(&files, prefix, extension).map(PathBuf::from);
+    }
+    found
+}
+
+/// Resolve and verify the four Parakeet files for `config`.
+///
+/// A non-empty `custom_stt_dir` wins, so a user's own bundle is read where they
+/// put it; otherwise the catalog layout for `stt_version` applies. Every path
+/// is checked here — a missing file is a user-fixable error with the fix in the
+/// message, never a spawn the helper would fail to load.
+fn model_files(config: &Config) -> Result<ModelFiles, String> {
+    let custom = config.custom_stt_dir.trim();
+    let dir = if custom.is_empty() {
+        model_dir(config)?
+    } else {
+        PathBuf::from(custom)
+    };
+    let found = resolve_in(&dir);
+    let expected = [ENCODER, DECODER, JOINER, TOKENS];
+    for (index, path) in found.iter().enumerate() {
+        if path.is_some() {
+            continue;
+        }
+        let name = crate::local_models::STT_PARTS[index].0;
+        return Err(if custom.is_empty() {
+            // Catalog download: name the file it expects, so the fix is obvious.
+            format!(
+                "[STT-002] Speech model file not found at {}. Download the Parakeet models in Settings, or enable cloud mode in Settings.",
+                dir.join(expected[index]).display()
+            )
+        } else {
+            format!(
+                "[STT-002] Speech model file '{name}' not found in {}. Pick a folder that holds encoder, decoder and joiner (.onnx) plus tokens.txt, or enable cloud mode in Settings.",
+                dir.display()
+            )
+        });
+    }
+    let [Some(encoder), Some(decoder), Some(joiner), Some(tokens)] = found else {
+        // Unreachable: every slot was checked above.
+        return Err("[STT-002] The speech model folder is incomplete.".to_string());
+    };
+    Ok(ModelFiles {
+        encoder,
+        decoder,
+        joiner,
+        tokens,
+    })
+}
+
 /// LE `u32` sample count followed by LE `f32` samples. `to_le_bytes` keeps this
 /// portable — no transmute, no host-endianness assumption.
 fn encode_request(samples: &[f32]) -> Vec<u8> {
@@ -242,6 +349,29 @@ fn parse_response(line: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn threads_never_take_every_core_and_never_go_past_the_cap() {
+        // A 12-thread laptop (the dev machine) may use 6, not 11.
+        assert_eq!(threads_for(12), 6);
+        assert_eq!(threads_for(32), STT_MAX_THREADS);
+        assert_eq!(threads_for(8), 6);
+        // Small machines still take one core off the top.
+        assert_eq!(threads_for(4), 3);
+        assert_eq!(threads_for(3), 2);
+        // A 1-2 core machine cannot donate a core; the floor is 2, which is
+        // what the engine used before this change (so it is never slower).
+        assert_eq!(threads_for(2), 2);
+        assert_eq!(threads_for(1), 2);
+    }
+
+    #[test]
+    fn stt_threads_is_always_a_legal_helper_argument() {
+        // The helper rejects <1 and >64, so a wrong answer here would make
+        // every dictation fail at spawn instead of degrading.
+        let threads = stt_threads();
+        assert!((2..=STT_MAX_THREADS).contains(&threads), "got {threads}");
+    }
 
     #[test]
     fn encode_request_writes_le_count_then_le_f32_samples() {
@@ -292,5 +422,66 @@ mod tests {
         assert!(parse_ready("{\"ready\":true}\n").is_ok());
         assert!(parse_ready("{\"ready\":false}\n").is_err());
         assert!(parse_ready("{\"text\":\"x\"}\n").is_err());
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("smoothflow-stt-{tag}-{:?}", std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_custom_stt_dir_wins_over_the_catalog_layout() {
+        let dir = temp_dir("custom");
+        for name in [ENCODER, DECODER, JOINER, TOKENS] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let config = Config {
+            custom_stt_dir: dir.to_string_lossy().into_owned(),
+            // A catalog dir that has nothing in it proves the custom folder won.
+            models_dir: temp_dir("custom-catalog").to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        let files = model_files(&config).unwrap();
+        assert_eq!(files.encoder, dir.join(ENCODER));
+        assert_eq!(files.decoder, dir.join(DECODER));
+        assert_eq!(files.joiner, dir.join(JOINER));
+        assert_eq!(files.tokens, dir.join(TOKENS));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_file_in_a_custom_dir_names_the_folder_and_the_file() {
+        let dir = temp_dir("custom-missing");
+        let config = Config {
+            custom_stt_dir: dir.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        let err = model_files(&config).unwrap_err();
+        assert!(err.starts_with("[STT-002]"), "got: {err}");
+        assert!(err.contains(ENCODER), "got: {err}");
+        let dir_text = dir.to_string_lossy().into_owned();
+        assert!(err.contains(&dir_text), "got: {err}");
+        assert!(err.contains("cloud mode"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_custom_stt_dir_keeps_the_catalog_layout_and_its_wording() {
+        // Nothing installed under this root, so the catalog branch must speak.
+        let config = Config {
+            models_dir: temp_dir("catalog").to_string_lossy().into_owned(),
+            stt_version: "v2".into(),
+            ..Config::default()
+        };
+        let err = model_files(&config).unwrap_err();
+        assert!(err.starts_with("[STT-002]"), "got: {err}");
+        assert!(
+            err.contains("Download the Parakeet models in Settings"),
+            "got: {err}"
+        );
+        assert!(err.contains("v2"), "the version folder must be named: {err}");
     }
 }

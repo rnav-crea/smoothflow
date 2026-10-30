@@ -5,6 +5,7 @@ mod history;
 #[cfg(target_os = "macos")]
 mod hotkey;
 mod llm_local;
+pub mod local_models;
 pub mod offline;
 mod postprocess;
 mod stt_local;
@@ -49,6 +50,150 @@ struct AppState {
     config: Mutex<Config>,
     history: Mutex<History>,
     overlay: Mutex<Option<WebviewWindow>>,
+}
+
+/// Pre-warming is per leg, so a user pays only for the engine they actually use.
+/// Speech-to-text and cleanup are now independent: a cloud-speech +
+/// local-cleanup user warms only the LLM, a local-speech + no-cleanup user warms
+/// only the helper, and a fully cloud user warms nothing.
+fn should_warm_stt(config: &Config) -> bool {
+    config.stt_local
+}
+
+/// Local cleanup only. `"cloud"` and `"off"` must never start llama-server.
+fn should_warm_llm(config: &Config) -> bool {
+    config.cleanup_engine == "local"
+}
+
+/// Start the engines this config actually uses in the background so the
+/// Parakeet (~4 s) and llama-server (~9 s) model loads overlap the user speaking.
+/// Must run off the UI thread — a warm is a few seconds of blocking work.
+fn start_offline_engines(app: &tauri::AppHandle) {
+    let config = app.state::<AppState>().config.lock().unwrap().clone();
+    let stt = should_warm_stt(&config);
+    let llm = should_warm_llm(&config);
+    if !stt && !llm {
+        return;
+    }
+    sf_log!("ENGINES: pre-warming local engines (stt={stt}, llm={llm})");
+    std::thread::spawn(move || {
+        if stt {
+            stt_local::prewarm(&config);
+        }
+        if llm {
+            llm_local::prewarm(&config);
+        }
+    });
+}
+
+/// Streaming flush pacing. `on_partial` can fire per token (~6/s here) and
+/// pasting every token interleaves badly, so a buffer is flushed at a sentence
+/// boundary or at this size — a slow reader never waits more than one sentence.
+const FLUSH_CHARS: usize = 80;
+
+fn should_flush(pending: &str) -> bool {
+    pending.chars().count() >= FLUSH_CHARS
+        || matches!(
+            pending.trim_end().chars().last(),
+            Some('.' | '!' | '?' | '\n')
+        )
+}
+
+/// macOS: the overlay made SmoothFlow active, so hand focus back to the app
+/// that was frontmost when recording started and let it settle before a paste.
+#[cfg(target_os = "macos")]
+fn reactivate_target_app() {
+    let front = LAST_FRONT_APP.lock().unwrap().clone();
+    if let Some(name) = front {
+        if !name.is_empty() && name != "SmoothFlow" {
+            sf_log!("HOTKEY: reactivating frontmost app: {}", name);
+            let _ = std::process::Command::new("open").arg("-a").arg(&name).spawn();
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reactivate_target_app() {}
+
+fn type_text_timed(app: &tauri::AppHandle, tag: &str, text: &str) -> Result<(), String> {
+    let t_inj = std::time::Instant::now();
+    let result = text_injection::type_text(app, text);
+    sf_log!("{tag}: type_text took {:?}", t_inj.elapsed());
+    result
+}
+
+/// Postprocess a raw transcript and put the result into the focused field.
+/// Shared by both dictation exits so the two paths cannot drift.
+///
+/// Only a local cleanup + auto-paste streams. Every other combination —
+/// including cloud cleanup and cleanup off — is the one-shot path. `on_ready`
+/// runs the moment the final text exists and before the paste, which is where
+/// history and the UI update have always happened.
+fn cleanup_and_paste(
+    app: &tauri::AppHandle,
+    raw: &str,
+    config: &Config,
+    tag: &str,
+    on_ready: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    let context = transcription::active_window_title();
+    let streamed = config.cleanup_engine == "local" && config.auto_paste;
+    if streamed {
+        reactivate_target_app();
+    }
+    let t_pp = std::time::Instant::now();
+
+    if !streamed {
+        let text = postprocess::postprocess_with_context(raw, config, &context);
+        sf_log!("{tag}: postprocess took {:?}", t_pp.elapsed());
+        on_ready(&text);
+        if config.auto_paste && !text.is_empty() {
+            reactivate_target_app();
+            type_text_timed(app, tag, &text)?;
+        }
+        return Ok(text);
+    }
+
+    let mut session = text_injection::PasteSession::begin();
+    let mut pending = String::new();
+    let mut pasted_any = false;
+    let mut flushes = 0usize;
+    let text = postprocess::postprocess_with_context_streaming(
+        raw,
+        config,
+        &context,
+        &mut |chunk| {
+            pending.push_str(chunk);
+            if should_flush(&pending) && session.append(&pending).is_ok() {
+                pasted_any = true;
+                flushes += 1;
+                pending.clear();
+            }
+        },
+    );
+    if !pending.is_empty() && session.append(&pending).is_ok() {
+        pasted_any = true;
+        flushes += 1;
+    }
+    session.finish();
+    sf_log!("{tag}: postprocess took {:?}", t_pp.elapsed());
+
+    if pasted_any {
+        // The text is already in the field — a one-shot paste here would
+        // duplicate the whole dictation.
+        sf_log!("{tag}: streamed cleanup into the field in {flushes} flushes");
+        on_ready(&text);
+        return Ok(text);
+    }
+
+    // `on_partial` never fired: casual fast path, empty transcript, or the LLM
+    // dying before its first token. Nothing was pasted, so paste it once.
+    on_ready(&text);
+    if !text.is_empty() {
+        type_text_timed(app, tag, &text)?;
+    }
+    Ok(text)
 }
 
 fn spawn_vu_meter(
@@ -251,68 +396,73 @@ fn start_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resu
 }
 
 #[tauri::command]
-fn stop_recording(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<String, String> {
+async fn stop_recording(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
     sf_log!("CMD: stop_recording called");
-    let mut recorder = state.recorder.lock().unwrap();
-    let samples = recorder.stop();
-    let sample_rate = recorder.sample_rate();
-    drop(recorder);
+    let (samples, sample_rate) = {
+        let mut recorder = state.recorder.lock().unwrap();
+        let samples = recorder.stop();
+        let sample_rate = recorder.sample_rate();
+        (samples, sample_rate)
+    };
     sf_log!("CMD: got {} samples at {} Hz", samples.len(), sample_rate);
     let _ = app.emit("recording-state", false);
+    let config = state.config.lock().unwrap().clone();
 
-    let config = state.config.lock().unwrap();
-    let t0 = std::time::Instant::now();
-    sf_log!("CMD: transcribing...");
-    let raw = match transcription::transcribe_any(&samples, sample_rate, &config) {
-        Ok(r) => r,
-        Err(e) => {
-            show_error(&app, "transcription-error", e.clone());
-            return Err(e);
-        }
-    };
-    sf_log!(
-        "CMD: transcript received in {:?}: {:?}",
-        t0.elapsed(),
-        &raw[..raw.len().min(50)]
-    );
-    let _ = app.emit("raw-transcript", raw.clone());
-    let t1 = std::time::Instant::now();
-    let text =
-        postprocess::postprocess_with_context(&raw, &config, &transcription::active_window_title());
-    sf_log!("CMD: cleanup took {:?}", t1.elapsed());
-
-    // macOS: near-silent audio (typically missing Mic permission) yields empty
-    // text — surface it instead of silently doing nothing.
-    #[cfg(target_os = "macos")]
-    if text.is_empty() {
-        show_error(&app, "transcription-error", "No speech detected. Check SmoothFlow's Microphone permission in System Settings → Privacy & Security → Microphone, then try again.".into());
-    }
-
-    // Persist non-empty dictations to history (independent of auto-paste)
-    {
-        let mut h = state.history.lock().unwrap();
-        if !text.is_empty() {
-            h.push(&text);
-            h.save();
-        }
-    }
-
-    let _ = app.emit("transcript-result", text.clone());
-
-    if !text.is_empty() {
-        if config.auto_paste {
-            let t2 = std::time::Instant::now();
-            sf_log!("CMD: typing text...");
-            if let Err(e) = text_injection::type_text(&app, &text) {
+    tauri::async_runtime::spawn_blocking(move || {
+        let t0 = std::time::Instant::now();
+        sf_log!("CMD: transcribing...");
+        let raw = match transcription::transcribe_any(&samples, sample_rate, &config) {
+            Ok(r) => r,
+            Err(e) => {
                 show_error(&app, "transcription-error", e.clone());
                 return Err(e);
             }
-            sf_log!("CMD: typed OK in {:?}", t2.elapsed());
-        } else {
+        };
+        sf_log!(
+            "CMD: transcript received in {:?}: {:?}",
+            t0.elapsed(),
+            &raw[..raw.len().min(50)]
+        );
+        let _ = app.emit("raw-transcript", raw.clone());
+
+        if !config.auto_paste {
             sf_log!("CMD: auto-paste disabled, showing in transcript only");
         }
-    }
-    Ok(text)
+
+        let mut on_ready = |text: &str| {
+            // macOS: near-silent audio (typically missing Mic permission) yields
+            // empty text — surface it instead of silently doing nothing.
+            #[cfg(target_os = "macos")]
+            if text.is_empty() {
+                show_error(&app, "transcription-error", "No speech detected. Check SmoothFlow's Microphone permission in System Settings → Privacy & Security → Microphone, then try again.".into());
+}
+
+            // Persist non-empty dictations to history (independent of auto-paste)
+            {
+                let state = app.state::<AppState>();
+                let mut h = state.history.lock().unwrap();
+                if !text.is_empty() {
+                    h.push(text);
+                    h.save();
+                }
+            }
+
+            let _ = app.emit("transcript-result", text.to_string());
+        };
+
+        match cleanup_and_paste(&app, &raw, &config, "CMD", &mut on_ready) {
+            Ok(text) => Ok(text),
+            Err(e) => {
+                show_error(&app, "transcription-error", e.clone());
+                Err(e)
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("[CMD-001] The transcription task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -324,9 +474,15 @@ fn get_config(state: tauri::State<AppState>) -> Result<Config, ()> {
 fn update_config(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
-    new_config: Config,
+    mut new_config: Config,
 ) -> Result<(), String> {
-    if !new_config.offline_mode {
+    // A stale UI (or a hand-edited file) can send a value that is not one of
+    // "off" | "local" | "cloud". Normalise before validating, so the checks
+    // below and the saved file always agree.
+    new_config.normalize();
+    // The cloud speech leg needs an endpoint, a key and a model name. A local
+    // STT user needs none of them.
+    if !new_config.stt_local {
         if new_config.api_key.is_empty() {
             return Err("[CFG-002] API key cannot be empty. Enter a valid key in Settings.".into());
         }
@@ -342,6 +498,13 @@ fn update_config(
                     .into(),
             );
         }
+    }
+    // Cloud cleanup is a second, independent call to the same provider.
+    if new_config.cleanup_engine == "cloud" && new_config.api_key.is_empty() {
+        return Err(
+            "[CFG-005] Cloud AI cleanup needs an API key. Add your API key in Settings, or switch AI cleanup to Local or Off."
+                .into(),
+        );
     }
     // VULN-003: the key goes into the OS vault before anything is saved;
     // Config::save() strips api_key from the JSON written to disk.
@@ -397,6 +560,9 @@ fn update_config(
         config.save();
     }
 
+    // Reads the just-saved config, so each leg warms only if it is enabled.
+    start_offline_engines(&app);
+
     if launch_on_startup {
         let _ = app.autolaunch().enable();
     } else {
@@ -440,16 +606,22 @@ fn reset_stats(state: tauri::State<AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn inject_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
+async fn inject_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
     }
-    text_injection::type_text(&app, &text)
+    // ponytail: spawn_blocking, not #[command(async)] — enigo has no async API,
+    // and a blocking call on a tokio worker starves the runtime for its timeout.
+    tauri::async_runtime::spawn_blocking(move || text_injection::type_text(&app, &text))
+        .await
+        .map_err(|e| format!("[INJ-001] The text injection task failed: {e}"))?
 }
 
 #[tauri::command]
-fn test_api_connection(base_url: String, api_key: String) -> Result<(), String> {
-    transcription::verify_api(&base_url, &api_key)
+async fn test_api_connection(base_url: String, api_key: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || transcription::verify_api(&base_url, &api_key))
+        .await
+        .map_err(|e| format!("[NET-001] The connection test task failed: {e}"))?
 }
 
 #[derive(Clone, Serialize)]
@@ -499,9 +671,9 @@ fn get_models_dir(state: tauri::State<AppState>) -> Result<ModelsLocation, Strin
 }
 
 #[tauri::command]
-fn download_models(
+async fn download_models(
     app: tauri::AppHandle,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
     stt_version: String,
     llm_size: String,
 ) -> Result<offline::ModelStatus, String> {
@@ -510,48 +682,67 @@ fn download_models(
         .parent()
         .ok_or_else(|| "Could not determine the SmoothFlow config directory.".to_string())?
         .to_path_buf();
-    offline::download_bundle(
-        &stt_version,
-        &llm_size,
-        &config_dir,
-        &custom_dir,
-        |id, status, message| {
-            let _ = app.emit(
-                "model-download-progress",
-                ModelDownloadProgress {
-                    id,
-                    status,
-                    message,
-                },
-            );
-        },
-    )?;
-    offline::status(&config_dir, &custom_dir)
+
+    // ponytail: spawn_blocking, not #[command(async)] — a multi-minute download
+    // on a tokio worker starves every other async task; the blocking pool won't.
+    tauri::async_runtime::spawn_blocking(move || {
+        offline::download_bundle(
+            &stt_version,
+            &llm_size,
+            &config_dir,
+            &custom_dir,
+            |id, status, message| {
+                let _ = app.emit(
+                    "model-download-progress",
+                    ModelDownloadProgress {
+                        id,
+                        status,
+                        message,
+                    },
+                );
+            },
+        )?;
+        offline::status(&config_dir, &custom_dir)
+    })
+    .await
+    .map_err(|e| format!("[DL-001] The model download task failed: {e}"))?
 }
 
 #[tauri::command]
-fn delete_models(state: tauri::State<AppState>) -> Result<offline::ModelStatus, String> {
+async fn delete_models(state: tauri::State<'_, AppState>) -> Result<offline::ModelStatus, String> {
     let custom_dir = state.config.lock().unwrap().models_dir.clone();
     let config_dir = Config::path()
         .parent()
         .ok_or_else(|| "Could not determine the SmoothFlow config directory.".to_string())?
         .to_path_buf();
-    offline::delete(&config_dir, &custom_dir)?;
-    offline::status(&config_dir, &custom_dir)
+    tauri::async_runtime::spawn_blocking(move || {
+        offline::delete(&config_dir, &custom_dir)?;
+        offline::status(&config_dir, &custom_dir)
+    })
+    .await
+    .map_err(|e| format!("[DL-002] The model delete task failed: {e}"))?
 }
 
-/// Text-in / text-out check for the on-device pipeline: deterministic rules
+/// Text-in / text-out check for the on-device cleanup model: deterministic rules
 /// first, then local LLM cleanup. STT is audio-only, so it is not covered here.
 #[tauri::command]
-fn test_local_pipeline(state: tauri::State<AppState>, text: String) -> Result<String, String> {
-    if !state.config.lock().unwrap().offline_mode {
+async fn test_local_pipeline(
+    state: tauri::State<'_, AppState>,
+    text: String,
+) -> Result<String, String> {
+    let config = state.config.lock().unwrap().clone();
+    if config.cleanup_engine != "local" {
         return Err(
-            "[OFF-001] Turn on Offline Mode first — this tests the local pipeline only.".into(),
+            "[OFF-001] Enable Local AI cleanup first — this tests the local cleanup model only."
+                .into(),
         );
     }
-    let config = state.config.lock().unwrap().clone();
-    let cleaned = llm_local::cleanup(&text, &config, "")?;
-    Ok(postprocess::postprocess(&cleaned, &config))
+    tauri::async_runtime::spawn_blocking(move || {
+        let cleaned = llm_local::cleanup(&text, &config, "")?;
+        Ok(postprocess::postprocess(&cleaned, &config))
+    })
+    .await
+    .map_err(|e| format!("[OFF-002] The local pipeline test task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -588,6 +779,17 @@ pub(crate) fn hotkey_start(app: &tauri::AppHandle) -> bool {
         }
     };
     if started {
+        // Read the cleanup model's instruction sheet for THIS window while the
+        // user is still speaking: prefill costs ~14-27 s and the title must be
+        // read before the overlay can steal focus. Best-effort, never blocks
+        // recording.
+        {
+            let config = state.config.lock().unwrap().clone();
+            if should_warm_llm(&config) {
+                let context = transcription::active_window_title();
+                std::thread::spawn(move || llm_local::prime_for_category(&config, &context));
+            }
+        }
         #[cfg(target_os = "macos")]
         {
             // Capture the frontmost app BEFORE the overlay steals focus, so the
@@ -662,58 +864,32 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
             let raw = transcription::transcribe_any(&samples, sample_rate, &config)?;
             sf_log!("PERF: STT (total) took {:?}", t_encode.elapsed());
             let _ = app_clone.emit("raw-transcript", raw.clone());
-            let t_pp = std::time::Instant::now();
-            let text = postprocess::postprocess_with_context(
-                &raw,
-                &config,
-                &transcription::active_window_title(),
-            );
-            sf_log!("PERF: postprocess took {:?}", t_pp.elapsed());
-            #[cfg(target_os = "macos")]
-            if text.is_empty() {
-                show_error(&app_clone, "transcription-error", "No speech detected. Check SmoothFlow's Microphone permission in System Settings → Privacy & Security → Microphone, then try again.".into());
+            if !config.auto_paste {
+                sf_log!("HOTKEY: auto-paste disabled in config");
             }
-            let st = app_clone.state::<AppState>();
-            let mut h = st.history.lock().unwrap();
-            if !text.is_empty() {
-                h.push(&text);
-                h.save();
-            }
-            drop(h);
-            let _ = app_clone.emit("transcript-result", text.clone());
-            if config.auto_paste {
+            let mut on_ready = |text: &str| {
+                #[cfg(target_os = "macos")]
+                if text.is_empty() {
+                    show_error(&app_clone, "transcription-error", "No speech detected. Check SmoothFlow's Microphone permission in System Settings → Privacy & Security → Microphone, then try again.".into());
+                }
+                let st = app_clone.state::<AppState>();
+                let mut h = st.history.lock().unwrap();
                 if !text.is_empty() {
-                    sf_log!("HOTKEY: auto-paste enabled, typing...");
-                    #[cfg(target_os = "macos")]
-                    {
-                        // Overlay made SmoothFlow active — give focus back to the
-                        // app that was frontmost when recording started, then let
-                        // it settle before Cmd+V lands in type_text.
-                        let front = LAST_FRONT_APP.lock().unwrap().clone();
-                        if let Some(name) = front {
-                            if !name.is_empty() && name != "SmoothFlow" {
-                                sf_log!("HOTKEY: reactivating frontmost app: {}", name);
-                                let _ = std::process::Command::new("open")
-                                    .arg("-a")
-                                    .arg(&name)
-                                    .spawn();
-                                std::thread::sleep(std::time::Duration::from_millis(250));
-                            }
-                        }
-                    }
-                    let t_inj = std::time::Instant::now();
-                    if let Err(e) = text_injection::type_text(&app_clone, &text) {
-                        sf_log!("PERF: type_text took {:?}", t_inj.elapsed());
-                        sf_log!("HOTKEY: type_text error: {e}");
-                        show_error(&app_clone, "transcription-error", e);
-                    } else {
-                        sf_log!("PERF: type_text took {:?}", t_inj.elapsed());
-                    }
-                } else {
+                    h.push(text);
+                    h.save();
+                }
+                drop(h);
+                let _ = app_clone.emit("transcript-result", text.to_string());
+            };
+            match cleanup_and_paste(&app_clone, &raw, &config, "PERF", &mut on_ready) {
+                Ok(text) if config.auto_paste && text.is_empty() => {
                     sf_log!("HOTKEY: auto-paste enabled but text is empty, skipping");
                 }
-            } else {
-                sf_log!("HOTKEY: auto-paste disabled in config");
+                Ok(_) => {}
+                Err(e) => {
+                    sf_log!("HOTKEY: type_text error: {e}");
+                    show_error(&app_clone, "transcription-error", e);
+                }
             }
             Ok::<_, String>(())
         }));
@@ -880,6 +1056,8 @@ pub fn run() {
                 }
             }
 
+            start_offline_engines(app.handle());
+
             // System tray
             let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))
                 .expect("failed to load tray icon");
@@ -910,6 +1088,7 @@ pub fn run() {
                                 recorder.stop();
                             }
                         }
+                        llm_local::shutdown();
                         app.exit(0);
                     }
                     _ => {}
@@ -947,6 +1126,10 @@ pub fn run() {
             download_models,
             delete_models,
             test_local_pipeline,
+            local_models::list_local_models,
+            local_models::inspect_stt_dir,
+            local_models::scan_models_folder,
+            local_models::open_models_folder,
             restart_app,
         ])
         .run(tauri::generate_context!())
@@ -1008,5 +1191,65 @@ mod tests {
     fn parse_hotkey_lowercase_letter() {
         let (_, code) = parse_hotkey_str("a").expect("single lowercase letter should parse");
         assert_eq!(code, Code::KeyA);
+    }
+
+    #[test]
+    fn each_engine_is_warmed_only_for_its_own_leg() {
+        let cloud = Config::default();
+        assert!(!should_warm_stt(&cloud), "cloud speech must not warm the STT helper");
+        assert!(!should_warm_llm(&cloud), "cleanup off must not warm llama-server");
+
+        let local_stt = Config {
+            stt_local: true,
+            ..Config::default()
+        };
+        assert!(should_warm_stt(&local_stt));
+        assert!(!should_warm_llm(&local_stt));
+
+        let local_llm = Config {
+            cleanup_engine: "local".into(),
+            ..Config::default()
+        };
+        assert!(!should_warm_stt(&local_llm));
+        assert!(should_warm_llm(&local_llm));
+
+        // Cloud speech + local cleanup: only the LLM warms.
+        let both = Config {
+            cleanup_engine: "cloud".into(),
+            ..Config::default()
+        };
+        assert!(!should_warm_stt(&both));
+        assert!(!should_warm_llm(&both));
+
+        let full_local = Config {
+            stt_local: true,
+            cleanup_engine: "local".into(),
+            ..Config::default()
+        };
+        assert!(should_warm_stt(&full_local));
+        assert!(should_warm_llm(&full_local));
+    }
+
+    #[test]
+    fn a_finished_sentence_flushes_however_it_arrives() {
+        for ending in [".", "!", "?", "\n", ".\n", ".\r\n", ". "] {
+            assert!(should_flush(&format!("All done{ending}")), "{ending:?}");
+        }
+    }
+
+    #[test]
+    fn a_short_mid_sentence_chunk_waits_for_more() {
+        for chunk in ["and then", "", "and then I said the thing to", "1.5, 2.5"] {
+            assert!(!should_flush(chunk), "{chunk:?}");
+        }
+    }
+
+    #[test]
+    fn the_threshold_is_inclusive_at_exactly_the_boundary() {
+        let just_under = "w".repeat(FLUSH_CHARS - 1);
+        let exactly = "w".repeat(FLUSH_CHARS);
+        assert!(!should_flush(&just_under));
+        assert!(should_flush(&exactly));
+        assert!(should_flush(&"w".repeat(FLUSH_CHARS + 1)));
     }
 }

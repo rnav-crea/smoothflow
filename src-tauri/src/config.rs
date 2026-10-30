@@ -81,8 +81,21 @@ pub struct Config {
     pub dictionary: Vec<String>,
     pub hotkey: String,
     pub overlay_position: String,
+    /// Legacy single switch, kept only for backward compatibility and
+    /// migration of old `smoothflow.json` files. It is serialized as-is but
+    /// **never read for a decision** — `stt_local` and `cleanup_engine` are the
+    /// two independent legs that replaced it.
     #[serde(default)]
     pub offline_mode: bool,
+    /// Where speech-to-text runs: `true` = the local Parakeet helper on this
+    /// machine, `false` = the configured cloud endpoint.
+    #[serde(default)]
+    pub stt_local: bool,
+    /// Whether and where AI cleanup runs: `"off"` (deterministic rules only,
+    /// the default), `"local"` (local llama-server) or `"cloud"` (the existing
+    /// cloud cleanup endpoint). Anything else normalises to `"off"`.
+    #[serde(default = "default_cleanup_engine")]
+    pub cleanup_engine: String,
     #[serde(default = "default_stt_version")]
     pub stt_version: String,
     #[serde(default = "default_llm_model_size")]
@@ -93,6 +106,11 @@ pub struct Config {
     /// download. Empty = download the catalog model for `llm_model_size`.
     #[serde(default)]
     pub custom_llm_path: String,
+    /// Absolute path to a user-supplied speech model folder. Must contain a
+    /// Parakeet bundle (encoder/decoder/joiner .onnx + tokens.txt). Empty = use
+    /// the catalog model for `stt_version`.
+    #[serde(default)]
+    pub custom_stt_dir: String,
     #[serde(default)]
     pub auto_download_models: bool,
     #[serde(default = "default_casual_fast_path_words")]
@@ -115,6 +133,59 @@ fn default_llm_model_size() -> String {
 
 fn default_casual_fast_path_words() -> usize {
     4
+}
+
+fn default_cleanup_engine() -> String {
+    "off".into()
+}
+
+/// The only three legal `cleanup_engine` values.
+pub const CLEANUP_ENGINES: [&str; 3] = ["off", "local", "cloud"];
+
+/// Fallback engine when a value is not one of `CLEANUP_ENGINES`. Never guesses
+/// `"cloud"`: defaulting to a network call would violate the offline contract,
+/// so an unrecognised value means "no model at all".
+pub const CLEANUP_ENGINE_FALLBACK: &str = "off";
+
+/// Normalise a `cleanup_engine` value, so a config file (or a UI payload) can
+/// never smuggle in a fourth value. Never panics.
+pub fn normalize_cleanup_engine(engine: &str) -> String {
+    match engine {
+        "off" => "off".to_string(),
+        "local" => "local".to_string(),
+        "cloud" => "cloud".to_string(),
+        _ => CLEANUP_ENGINE_FALLBACK.to_string(),
+    }
+}
+
+/// One-time migration of the retired `offline_mode` switch into the two legs.
+///
+/// Only applies to objects that have neither new key — a file that already
+/// carries `stt_local` and/or `cleanup_engine` is taken verbatim, no matter what
+/// the legacy field says.
+///
+/// `offline_mode: true`  → local speech + local cleanup.
+/// `offline_mode: false` → cloud speech + cloud cleanup, so today's cloud users
+///   do not silently lose AI cleanup on upgrade. A file missing the field
+///   entirely was always a cloud file for the same reason.
+fn migrate_split_switch(value: &mut serde_json::Value) {
+    // A non-object cannot hold either shape; leave it to serde to fall back to
+    // the defaults exactly as before.
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if object.contains_key("stt_local") || object.contains_key("cleanup_engine") {
+        return;
+    }
+    let offline = object
+        .get("offline_mode")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    object.insert("stt_local".into(), serde_json::Value::Bool(offline));
+    object.insert(
+        "cleanup_engine".into(),
+        serde_json::Value::String(if offline { "local" } else { "cloud" }.to_string()),
+    );
 }
 
 /// Ctrl+Space everywhere by default — macOS reserves Fn/Globe for the Emoji &
@@ -140,10 +211,13 @@ impl Default for Config {
             hotkey: default_hotkey().into(),
             overlay_position: "bottom".into(),
             offline_mode: false,
+            stt_local: false,
+            cleanup_engine: default_cleanup_engine(),
             stt_version: default_stt_version(),
             llm_model_size: default_llm_model_size(),
             models_dir: String::new(),
             custom_llm_path: String::new(),
+            custom_stt_dir: String::new(),
             auto_download_models: false,
             casual_fast_path_words: 4,
             keep_audio_clips: false,
@@ -160,10 +234,10 @@ impl Config {
 
     pub fn load() -> Self {
         let path = Self::path();
-        let mut config: Self = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let mut config: Self = match std::fs::read_to_string(&path) {
+            Ok(raw) => Self::from_json(&raw),
+            Err(_) => Self::default(),
+        };
 
         // VULN-003 migration: legacy plaintext key in the JSON moves into the
         // vault, then the file is rewritten without it. If the vault write
@@ -178,6 +252,26 @@ impl Config {
             config.api_key = key;
         }
         config
+    }
+
+    /// Parse a raw `smoothflow.json` body, migrating the retired `offline_mode`
+    /// switch into the two independent legs. Unreadable input keeps the old
+    /// behaviour: the defaults.
+    fn from_json(raw: &str) -> Self {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return Self::default();
+        };
+        migrate_split_switch(&mut value);
+        let mut config: Self = serde_json::from_value(value).unwrap_or_default();
+        config.normalize();
+        config
+    }
+
+    /// Force `cleanup_engine` into its legal set. Called after deserialise and
+    /// after `update_config`, so neither a hand-edited file nor a stale UI can
+    /// produce a fourth value.
+    pub fn normalize(&mut self) {
+        self.cleanup_engine = normalize_cleanup_engine(&self.cleanup_engine);
     }
 
     pub fn save(&self) {
@@ -211,10 +305,13 @@ mod tests {
         assert_eq!(c.hotkey, default_hotkey());
         assert_eq!(c.overlay_position, "bottom");
         assert!(!c.offline_mode);
+        assert!(!c.stt_local);
+        assert_eq!(c.cleanup_engine, "off");
         assert_eq!(c.stt_version, "v2");
         assert_eq!(c.llm_model_size, "4b");
         assert!(c.models_dir.is_empty());
         assert!(c.custom_llm_path.is_empty());
+        assert!(c.custom_stt_dir.is_empty());
         assert!(!c.auto_download_models);
         assert_eq!(c.casual_fast_path_words, 4);
         assert!(!c.keep_audio_clips);
@@ -236,10 +333,13 @@ mod tests {
             hotkey: "Alt+Shift+T".into(),
             overlay_position: "top".into(),
             offline_mode: true,
+            stt_local: true,
+            cleanup_engine: "local".into(),
             stt_version: "v3".into(),
             llm_model_size: "2b".into(),
             models_dir: "D:/models".into(),
             custom_llm_path: "C:/my-model.gguf".into(),
+            custom_stt_dir: "D:/parakeet-bundle".into(),
             auto_download_models: true,
             casual_fast_path_words: 7,
             keep_audio_clips: true,
@@ -253,10 +353,13 @@ mod tests {
         assert_eq!(back.hotkey, "Alt+Shift+T");
         assert_eq!(back.overlay_position, "top");
         assert!(back.offline_mode);
+        assert!(back.stt_local);
+        assert_eq!(back.cleanup_engine, "local");
         assert_eq!(back.stt_version, "v3");
         assert_eq!(back.llm_model_size, "2b");
         assert_eq!(back.models_dir, "D:/models");
         assert_eq!(back.custom_llm_path, "C:/my-model.gguf");
+        assert_eq!(back.custom_stt_dir, "D:/parakeet-bundle");
         assert!(back.auto_download_models);
         assert_eq!(back.casual_fast_path_words, 7);
         assert!(back.keep_audio_clips);
@@ -274,11 +377,102 @@ mod tests {
         assert_eq!(c.casual_fast_path_words, 4);
         assert!(!c.keep_audio_clips);
         assert!(!c.offline_mode);
+        assert!(!c.stt_local);
+        assert_eq!(c.cleanup_engine, "off");
         assert_eq!(c.stt_version, "v2");
         assert_eq!(c.llm_model_size, "4b");
         assert!(c.models_dir.is_empty());
         assert!(c.custom_llm_path.is_empty());
+        assert!(c.custom_stt_dir.is_empty());
         assert!(!c.auto_download_models);
+    }
+
+    /// The migration input cases, exercised without touching the real
+    /// `smoothflow.json` on disk.
+    fn parse(json: &str) -> Config {
+        Config::from_json(json)
+    }
+
+    const LEGACY_BASE: &str = r#""api_base_url":"https://api.groq.com/openai/v1","api_key":"","model":"whisper-large-v3","cleanup_model":"openai/gpt-oss-20b","auto_punctuation":true,"remove_fillers":true,"auto_paste":true,"launch_on_startup":false,"dictionary":[],"hotkey":"Ctrl+Space","overlay_position":"bottom""#;
+
+    #[test]
+    fn old_json_with_offline_mode_true_migrates_to_both_legs_on() {
+        let c = parse(&format!(r#"{{{LEGACY_BASE},"offline_mode":true}}"#));
+        assert!(c.stt_local);
+        assert_eq!(c.cleanup_engine, "local");
+        // The legacy field is preserved verbatim, just never read again.
+        assert!(c.offline_mode);
+    }
+
+    #[test]
+    fn old_json_with_offline_mode_false_keeps_cloud_cleanup() {
+        // Regression guard: today's cloud users must not lose AI cleanup on
+        // upgrade — the naive "default is off" would silently degrade them.
+        let c = parse(&format!(r#"{{{LEGACY_BASE},"offline_mode":false}}"#));
+        assert!(!c.stt_local);
+        assert_eq!(c.cleanup_engine, "cloud");
+    }
+
+    #[test]
+    fn a_legacy_file_without_the_switch_counts_as_cloud() {
+        let c = parse(&format!("{{{LEGACY_BASE}}}"));
+        assert!(!c.stt_local);
+        assert_eq!(c.cleanup_engine, "cloud");
+    }
+
+    #[test]
+    fn new_json_wins_over_the_retired_switch() {
+        let c = parse(&format!(
+            r#"{{{LEGACY_BASE},"offline_mode":true,"stt_local":false,"cleanup_engine":"cloud"}}"#
+        ));
+        assert!(!c.stt_local);
+        assert_eq!(c.cleanup_engine, "cloud");
+        // No migration ran, but the legacy field still round-trips untouched.
+        assert!(c.offline_mode);
+
+        // Either new key alone also disables migration entirely.
+        let only_stt = parse(&format!(
+            r#"{{{LEGACY_BASE},"offline_mode":true,"stt_local":false}}"#
+        ));
+        assert!(!only_stt.stt_local);
+        assert_eq!(only_stt.cleanup_engine, "off");
+    }
+
+    #[test]
+    fn an_unknown_cleanup_engine_normalises_to_off() {
+        for value in ["", "offf", "Local", "gpu", "openai", "  "] {
+            let c = parse(&format!(
+                r#"{{{LEGACY_BASE},"cleanup_engine":"{value}"}}"#
+            ));
+            assert_eq!(c.cleanup_engine, "off", "value {value:?}");
+        }
+        // The legal values survive untouched.
+        for value in CLEANUP_ENGINES {
+            let c = parse(&format!(
+                r#"{{{LEGACY_BASE},"cleanup_engine":"{value}"}}"#
+            ));
+            assert_eq!(c.cleanup_engine, value);
+        }
+    }
+
+    #[test]
+    fn normalize_is_idempotent_and_never_guesses_cloud() {
+        for value in ["", "cloudy", "OFF", "0"] {
+            assert_eq!(normalize_cleanup_engine(value), "off");
+        }
+        for value in CLEANUP_ENGINES {
+            assert_eq!(normalize_cleanup_engine(value), value);
+        }
+    }
+
+    #[test]
+    fn unreadable_json_still_yields_the_defaults() {
+        let c = parse("not valid json{");
+        assert_eq!(c.api_base_url, Config::default().api_base_url);
+        assert!(!c.stt_local);
+        assert_eq!(c.cleanup_engine, "off");
+        // A JSON document of the wrong shape must not panic either.
+        assert_eq!(parse("[1,2,3]").cleanup_engine, "off");
     }
 
     #[test]
@@ -326,10 +520,13 @@ mod tests {
             hotkey: "Ctrl+Shift+Space".into(),
             overlay_position: "bottom".into(),
             offline_mode: true,
+            stt_local: false,
+            cleanup_engine: "cloud".into(),
             stt_version: "v3".into(),
             llm_model_size: "9b".into(),
             models_dir: "C:/SmoothFlow/models".into(),
             custom_llm_path: "C:/ollama/mistral.gguf".into(),
+            custom_stt_dir: "D:/parakeet-custom".into(),
             auto_download_models: true,
             casual_fast_path_words: 5,
             keep_audio_clips: true,
@@ -350,10 +547,13 @@ mod tests {
         assert_eq!(loaded.hotkey, "Ctrl+Shift+Space");
         assert_eq!(loaded.overlay_position, "bottom");
         assert!(loaded.offline_mode);
+        assert!(!loaded.stt_local);
+        assert_eq!(loaded.cleanup_engine, "cloud");
         assert_eq!(loaded.stt_version, "v3");
         assert_eq!(loaded.llm_model_size, "9b");
         assert_eq!(loaded.models_dir, "C:/SmoothFlow/models");
         assert_eq!(loaded.custom_llm_path, "C:/ollama/mistral.gguf");
+        assert_eq!(loaded.custom_stt_dir, "D:/parakeet-custom");
         assert!(loaded.auto_download_models);
         assert_eq!(loaded.casual_fast_path_words, 5);
         assert!(loaded.keep_audio_clips);

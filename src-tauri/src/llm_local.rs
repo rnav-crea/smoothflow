@@ -15,8 +15,11 @@
 
 use crate::config::Config;
 use crate::offline;
-use crate::postprocess::{categorize_window, strip_reasoning_block, system_prompt, user_message};
+use crate::postprocess::{
+    categorize_window, strip_reasoning_block, system_prompt_offline, user_message, WindowCategory,
+};
 use crate::sf_log;
+use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -46,11 +49,47 @@ impl Session {
 }
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The window category whose prompt the live server already holds in its KV
+/// cache. Cleared whenever the server is replaced or torn down: a fresh process
+/// starts with an empty cache and has to re-prime. `None` means "nothing primed".
+static PRIMED_CATEGORY: Mutex<Option<&'static str>> = Mutex::new(None);
 
 /// Clean up a raw transcript on-device. Returns a user-readable `[LLM-00n]`
 /// error when the server binary, the model, or the server itself is unhappy.
 /// Never falls back to the network.
 pub fn cleanup(text: &str, config: &Config, context: &str) -> Result<String, String> {
+    with_session(config, |session| {
+        (request(session, text, config, context), true)
+    })
+}
+
+/// Same cleanup, but each generated chunk is handed to `on_partial` as it
+/// arrives and the caller pastes it immediately instead of waiting ~7 s for the
+/// whole sentence. Returns the full accumulated text.
+///
+/// `on_partial` receives each *delta*, never the accumulated string: LLM output
+/// at `temperature: 0` is append-only, so the caller only ever appends. No
+/// retraction, no in-place replacement.
+pub fn cleanup_streaming(
+    text: &str,
+    config: &Config,
+    context: &str,
+    on_partial: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    with_session(config, |session| {
+        request_streaming(session, text, config, context, on_partial)
+    })
+}
+
+/// Resolve the model, reuse or spawn the server, run `request`, and tear the
+/// session down when `request` asks for it. The closure returns its result plus
+/// a kill flag, because a stream that dies mid-sentence still has to drop the
+/// server while reporting success to the caller.
+fn with_session<T>(
+    config: &Config,
+    run: impl FnOnce(&Session) -> (Result<T, String>, bool),
+) -> Result<T, String> {
     // Checked here too: model_path would otherwise report a missing model on a
     // platform that has no engines at all.
     if !platform_supported() {
@@ -67,20 +106,26 @@ pub fn cleanup(text: &str, config: &Config, context: &str) -> Result<String, Str
     if guard.as_ref().is_some_and(|s| s.model != model) {
         if let Some(mut old) = guard.take() {
             old.shutdown();
+            // New process, empty KV cache: the next dictation must re-prime.
+            set_primed_category(None);
         }
     }
     if guard.is_none() {
         *guard = Some(spawn(&server, &model)?);
     }
-    let outcome = match guard.as_ref() {
-        Some(session) => request(session, text, config, context),
+    let (outcome, tear_down) = match guard.as_ref() {
+        Some(session) => run(session),
         // Unreachable: the session was just spawned, but never unwrap state.
-        None => Err("[LLM-002] The local cleanup session is unavailable. Try again.".into()),
+        None => (
+            Err("[LLM-002] The local cleanup session is unavailable. Try again.".into()),
+            true,
+        ),
     };
-    if outcome.is_err() {
+    if tear_down {
         // Never cache a half-dead session: the next call must respawn cleanly.
         if let Some(mut dead) = guard.take() {
             dead.shutdown();
+            set_primed_category(None);
         }
     }
     outcome
@@ -89,15 +134,212 @@ pub fn cleanup(text: &str, config: &Config, context: &str) -> Result<String, Str
 /// Kill and reap the server. Safe with no session and safe to call twice —
 /// an orphaned `llama-server` would hold the model in RAM after we exit.
 pub fn shutdown() {
+    // Set before the lock so a prewarm already blocked on the mutex cannot
+    // resurrect a server after this returns.
+    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut guard = SESSION
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(mut session) = guard.take() {
         session.shutdown();
     }
+    // A torn-down server has no cache left to hit.
+    set_primed_category(None);
+}
+
+/// Start the server in the background so the multi-second model load overlaps
+/// the user speaking instead of landing after the first dictation.
+/// Best-effort: a warm that fails is not a user error, and `cleanup` respawns
+/// and reports the real one. Call on a background thread — `spawn` polls
+/// `/health` for up to 180 s.
+pub fn prewarm(config: &Config) {
+    let (Ok(model), Ok(server)) = (model_path(config), server_path()) else {
+        return;
+    };
+    // ponytail: holds the session mutex across the whole model load and the
+    // prompt prime, so a dictation arriving mid-warm waits it out and then
+    // starts on a warm server. Same total wait as spawning on that dictation,
+    // minus the prefill it would otherwise pay twice.
+    let mut guard = SESSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.is_some() {
+        return;
+    }
+    *guard = spawn(&server, &model).ok();
+    if let Some(session) = guard.as_ref() {
+        prime_prompt_cache(session, config);
+    }
+}
+
+/// Prefill the prompt for `category` while the user is still speaking.
+///
+/// The prefill, not the generation, is what the user waits for: a ~1500-token
+/// prompt costs ~18 ms per uncached token here, so the tail of the instruction
+/// sheet lands at 14-27 s on the first dictation into each new window category.
+/// The hotkey already knows the target window (the title has to be read before
+/// the overlay steals focus) and the user then speaks for 6-28 s, so starting
+/// the prefill at press time makes it free. Best-effort: a failed prime is not a
+/// user error, the real request reports its own.
+///
+/// Call on a background thread — the prefill holds `SESSION` and can take tens
+/// of seconds. It never spawns a server: `prewarm` owns creation.
+pub fn prime_for_category(config: &Config, context: &str) {
+    if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Relaxed) || !platform_supported() {
+        return;
+    }
+    // The same call the real request makes, so the prefilled prompt is
+    // byte-identical to the one `request_streaming` will send for this window.
+    let category = categorize_window(context);
+    let label = category_label(category);
+    // Lock released before any work: the check is a cheap fast path, not a claim.
+    if current_primed_category() == Some(label) {
+        sf_log!("LLM: prompt cache already primed for category {label}");
+        return;
+    }
+    // ponytail: held across the prefill on purpose — that is the prefill the
+    // next dictation would pay anyway, and it must not run twice at once.
+    let guard = SESSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(session) = guard.as_ref() else {
+        sf_log!("LLM: no local engine yet, skipping prime for category {label}");
+        return;
+    };
+    sf_log!("LLM: priming prompt cache for category {label} while recording");
+    // Status codes and counts only — never the prompt or the answer.
+    match send_prime(session, config, category) {
+        PrimeOutcome::Primed(usage) => {
+            set_primed_category(Some(label));
+            sf_log!(
+                "LLM: prompt cache primed for category {label} | prompt {} | cached {} | completion {}",
+                count_text(usage.prompt),
+                count_text(usage.cached),
+                count_text(usage.completion)
+            );
+        }
+        PrimeOutcome::Rejected(status) => {
+            sf_log!("LLM: prime for category {label} rejected by the engine ({status})")
+        }
+        PrimeOutcome::Failed(err) => sf_log!("LLM: prime for category {label} failed ({err})"),
+    }
+}
+
+/// One throwaway completion that leaves the system prompt resident in the
+/// server's KV cache. Without it the first dictation in each window category
+/// pays the full prefill of the ~1100-token prompt. Best-effort by design:
+/// every outcome is logged and dropped, because a warm server that skipped the
+/// prime is still correct — just slower.
+fn prime_prompt_cache(session: &Session, config: &Config) {
+    if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    match send_prime(session, config, WindowCategory::Default) {
+        PrimeOutcome::Primed(usage) => {
+            sf_log!("LLM: prompt cache primed");
+            set_primed_category(Some(category_label(WindowCategory::Default)));
+            sf_log!(
+                "LLM: prime usage | prompt {} | cached {} | completion {}",
+                count_text(usage.prompt),
+                count_text(usage.cached),
+                count_text(usage.completion)
+            );
+        }
+        PrimeOutcome::Rejected(status) => {
+            sf_log!("LLM: prompt prime rejected by the engine ({status})")
+        }
+        PrimeOutcome::Failed(err) => sf_log!("LLM: prompt prime failed ({err})"),
+    }
+}
+
+/// What one prime attempt did. Status and counts only: the prompt that was sent
+/// and the single token that came back are never kept or logged.
+enum PrimeOutcome {
+    Primed(TokenUsage),
+    /// The engine answered, but not with a 2xx.
+    Rejected(reqwest::StatusCode),
+    /// No answer at all: the client could not be built or the request failed.
+    Failed(String),
+}
+
+/// Send the prime body for one category. Shared by the startup prime and the
+/// while-recording prime so the two can never drift in timeout or error policy.
+fn send_prime(session: &Session, config: &Config, category: WindowCategory) -> PrimeOutcome {
+    let url = format!("http://127.0.0.1:{}/v1/chat/completions", session.port);
+    let outcome = reqwest::blocking::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())
+        .and_then(|client| {
+            client
+                .post(&url)
+                .json(&prime_body(config, category))
+                .send()
+                .map_err(|e| e.to_string())
+        });
+    // Status codes and transport errors only — never the prompt or the answer.
+    match outcome {
+        Ok(resp) if resp.status().is_success() => {
+            // Read on success only, so a failure keeps its bare status message.
+            // The body is parsed for counts and dropped: the prompt is the real
+            // one, and the answer is one token nobody reads.
+            let mut usage = TokenUsage::default();
+            if let Ok(body) = resp.json::<serde_json::Value>() {
+                usage.absorb(&body);
+            }
+            PrimeOutcome::Primed(usage)
+        }
+        Ok(resp) => PrimeOutcome::Rejected(resp.status()),
+        Err(err) => PrimeOutcome::Failed(err),
+    }
+}
+
+/// The category whose prompt the live server already holds, if any.
+fn current_primed_category() -> Option<&'static str> {
+    *PRIMED_CATEGORY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn set_primed_category(label: Option<&'static str>) {
+    *PRIMED_CATEGORY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = label;
+}
+
+/// A stable, log-safe name for a category. Matched by hand rather than derived
+/// so the label a log line shows can never silently change with the enum.
+fn category_label(category: WindowCategory) -> &'static str {
+    match category {
+        WindowCategory::Default => "default",
+        WindowCategory::Email => "email",
+        WindowCategory::Code => "code",
+        WindowCategory::Chat => "chat",
+        WindowCategory::Browser => "browser",
+        WindowCategory::Document => "document",
+    }
+}
+
+/// The prime body: the real system prompt for `category`, the real user-message
+/// wrapper, one token of generation. The point is the prefix, so only the token
+/// counts are read back — never the prompt or the answer.
+fn prime_body(config: &Config, category: WindowCategory) -> serde_json::Value {
+    let mut body = build_body(
+        system_prompt_offline(config, category),
+        user_message("", ""),
+        false,
+    );
+    body["max_tokens"] = 1.into();
+    body
 }
 
 fn spawn(server: &PathBuf, model: &PathBuf) -> Result<Session, String> {
+    // ponytail: checked here rather than in `cleanup` and `prewarm` separately —
+    // this is the only place a process can come into existence, so one gate
+    // covers every caller. Nothing else to synchronise with, hence Relaxed.
+    if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("[LLM-002] The local cleanup engine is shutting down.".into());
+    }
     if !platform_supported() {
         return Err(unsupported_platform_message());
     }
@@ -174,8 +416,9 @@ fn request(
     context: &str,
 ) -> Result<String, String> {
     let body = build_body(
-        system_prompt(config, categorize_window(context)),
+        system_prompt_offline(config, categorize_window(context)),
         user_message(text, context),
+        false,
     );
     // Separate from the health client: a 5 s timeout would cap every cleanup.
     let client = reqwest::blocking::Client::builder()
@@ -197,6 +440,296 @@ fn request(
         .map_err(|e| format!("[LLM-002] Could not read the local cleanup response. ({e})"))?;
     // Qwen3.5 can emit a thinking block; the shared stripper already handles it.
     Ok(strip_reasoning_block(&extract_content(&raw)?))
+}
+
+/// The streamed twin of `request`. Each `delta.content` is handed to
+/// `on_partial` as it is read, so the caller can paste while the model is still
+/// generating. The kill flag is `true` for every failure — including a stream
+/// that dies mid-sentence — so the next dictation respawns cleanly.
+fn request_streaming(
+    session: &Session,
+    text: &str,
+    config: &Config,
+    context: &str,
+    on_partial: &mut dyn FnMut(&str),
+) -> (Result<String, String>, bool) {
+    let body = build_body(
+        system_prompt_offline(config, categorize_window(context)),
+        user_message(text, context),
+        true,
+    );
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            return (
+                Err(format!(
+                    "[LLM-002] Could not create the local cleanup client. ({e})"
+                )),
+                true,
+            )
+        }
+    };
+    let url = format!("http://127.0.0.1:{}/v1/chat/completions", session.port);
+    let resp = match client.post(&url).json(&body).send() {
+        Ok(resp) => resp,
+        Err(e) => {
+            return (
+                Err(format!("[LLM-002] Local cleanup request failed. ({e})")),
+                true,
+            )
+        }
+    };
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return (Err(format!("[LLM-002] Local cleanup engine error {status}.")), true);
+    }
+
+    let mut acc = String::new();
+    let mut usage = TokenUsage::default();
+    let mut reader = BufReader::new(resp);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => match sse_step(&line) {
+                SseStep::Chunk(chunk) => {
+                    on_partial(&chunk);
+                    acc.push_str(&chunk);
+                }
+                // Counts only: never text, so never pasted.
+                SseStep::Usage(tail) => usage.absorb(&tail),
+                SseStep::Done => break,
+                SseStep::Ignore => {}
+            },
+            Err(e) => {
+                log_usage(&usage);
+                return truncated(
+                    &acc,
+                    &format!("[LLM-002] The local cleanup stream failed. ({e})"),
+                );
+            }
+        }
+    }
+    // One line per dictation, whether or not the builder above was the one that
+    // answered. Missing counts log as `?`, never as a zero.
+    log_usage(&usage);
+    if acc.trim().is_empty() {
+        // EOF with nothing generated: the server died before the first token.
+        return (
+            Err("[LLM-002] The local cleanup engine returned no text.".into()),
+            true,
+        );
+    }
+    // Same reasoning-block stripper as the non-streaming path. It can only bite
+    // when the model leaks a thinking preamble, which the prompt disables.
+    (Ok(strip_reasoning_block(&acc)), false)
+}
+
+/// A stream that dies after generating nothing is a plain error; one that dies
+/// after generating text is only a truncated sentence, and reporting `Err`
+/// there would make the caller paste the same dictation a second time.
+fn truncated(acc: &str, err: &str) -> (Result<String, String>, bool) {
+    if acc.trim().is_empty() {
+        return (Err(err.to_string()), true);
+    }
+    sf_log!(
+        "LLM: {err} — keeping the {} characters already delivered.",
+        acc.chars().count()
+    );
+    (Ok(acc.to_string()), true)
+}
+
+/// One SSE line. `data: [DONE]` ends the stream; every other non-`data:` line
+/// (blank separator, `: comment`, `event:`) is ignored. A `data:` payload that
+/// is not the JSON we expect is *skipped, not fatal*: llama-server would have to
+/// emit something exotic to trigger it, and silently dropping one token beats
+/// abandoning a dictation the user is already reading.
+fn sse_step(line: &str) -> SseStep {
+    let Some(payload) = line.trim_end_matches(['\r', '\n']).strip_prefix("data: ") else {
+        return SseStep::Ignore;
+    };
+    if payload.trim() == "[DONE]" {
+        return SseStep::Done;
+    }
+    match serde_json::from_str::<SseChunk>(payload) {
+        Ok(chunk) => {
+            let SseChunk {
+                choices,
+                usage,
+                timings,
+            } = chunk;
+            if let Some(content) = choices.into_iter().next().and_then(|c| c.delta.content) {
+                if !content.is_empty() {
+                    return SseStep::Chunk(content);
+                }
+            }
+            // null, missing and "" all mean "no new token". A chunk with no text
+            // can still be the tail one: llama-server puts the counts there.
+            if usage.is_none() && timings.is_none() {
+                return SseStep::Ignore;
+            }
+            let mut tail = serde_json::Map::new();
+            if let Some(usage) = usage {
+                tail.insert("usage".to_string(), usage);
+            }
+            if let Some(timings) = timings {
+                tail.insert("timings".to_string(), timings);
+            }
+            SseStep::Usage(serde_json::Value::Object(tail))
+        }
+        Err(_) => SseStep::Ignore,
+    }
+}
+
+enum SseStep {
+    Chunk(String),
+    /// The final chunk's `usage`/`timings` object. Counts only — never text, so
+    /// it must not reach `acc`, `on_partial`, or the cleanup output.
+    Usage(serde_json::Value),
+    Done,
+    Ignore,
+}
+
+/// Token accounting for one request, filled from whichever of `usage` (the
+/// OpenAI-compatible shape) or `timings` (llama.cpp's own) the engine sent.
+/// Counts and durations only: no prompt, transcript, or output is ever stored.
+#[derive(Default)]
+struct TokenUsage {
+    prompt: Option<u64>,
+    cached: Option<u64>,
+    completion: Option<u64>,
+    prompt_ms: Option<f64>,
+    predicted_ms: Option<f64>,
+}
+
+impl TokenUsage {
+    /// Fold one tail object in. The two vocabularies are negotiated rather than
+    /// guessed, because llama.cpp has moved these fields between releases.
+    /// Missing values leave the previous ones alone, so a chunk carrying only
+    /// half the counts cannot blank the half already seen.
+    fn absorb(&mut self, tail: &serde_json::Value) {
+        let usage = tail.get("usage");
+        let timings = tail.get("timings");
+        let prompt = count(usage.and_then(|u| u.get("prompt_tokens")))
+            .or_else(|| count(timings.and_then(|t| t.get("prompt_n"))));
+        let cached = count(
+            usage
+                .and_then(|u| u.get("prompt_tokens_details"))
+                .and_then(|d| d.get("cached_tokens")),
+        )
+        .or_else(|| count(timings.and_then(|t| t.get("cache_n"))));
+        let completion = count(usage.and_then(|u| u.get("completion_tokens")))
+            .or_else(|| count(timings.and_then(|t| t.get("predicted_n"))));
+        if prompt.is_some() {
+            self.prompt = prompt;
+        }
+        if cached.is_some() {
+            self.cached = cached;
+        }
+        if completion.is_some() {
+            self.completion = completion;
+        }
+        if let Some(ms) = timings.and_then(|t| t.get("prompt_ms")).and_then(as_f64) {
+            self.prompt_ms = Some(ms);
+        }
+        if let Some(ms) = timings
+            .and_then(|t| t.get("predicted_ms"))
+            .and_then(as_f64)
+        {
+            self.predicted_ms = Some(ms);
+        }
+    }
+}
+
+fn count(value: Option<&serde_json::Value>) -> Option<u64> {
+    let value = value?;
+    value
+        .as_u64()
+        .or_else(|| value.as_f64().map(|f| f.round() as u64))
+}
+
+fn as_f64(value: &serde_json::Value) -> Option<f64> {
+    value.as_f64()
+}
+
+/// `?` for anything the engine did not report, so a gap is visible instead of
+/// being logged as a misleading zero.
+fn count_text(value: Option<u64>) -> String {
+    match value {
+        Some(n) => n.to_string(),
+        None => "?".to_string(),
+    }
+}
+
+/// A duration a human can read at a glance: the prefill of a warm prompt is
+/// tens of milliseconds, the decode of a sentence is a second or two.
+fn duration_text(value: Option<f64>) -> String {
+    match value {
+        Some(ms) if ms < 1000.0 => format!("{ms:.0} ms"),
+        Some(ms) => format!("{:.2} s", ms / 1000.0),
+        None => "?".to_string(),
+    }
+}
+
+/// Exactly one line per dictation: how many prompt tokens were new, how many
+/// came back out of the KV cache, and what the two phases cost in wall clock.
+fn log_usage(usage: &TokenUsage) {
+    sf_log!(
+        "LLM: usage | prompt {} | cached {} | completion {} | prefill {} | decode {}",
+        count_text(usage.prompt),
+        count_text(usage.cached),
+        count_text(usage.completion),
+        duration_text(usage.prompt_ms),
+        duration_text(usage.predicted_ms)
+    );
+}
+
+#[derive(serde::Deserialize)]
+struct SseChunk {
+    #[serde(default)]
+    choices: Vec<SseChoice>,
+    #[serde(default)]
+    usage: Option<serde_json::Value>,
+    #[serde(default)]
+    timings: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct SseChoice {
+    #[serde(default)]
+    delta: SseDelta,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct SseDelta {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// The whole SSE body as deltas plus whether `[DONE]` was seen. Tests only —
+/// the live path folds `sse_step` line by line so it can paste as it reads.
+#[cfg(test)]
+fn parse_sse(body: &str) -> (Vec<String>, bool) {
+    let mut chunks = Vec::new();
+    let mut done = false;
+    // split_inclusive keeps the line terminator, exactly like BufRead::read_line.
+    for line in body.split_inclusive('\n') {
+        match sse_step(line) {
+            SseStep::Chunk(chunk) => chunks.push(chunk),
+            SseStep::Done => {
+                done = true;
+                break;
+            }
+            // The tail chunk's counts are diagnostics, not text.
+            SseStep::Usage(_) => {}
+            SseStep::Ignore => {}
+        }
+    }
+    (chunks, done)
 }
 
 /// Poll `/health` until the model is loaded, the child dies, or we run out of
@@ -351,8 +884,8 @@ fn server_path() -> Result<PathBuf, String> {
 
 /// OpenAI-compatible body. `cache_prompt` keeps the system prompt resident
 /// across dictations, which is most of the cost of a short cleanup.
-fn build_body(system: String, user: String) -> serde_json::Value {
-    serde_json::json!({
+fn build_body(system: String, user: String, stream: bool) -> serde_json::Value {
+    let mut body = serde_json::json!({
         "model": "local",
         "messages": [
             { "role": "system", "content": system },
@@ -360,13 +893,20 @@ fn build_body(system: String, user: String) -> serde_json::Value {
         ],
         "temperature": 0,
         "max_tokens": 4096,
-        "stream": false,
+        "stream": stream,
         "cache_prompt": true,
         // Qwen3.5 defaults to a reasoning pass. Left on, a 30-word dictation
         // ran past 1200 tokens at ~6 tok/s and never stopped. Cleanup wants the
         // answer, not the deliberation.
         "chat_template_kwargs": { "enable_thinking": false }
-    })
+    });
+    if stream {
+        // Diagnostics only: makes llama-server emit a final SSE chunk carrying
+        // token counts, so we can see how much of the prompt the KV cache saved.
+        // Counts, never content. Meaningless without a stream, hence the guard.
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
+    }
+    body
 }
 
 /// `choices[0].message.content`, or an error. An empty `choices` and a null
@@ -529,9 +1069,9 @@ mod tests {
 
     #[test]
     fn request_body_is_deterministic_offline_and_unauthenticated() {
-        let body = build_body("sys".to_string(), "user".to_string());
+        let body = build_body("sys".to_string(), "user".to_string(), true);
         assert_eq!(body["temperature"], 0);
-        assert_eq!(body["stream"], false);
+        assert_eq!(body["stream"], true);
         assert_eq!(body["cache_prompt"], true);
         assert_eq!(body["max_tokens"], 4096);
         assert_eq!(body["model"], "local");
@@ -549,6 +1089,238 @@ mod tests {
                 "body must not mention {forbidden}: {json}"
             );
         }
+    }
+
+    #[test]
+    fn the_one_shot_path_is_the_only_body_with_stream_false() {
+        // Same builder, so a change to one cannot drift from the other.
+        assert_eq!(
+            build_body("sys".into(), "user".into(), false)["stream"],
+            false
+        );
+        assert_eq!(build_body("sys".into(), "user".into(), true)["stream"], true);
+    }
+
+    #[test]
+    fn the_prime_body_shares_the_real_prompt_and_generates_nothing() {
+        let config = Config {
+            dictionary: vec!["SmoothFlow".into()],
+            ..Config::default()
+        };
+        let body = prime_body(&config, WindowCategory::Default);
+        // Byte-identical prompt construction to a real cleanup, or the KV cache
+        // never hits. Dictionary included — that changes the prompt suffix.
+        assert_eq!(
+            body["messages"][0]["content"],
+            system_prompt_offline(&config, WindowCategory::Default)
+        );
+        assert_eq!(body["messages"][1]["content"], user_message("", ""));
+        // Prefill only: a token of generation and nothing to parse.
+        assert_eq!(body["max_tokens"], 1);
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["temperature"], 0);
+        assert_eq!(body["cache_prompt"], true);
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+    }
+
+    #[test]
+    fn the_prime_body_covers_every_category_and_each_label_is_distinct() {
+        // Each category primes its own tail, and the labels are what the
+        // one-prime-per-server guard compares — a duplicate would silently skip a
+        // category's prefill.
+        let mut labels = Vec::new();
+        for category in [
+            WindowCategory::Default,
+            WindowCategory::Email,
+            WindowCategory::Code,
+            WindowCategory::Chat,
+            WindowCategory::Browser,
+            WindowCategory::Document,
+        ] {
+            let label = category_label(category);
+            assert!(!labels.contains(&label), "duplicate label {label}");
+            labels.push(label);
+        }
+        assert_eq!(labels.len(), 6);
+        // The label the prime is filed under is the category the real request
+        // will ask for, so it has to come from `categorize_window` itself.
+        assert_eq!(category_label(categorize_window("")), "default");
+        assert_eq!(category_label(categorize_window("Inbox - Gmail")), "email");
+        assert_eq!(
+            category_label(categorize_window("main.rs - Visual Studio Code")),
+            "code"
+        );
+        assert_eq!(category_label(categorize_window("Slack | general")), "chat");
+        assert_eq!(category_label(categorize_window("GitHub - Chrome")), "code");
+        assert_eq!(
+            category_label(categorize_window("notes.md - Obsidian")),
+            "document"
+        );
+
+        let config = Config::default();
+        let default_prompt = prime_body(&config, WindowCategory::Default)["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let email_prompt = prime_body(&config, WindowCategory::Email)["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(
+            default_prompt, email_prompt,
+            "the tail has to differ, or priming per category is pointless"
+        );
+    }
+
+    fn sse_body(chunks: &[&str], tail: &str) -> String {
+        let mut body = String::new();
+        for chunk in chunks {
+            body.push_str("data: ");
+            body.push_str(chunk);
+            body.push_str("\n\n");
+        }
+        body.push_str(tail);
+        body
+    }
+
+    #[test]
+    fn sse_reads_deltas_in_order_and_stops_at_done() {
+        let body = sse_body(
+            &[
+                r#"{"choices":[{"delta":{"role":"assistant"},"index":0}]}"#,
+                r#"{"choices":[{"delta":{"content":"Hello"},"index":0}]}"#,
+                r#"{"choices":[{"delta":{"content":", world"},"index":0}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"total_tokens":9}}"#,
+            ],
+            "data: [DONE]\n\n",
+        );
+        let (chunks, done) = parse_sse(&body);
+        assert_eq!(chunks, vec!["Hello", ", world"]);
+        assert!(done);
+    }
+
+    #[test]
+    fn sse_treats_null_missing_and_empty_content_as_no_new_token() {
+        let body = sse_body(
+            &[
+                r#"{"choices":[{"delta":{"content":null},"index":0}]}"#,
+                r#"{"choices":[{"delta":{},"index":0}]}"#,
+                r#"{"choices":[{"delta":{"content":""},"index":0}]}"#,
+                r#"{"choices":[]}"#,
+                r#"{"choices":[{"delta":{"content":"ok"}}]}"#,
+            ],
+            "data: [DONE]\n\n",
+        );
+        let (chunks, done) = parse_sse(&body);
+        assert_eq!(chunks, vec!["ok"]);
+        assert!(done);
+    }
+
+    #[test]
+    fn sse_skips_blank_comment_and_non_data_lines() {
+        let body = "event: message\n: ping\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n\n\
+                    id: 42\ndata: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\ndata: [DONE]\n\n";
+        let (chunks, done) = parse_sse(body);
+        assert_eq!(chunks, vec!["a", "b"]);
+        assert!(done);
+    }
+
+    #[test]
+    fn sse_survives_content_containing_newlines_and_braces() {
+        // The wire form of a newline is the two bytes \ and n, so a JSON payload
+        // can never contain a raw 0x0A: BufReader::read_line splits exactly at
+        // frame boundaries and the payload arrives in one piece. This asserts
+        // both halves of that claim — no raw newline inside the data line, and
+        // the escapes decoded into real newlines after parsing.
+        let payload = r#"{"choices":[{"delta":{"content":"Hi Dana,\n\nThanks"}}]}"#;
+        let line = format!("data: {payload}");
+        assert_eq!(line.bytes().filter(|b| *b == b'\n').count(), 0);
+
+        let braces = r#"{"choices":[{"delta":{"content":" {\"quoted\"} [a] 50% <tag>"}}]}"#;
+        let body = sse_body(&[payload, braces], "data: [DONE]\n\n");
+        let (chunks, done) = parse_sse(&body);
+        assert_eq!(chunks, vec!["Hi Dana,\n\nThanks", " {\"quoted\"} [a] 50% <tag>"]);
+        // One frame per source line: nothing was split or glued together.
+        let frames = body.lines().filter(|l| l.starts_with("data: ")).count();
+        assert_eq!(chunks.len(), frames - 1);
+        assert!(done);
+    }
+
+    #[test]
+    fn sse_skips_non_json_data_lines_instead_of_failing() {
+        // llama-server would have to emit something exotic to trigger this, and
+        // losing one token beats throwing away a dictation already on screen.
+        let body = sse_body(
+            &[
+                "not json at all",
+                "",
+                "{unbalanced",
+                r#"{"choices":[{"delta":{"content":"kept"}}]}"#,
+            ],
+            "data: [DONE]\n\n",
+        );
+        let (chunks, done) = parse_sse(&body);
+        assert_eq!(chunks, vec!["kept"]);
+        assert!(done);
+    }
+
+    #[test]
+    fn sse_without_a_done_marker_still_yields_what_arrived() {
+        // Connection dropped right after the last token: no [DONE], no error
+        // from the parser. `request_streaming` decides that this is enough.
+        let (chunks, done) = parse_sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"half a se\"}}]}\n\n",
+        );
+        assert_eq!(chunks, vec!["half a se"]);
+        assert!(!done);
+        assert_eq!(parse_sse("").0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn truncated_stream_errors_before_any_text_and_keeps_it_afterwards() {
+        let (err, kill) = truncated("", "[LLM-002] The local cleanup stream failed.");
+        assert!(err.unwrap_err().starts_with("[LLM-002]"));
+        assert!(kill);
+
+        let (kept, kill) = truncated("half a sen", "[LLM-002] The local cleanup stream failed.");
+        assert_eq!(kept.unwrap(), "half a sen");
+        assert!(kill);
+        // Whitespace-only output is not a sentence the user can use.
+        let (err, _) = truncated("  \n", "[LLM-002] The local cleanup stream failed.");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn sse_reads_the_final_usage_chunk_as_token_counts_only() {
+        // The tail chunk llama-server sends for `stream_options.include_usage`:
+        // no content, both vocabularies present. It must yield counts and never
+        // text, or the counts would end up pasted into the document.
+        let mut usage = TokenUsage::default();
+        let tail = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1103,\"completion_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":1024}},\"timings\":{\"prompt_n\":1103,\"cache_n\":1024,\"predicted_n\":12,\"prompt_ms\":200.0,\"predicted_ms\":1500.0}}\n";
+        match sse_step(tail) {
+            SseStep::Usage(value) => usage.absorb(&value),
+            _ => panic!("a content-free tail chunk must be recognised as usage"),
+        }
+        assert_eq!(count_text(usage.prompt), "1103");
+        assert_eq!(count_text(usage.cached), "1024");
+        assert_eq!(count_text(usage.completion), "12");
+        assert_eq!(duration_text(usage.prompt_ms), "200 ms");
+        assert_eq!(duration_text(usage.predicted_ms), "1.50 s");
+
+        // Older/other builds only ship `timings`. Same three counts, no panic.
+        let timings_only = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"timings\":{\"prompt_n\":900,\"cache_n\":0,\"predicted_n\":7}}\n";
+        match sse_step(timings_only) {
+            SseStep::Usage(value) => usage.absorb(&value),
+            _ => panic!("a timings-only tail chunk must be recognised as usage"),
+        }
+        assert_eq!(count_text(usage.prompt), "900");
+        assert_eq!(count_text(usage.cached), "0");
+        assert_eq!(count_text(usage.completion), "7");
+
+        // Nothing reported at all stays a gap, not a misleading zero.
+        let empty = TokenUsage::default();
+        assert_eq!(count_text(empty.prompt), "?");
+        assert_eq!(duration_text(empty.prompt_ms), "?");
     }
 
     #[test]
@@ -587,6 +1359,23 @@ mod tests {
         shutdown();
         // Still empty — a failed request must not have cached a dead session.
         assert!(SESSION.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn no_server_is_started_after_shutdown_was_requested() {
+        use std::sync::atomic::Ordering;
+        // Pre-existing state, because another test in this binary calls
+        // shutdown() and the flag is process-wide.
+        let was = SHUTTING_DOWN.load(Ordering::Relaxed);
+        SHUTTING_DOWN.store(true, Ordering::Relaxed);
+        // Paths that could never spawn: a live gate must not even reach the
+        // filesystem checks behind it.
+        let err = match spawn(&PathBuf::from("no-server"), &PathBuf::from("no-model")) {
+            Err(err) => err,
+            Ok(_) => panic!("a server was started after shutdown"),
+        };
+        SHUTTING_DOWN.store(was, Ordering::Relaxed);
+        assert!(err.starts_with("[LLM-002]"), "got: {err}");
     }
 
     #[cfg(not(target_os = "windows"))]

@@ -5,6 +5,135 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmoothFlow</title>
     <link rel="stylesheet" href="/styles.css" />
+    <style>
+      /* Click-to-expand "?" help dots (Local models section). Kept global so the
+         same .help-dot / .help-panel markup works anywhere later. */
+      .help-dot {
+        width: 18px;
+        height: 18px;
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 1px solid var(--color-border-muted);
+        border-radius: 50%;
+        background: transparent;
+        color: var(--color-text-secondary);
+        font-family: var(--font-mono);
+        font-size: 11px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .help-dot:hover {
+        border-color: var(--color-accent-hover);
+        color: var(--color-text-primary);
+      }
+      .help-dot[aria-expanded="true"] {
+        border-color: var(--color-accent);
+        color: var(--color-text-primary);
+      }
+      .help-dot:focus-visible {
+        outline: 1px solid var(--color-accent);
+        outline-offset: 2px;
+      }
+      .help-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px 12px;
+        border: 1px solid var(--color-border-muted);
+        border-radius: var(--radius-sm);
+        background: var(--color-surface);
+      }
+      /* A class rule would otherwise beat the UA [hidden] rule. */
+      .help-panel[hidden] {
+        display: none;
+      }
+      .help-panel ul {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin: 0;
+        padding-left: 16px;
+      }
+      .help-panel li {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        line-height: 1.5;
+        color: var(--color-text-secondary);
+      }
+      .help-panel-field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .help-panel-label {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--color-text-primary);
+      }
+      .help-panel-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .section-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .section-title {
+        font-family: var(--font-mono);
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--color-text-primary);
+      }
+      /* The Local models action buttons use classes this stylesheet never
+         styles, so they rendered as grey browser defaults and did not read as
+         clickable. Scoped to this section only. */
+      #offline-models-controls .reset-cancel-btn,
+      #local-models-help .reset-cancel-btn {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        color: var(--color-text-primary);
+        background: var(--color-surface-muted);
+        border: 1px solid var(--color-border-muted);
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+      }
+      #offline-models-controls .reset-cancel-btn:hover,
+      #local-models-help .reset-cancel-btn:hover {
+        background: var(--color-surface);
+        border-color: var(--color-accent-hover);
+      }
+      #offline-models-controls .reset-cancel-btn:disabled,
+      #local-models-help .reset-cancel-btn:disabled {
+        opacity: 0.5;
+        cursor: progress;
+      }
+      #offline-models-controls .save-settings-btn {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        color: var(--color-accent-text);
+        background: var(--color-accent);
+        border: 1px solid var(--color-accent);
+        border-radius: var(--radius-sm);
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+      #offline-models-controls .save-settings-btn:hover {
+        background: var(--color-accent-hover);
+        border-color: var(--color-accent-hover);
+      }
+      #offline-models-controls .save-settings-btn:disabled {
+        opacity: 0.5;
+        cursor: progress;
+      }
+    </style>
   </head>
   <body class="theme-retro">
     <div id="app">
@@ -52,7 +181,7 @@
           </div>
 
           <div class="hero-illustration">
-            <img src="/public/hero-illustration.png" alt="Desk Illustration" class="hero-img" id="hero-img" />
+            <img src="/hero-illustration.png" alt="Desk Illustration" class="hero-img" id="hero-img" />
           </div>
         </section>
 
@@ -179,55 +308,86 @@
               <div id="test-api-status"></div>
             </div>
 
-            <div class="settings-group toggle-group" style="border-top: 1.5px solid #58264b; padding-top: 16px;">
-              <div class="toggle-label-desc">
-                <label for="offline-mode-toggle">Offline Mode / Local Models</label>
-                <span>Use on-device speech recognition and cleanup models</span>
+            <!-- ── 1. Local models: what it is + the master switch ─────── -->
+            <div class="settings-group" style="border-top: 1.5px solid #58264b; padding-top: 16px; gap: 8px;">
+              <div class="section-head">
+                <span class="section-title">Local models</span>
+                <button class="help-dot" type="button" aria-expanded="false" aria-controls="local-models-help" aria-label="How local models work">?</button>
               </div>
-              <label class="switch">
-                <input type="checkbox" id="offline-mode-toggle" />
-                <span class="slider"></span>
-              </label>
+              <span class="settings-hint" style="margin-top: 0;">Choose the models that run on this computer. You download them once and they stay here.</span>
+
+              <div id="local-models-help" class="help-panel" hidden>
+                <ul>
+                  <li>Your voice and your text stay on this computer. Nothing is sent to the internet.</li>
+                  <li>Nothing downloads until you press DOWNLOAD. SmoothFlow never downloads on its own.</li>
+                  <li>Once a model is here it is reused. You never download the same model twice.</li>
+                  <li>If a model is missing or fails, you see an error. SmoothFlow does not quietly use the internet instead.</li>
+                </ul>
+                <div class="help-panel-field">
+                  <label class="help-panel-label" for="models-dir-input">Where models are stored</label>
+                  <div class="help-panel-row">
+                    <input type="text" id="models-dir-input" placeholder="Loading..." />
+                    <button id="browse-models-dir-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">BROWSE</button>
+                    <button id="models-dir-default-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">USE DEFAULT</button>
+                  </div>
+                  <span id="models-dir-hint" class="settings-hint">Loading models folder...</span>
+                  <span class="settings-hint">You can store models on another drive. Change this before downloading if space is tight.</span>
+                </div>
+              </div>
+
+              <div class="settings-group toggle-group" style="border-bottom: none; padding: 4px 0 0;">
+                <div class="toggle-label-desc">
+                  <label for="offline-mode-toggle">Use local models</label>
+                  <span>Speech and text stay on this computer</span>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="offline-mode-toggle" />
+                  <span class="slider"></span>
+                </label>
+              </div>
             </div>
 
             <div id="offline-models-controls" class="settings-group" style="display: none; gap: 12px;">
-              <div class="settings-hint" style="margin-top: 0;">Models download only when you click Download. No automatic downloads or cloud fallback occur in offline mode.</div>
-
+              <!-- ── 2. Speech + optional AI cleanup ───────────────────── -->
               <div class="settings-group">
-                <label for="offline-stt-select">Speech Model</label>
+                <label for="offline-stt-select">Speech model</label>
                 <select id="offline-stt-select" class="settings-select">
                   <option value="v2">Parakeet v2 — English</option>
                   <option value="v3">Parakeet v3 — 25 languages</option>
                 </select>
+                <span class="settings-hint">Turns the sound of your voice into words.</span>
               </div>
 
-              <div class="settings-group">
-                <label for="offline-llm-select">Cleanup Model</label>
+              <div class="settings-group toggle-group">
+                <div class="toggle-label-desc">
+                  <div class="section-head">
+                    <label for="cleanup-enabled-toggle">Optional: AI cleanup</label>
+                    <button class="help-dot" type="button" aria-expanded="false" aria-controls="cleanup-help" aria-label="What AI cleanup does">?</button>
+                  </div>
+                  <span>Off by default. It improves punctuation and phrasing but adds several seconds and RAM.</span>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="cleanup-enabled-toggle" />
+                  <span class="slider"></span>
+                </label>
+              </div>
+
+              <div id="cleanup-help" class="help-panel" hidden>
+                <ul>
+                  <li>On: after your words are written down, a second model tidies the sentence — commas, capital letters, half-finished corrections.</li>
+                  <li>Off: you still get correct words, plus the built-in tidy-up rules. Only the extra rewriting is skipped.</li>
+                  <li>It runs on this computer and needs a bigger download, more memory, and a few extra seconds per dictation.</li>
+                </ul>
+              </div>
+
+              <div id="cleanup-model-rows" class="settings-group" style="display: none;">
+                <label for="offline-llm-select">Cleanup model</label>
                 <select id="offline-llm-select" class="settings-select">
                   <option value="2b">Qwen 2B — lighter devices</option>
                   <option value="4b">Qwen 4B — recommended</option>
                   <option value="9b">Qwen 9B — highest quality</option>
                 </select>
-              </div>
-
-              <div class="settings-group">
-                <label for="custom-llm-path-input">Custom cleanup model (.gguf)</label>
-                <div style="display: flex; gap: 8px; align-items: center;">
-                  <input type="text" id="custom-llm-path-input" placeholder="Leave empty to use the downloaded model" />
-                  <button id="browse-custom-llm-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">BROWSE</button>
-                </div>
-                <span class="settings-hint">Already have a .gguf from Ollama or another provider? Point SmoothFlow at it and skip the download. Leave empty to use the downloaded model.</span>
-                <span id="custom-llm-bypass-note" class="settings-hint" style="display: none; color: #f4d1ba;">A custom .gguf is set — it overrides the Cleanup Model dropdown above and no Qwen download is needed.</span>
-              </div>
-
-              <div class="settings-group">
-                <label for="models-dir-input">Models folder</label>
-                <div style="display: flex; gap: 8px; align-items: center;">
-                  <input type="text" id="models-dir-input" placeholder="Loading..." />
-                  <button id="browse-models-dir-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">BROWSE</button>
-                  <button id="models-dir-default-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">USE DEFAULT</button>
-                </div>
-                <span id="models-dir-hint" class="settings-hint">Loading models folder...</span>
+                <span class="settings-hint">Bigger models read more naturally but need more memory.</span>
               </div>
 
               <div style="display: flex; gap: 10px; align-items: center;">
@@ -241,6 +401,43 @@
                   <button id="refresh-models-btn" class="reset-cancel-btn" type="button" style="padding: 8px 12px; white-space: nowrap;">REFRESH</button>
                 </div>
                 <ul id="offline-model-files" aria-live="polite" style="max-height: 180px; overflow-y: auto; margin: 0; padding-left: 18px; font-family: var(--font-mono); font-size: 11px; color: #cdafa0;"></ul>
+              </div>
+
+              <!-- ── 3. Choose your own models ────────────────────────── -->
+              <div class="settings-group" style="gap: 10px; border-top: 1.5px solid #58264b; padding-top: 12px;">
+                <div class="section-head">
+                  <span class="section-title">Choose your own models</span>
+                  <button class="help-dot" type="button" aria-expanded="false" aria-controls="custom-models-help" aria-label="How choosing your own models works">?</button>
+                </div>
+
+                <div id="custom-models-help" class="help-panel" hidden>
+                  <ul>
+                    <li>Any .gguf file works, including one you already downloaded with Ollama, LM Studio or Jan.</li>
+                    <li>Nothing is copied and nothing is downloaded. SmoothFlow uses the file where it already sits on your computer.</li>
+                    <li>Leave a box empty to use the model you downloaded above.</li>
+                  </ul>
+                </div>
+
+                <div class="settings-group">
+                  <label for="custom-stt-dir-input">Speech model folder</label>
+                  <div style="display: flex; gap: 8px; align-items: center;">
+                    <input type="text" id="custom-stt-dir-input" placeholder="Leave empty to use the downloaded speech model" />
+                    <button id="browse-custom-stt-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">BROWSE</button>
+                  </div>
+                  <span id="custom-stt-status" class="settings-hint">Leave empty to use the speech model you downloaded.</span>
+                </div>
+
+                <div class="settings-group">
+                  <label for="custom-llm-path-input">Cleanup model (.gguf)</label>
+                  <div style="display: flex; gap: 8px; align-items: center;">
+                    <input type="text" id="custom-llm-path-input" placeholder="Leave empty to use the downloaded model" />
+                    <button id="browse-custom-llm-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">BROWSE</button>
+                    <button id="find-local-models-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">FIND MODELS</button>
+                  </div>
+                  <ul id="local-models-list" aria-live="polite" style="display: none; list-style: none; margin: 0; padding: 0; max-height: 200px; overflow-y: auto; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px;"></ul>
+                  <span id="local-models-empty" class="settings-hint" style="display: none;">No local models found. Install one with Ollama, LM Studio, Jan or GPT4All, or browse for a .gguf file.</span>
+                  <span id="custom-llm-bypass-note" class="settings-hint" style="display: none; color: #f4d1ba;">A custom .gguf file is set, so it is used instead of the cleanup model above. No Qwen download is needed.</span>
+                </div>
               </div>
             </div>
 
