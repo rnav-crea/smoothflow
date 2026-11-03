@@ -30,6 +30,11 @@ src-tauri/gen/
 src-tauri/test_data/
 src-tauri/src/bin/
 
+# benchmark corpus (regenerate with: python bench/bench.py fetch)
+bench/data/
+bench/results/
+__pycache__/
+
 # internal doc not meant for public repo
 NOTICE
 
