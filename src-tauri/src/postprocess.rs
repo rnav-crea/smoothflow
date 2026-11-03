@@ -286,7 +286,7 @@ pub fn postprocess(text: &str, config: &Config) -> String {
     postprocess_with_context(text, config, "")
 }
 
-pub(crate) fn postprocess_with_context(text: &str, config: &Config, context: &str) -> String {
+pub fn postprocess_with_context(text: &str, config: &Config, context: &str) -> String {
     let pre = match prepare(text, config) {
         Prepared::Done(out) => return out,
         Prepared::Llm { pre } => pre,

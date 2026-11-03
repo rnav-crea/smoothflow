@@ -80,6 +80,12 @@ pub struct Config {
     pub launch_on_startup: bool,
     pub dictionary: Vec<String>,
     pub hotkey: String,
+    /// How the hotkey behaves: `"hold"` = press to start, release to stop
+    /// (push-to-talk, today's behaviour). `"toggle"` = press once to start,
+    /// press again to stop. Anything else normalises to `"hold"` — the
+    /// behaviour every user has today.
+    #[serde(default = "default_hotkey_mode")]
+    pub hotkey_mode: String,
     pub overlay_position: String,
     /// Legacy single switch, kept only for backward compatibility and
     /// migration of old `smoothflow.json` files. It is serialized as-is but
@@ -195,6 +201,20 @@ fn default_hotkey() -> &'static str {
     "Ctrl+Space"
 }
 
+fn default_hotkey_mode() -> String {
+    "hold".into()
+}
+
+/// Normalise a `hotkey_mode` value. Unknown values fall back to `"hold"`,
+/// which is the behaviour the app shipped with — never switching an existing
+/// user's hotkey style silently.
+pub fn normalize_hotkey_mode(mode: &str) -> String {
+    match mode {
+        "toggle" => "toggle".to_string(),
+        _ => "hold".to_string(),
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -209,6 +229,7 @@ impl Default for Config {
             launch_on_startup: false,
             dictionary: Vec::new(),
             hotkey: default_hotkey().into(),
+            hotkey_mode: default_hotkey_mode(),
             overlay_position: "bottom".into(),
             offline_mode: false,
             stt_local: false,
@@ -272,6 +293,7 @@ impl Config {
     /// produce a fourth value.
     pub fn normalize(&mut self) {
         self.cleanup_engine = normalize_cleanup_engine(&self.cleanup_engine);
+        self.hotkey_mode = normalize_hotkey_mode(&self.hotkey_mode);
     }
 
     pub fn save(&self) {
@@ -331,6 +353,7 @@ mod tests {
             launch_on_startup: true,
             dictionary: vec!["foo".into(), "bar".into()],
             hotkey: "Alt+Shift+T".into(),
+            hotkey_mode: "toggle".into(),
             overlay_position: "top".into(),
             offline_mode: true,
             stt_local: true,
@@ -351,6 +374,7 @@ mod tests {
         assert!(!back.auto_punctuation);
         assert_eq!(back.dictionary, vec!["foo", "bar"]);
         assert_eq!(back.hotkey, "Alt+Shift+T");
+        assert_eq!(back.hotkey_mode, "toggle");
         assert_eq!(back.overlay_position, "top");
         assert!(back.offline_mode);
         assert!(back.stt_local);
@@ -518,6 +542,7 @@ mod tests {
             launch_on_startup: false,
             dictionary: vec!["term".into()],
             hotkey: "Ctrl+Shift+Space".into(),
+            hotkey_mode: "hold".into(),
             overlay_position: "bottom".into(),
             offline_mode: true,
             stt_local: false,

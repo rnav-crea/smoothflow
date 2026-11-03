@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -74,7 +74,6 @@ if (copyTranscriptBtn && transcriptEl) {
 
 const settingsToggle = document.getElementById("settings-toggle");
 const settingsClose = document.getElementById("settings-close");
-const settingsModal = document.getElementById("settings-modal");
 const themeSelect = document.getElementById("theme-select");
 
 const apiUrlInput = document.getElementById("api-url-input");
@@ -88,6 +87,7 @@ const punctuationToggle = document.getElementById("punctuation-toggle");
 const fillersToggle = document.getElementById("fillers-toggle");
 const autopasteToggle = document.getElementById("autopaste-toggle");
 const startupToggle = document.getElementById("startup-toggle");
+const keepClipsToggle = document.getElementById("keep-clips-toggle");
 const hotkeyInput = document.getElementById("hotkey-input");
 const settingsStatus = document.getElementById("settings-status");
 const offlineModeToggle = document.getElementById("offline-mode-toggle");
@@ -181,30 +181,75 @@ if (themeSelect) {
   });
 }
 
-// Settings modal & Header Nav
+// ── Settings shell ───────────────────────────────────────────────────
+// The main window is a shell: a sidebar of sections plus one scrollable
+// column. Switching is client-side only and the last section is restored on
+// load. `#settings-toggle` (header) jumps to General, `#settings-close`
+// (sidebar) goes back to the section that was open before.
+const SECTION_STORAGE_KEY = "smoothflow:section";
+const DEFAULT_SECTION = "general";
+const sectionButtons = Array.from(document.querySelectorAll(".sidebar-item"));
+const sectionIds = sectionButtons.map((btn) => btn.dataset.section).filter(Boolean);
+
+let currentSection = DEFAULT_SECTION;
+let previousSection = DEFAULT_SECTION;
+
+function showSection(name) {
+  const target = sectionIds.includes(name) ? name : DEFAULT_SECTION;
+  for (const id of sectionIds) {
+    const section = document.getElementById(`section-${id}`);
+    if (section) section.hidden = id !== target;
+  }
+  for (const btn of sectionButtons) {
+    const active = btn.dataset.section === target;
+    btn.classList.toggle("active", active);
+    if (active) btn.setAttribute("aria-current", "page");
+    else btn.removeAttribute("aria-current");
+  }
+  const content = document.querySelector(".settings-content");
+  if (content) content.scrollTop = 0;
+  // History rows fold from real layout, and the initial load happens while this
+  // section is still hidden (clientHeight 0), so folds can only be measured
+  // once it is actually visible. `measureHistoryFolds` is a hoisted declaration.
+  if (target === "history") measureHistoryFolds();
+  return target;
+}
+
+function setSection(name) {
+  const target = showSection(name);
+  if (target !== currentSection) previousSection = currentSection;
+  currentSection = target;
+  try {
+    localStorage.setItem(SECTION_STORAGE_KEY, target);
+  } catch (err) {
+    // Storage blocked: the section simply does not survive a restart.
+  }
+  return target;
+}
+
+function storedSection() {
+  try {
+    return localStorage.getItem(SECTION_STORAGE_KEY) || DEFAULT_SECTION;
+  } catch (err) {
+    return DEFAULT_SECTION;
+  }
+}
+
+// Shared by the reset modal, which still animates open/closed.
 let isModalClosing = false;
 
 function openSettings() {
-  if (!settingsModal) return;
   if (settingsToggle) settingsToggle.classList.add("active");
-  settingsModal.classList.remove("closing");
-  settingsModal.classList.add("open");
+  if (currentSection !== DEFAULT_SECTION) previousSection = currentSection;
+  setSection(DEFAULT_SECTION);
   loadOfflineModelStatus();
   log("Settings opened");
 }
 
 function closeSettings() {
-  if (!settingsModal || isModalClosing) return;
-
-  isModalClosing = true;
   if (settingsToggle) settingsToggle.classList.remove("active");
-  settingsModal.classList.remove("open");
-  settingsModal.classList.add("closing");
-
-  setTimeout(() => {
-    settingsModal.classList.remove("closing");
-    isModalClosing = false;
-  }, 200);
+  setSection(previousSection || DEFAULT_SECTION);
+  log("Settings closed");
 }
 
 window.openSettings = openSettings;
@@ -212,11 +257,19 @@ window.closeSettings = closeSettings;
 
 if (settingsToggle) settingsToggle.addEventListener("click", openSettings);
 if (settingsClose) settingsClose.addEventListener("click", closeSettings);
-if (settingsModal) {
-  settingsModal.addEventListener("click", (e) => {
-    if (e.target === settingsModal) closeSettings();
+
+for (const btn of sectionButtons) {
+  btn.addEventListener("click", () => {
+    setSection(btn.dataset.section);
+    // Rows measured while the section was hidden cannot report their real
+    // height, so the first page is re-rendered when History comes into view.
+    if (btn.dataset.section === "history") loadHistoryPage({ reset: true });
+    if (settingsToggle) settingsToggle.classList.remove("active");
   });
 }
+
+// Restore the last section the user looked at.
+currentSection = setSection(storedSection());
 
 // Model dropdown handlers - show custom input when "Custom" selected
 function setupModelSelect(selectEl, inputEl) {
@@ -443,7 +496,12 @@ async function loadConfig() {
     fillersToggle.checked = config.remove_fillers;
     autopasteToggle.checked = config.auto_paste;
     startupToggle.checked = config.launch_on_startup;
-    if (offlineModeToggle) offlineModeToggle.checked = !!config.offline_mode;
+    if (keepClipsToggle) keepClipsToggle.checked = !!config.keep_audio_clips;
+    // The leg fields are the real switches; `offline_mode` is the retired
+    // legacy mirror (still written so old configs keep round-tripping).
+    offlineModeToggle.checked = !!config.stt_local;
+    currentConfig.stt_local = !!config.stt_local;
+    currentConfig.offline_mode = !!config.offline_mode;
     if (offlineSttSelect) {
       offlineSttSelect.value = ["v2", "v3"].includes(config.stt_version) ? config.stt_version : "v2";
       currentConfig.stt_version = offlineSttSelect.value;
@@ -462,8 +520,20 @@ async function loadConfig() {
     renderModelsDir();
     updateOfflineModelControls();
     renderCleanupToggle();
-    if (hotkeyInput) hotkeyInput.value = config.hotkey || "Ctrl+Space";
-    log("Config loaded");
+    // The offline model status used to be loaded when SETTINGS was clicked;
+    // the shell is now the whole window and the button is gone, so it loads
+    // with the config instead.
+    loadOfflineModelStatus();
+    // The hotkey lives in a hidden input; the visible control is the
+    // click-to-capture chip in the General section.
+    if (hotkeyInput) {
+      hotkeyInput.value = config.hotkey || "Ctrl+Space";
+      renderHotkeyChip(hotkeyInput.value);
+    }
+    if (hotkeyModeSelect) {
+      hotkeyModeSelect.value = config.hotkey_mode === "toggle" ? "toggle" : "hold";
+      if (hotkeyModeHint) hotkeyModeHint.textContent = describeHotkeyMode(hotkeyModeSelect.value);
+    }
     if (apiKeyInput.value) {
       validateApiKeyAuto();
     }
@@ -484,9 +554,20 @@ async function saveConfig() {
     remove_fillers: fillersToggle.checked,
     auto_paste: autopasteToggle.checked,
     launch_on_startup: startupToggle.checked,
+    keep_audio_clips: !!keepClipsToggle?.checked,
     dictionary: currentConfig.dictionary || [],
     hotkey: hotkeyInput ? hotkeyInput.value : "Ctrl+Space",
+    hotkey_mode: hotkeyModeSelect ? hotkeyModeSelect.value : "hold",
     offline_mode: !!offlineModeToggle?.checked,
+    // `offline_mode` is retired (the Rust side reads `stt_local` /
+    // `cleanup_engine` instead); it is still written so older configs keep
+    // round-tripping. `cleanup_engine` carries the leg the AI-cleanup toggle
+    // drives: local engine when this machine does the cleanup, cloud engine
+    // when cleanup runs through the API provider.
+    stt_local: !!offlineModeToggle?.checked,
+    cleanup_engine: readCleanupModel()
+      ? (offlineModeToggle?.checked ? "local" : "cloud")
+      : "off",
     stt_version: offlineSttSelect ? offlineSttSelect.value : currentConfig.stt_version,
     llm_model_size: offlineLlmSelect ? offlineLlmSelect.value : currentConfig.llm_model_size,
     models_dir: currentConfig.models_dir || "",
@@ -545,6 +626,7 @@ try {
   fillersToggle.addEventListener("change", saveConfig);
   autopasteToggle.addEventListener("change", saveConfig);
   startupToggle.addEventListener("change", saveConfig);
+  if (keepClipsToggle) keepClipsToggle.addEventListener("change", saveConfig);
   if (hotkeyInput) hotkeyInput.addEventListener("change", saveConfig);
 } catch (e) { console.warn("Config bind error:", e); }
 
@@ -564,9 +646,11 @@ function updateOfflineModelControls() {
 }
 
 // ── Optional: AI cleanup ─────────────────────────────────────────────
-// `cleanup_model` is the single switch the Rust side checks: when it is empty
-// `postprocess::prepare` returns the deterministic rules and never calls a
-// model (offline or cloud). So the toggle drives that field, and the value it
+// The Rust side needs BOTH fields for a model to run: `cleanup_engine`
+// ("local" | "cloud" — which machine does the cleanup) and a non-empty
+// `cleanup_model` ("off" engine means no model at all). The toggle writes the
+// `cleanup_model` side and saveConfig derives `cleanup_engine` from it, so the
+// pair always satisfies gate in `postprocess::prepare`. The value the toggle
 // restores lives in localStorage so turning it back on reuses the last choice.
 const CLEANUP_MODEL_STORAGE_KEY = "smoothflow_cleanup_model";
 const DEFAULT_CLEANUP_MODEL = "4b"; // matches the "Qwen 4B" option of #offline-llm-select
@@ -944,9 +1028,170 @@ async function loadOfflineModelStatus(operationError = "") {
   }
 }
 
+// ── Activation shortcut: choose keys, don't type them ────────────────
+// Handy-style recorder. Click the chip, press the combo, done; Escape or
+// clicking away cancels. The hidden #hotkey-input keeps the saved string for
+// saveConfig, which the Rust side re-registers immediately.
+const hotkeyCapture = document.getElementById("hotkey-capture");
+const hotkeyChip = document.getElementById("hotkey-chip");
+const hotkeyReset = document.getElementById("hotkey-reset");
+const hotkeyModeSelect = document.getElementById("hotkey-mode-select");
+const hotkeyModeHint = document.getElementById("hotkey-mode-hint");
+// The glow lives on the field wrapper, so the whole box lights up while
+// the recorder is listening.
+const hotkeyField = hotkeyCapture ? hotkeyCapture.closest(".hotkey-field") : null;
+
+function emitChipCapturing() {
+  if (hotkeyCapture) hotkeyCapture.classList.add("capturing");
+  if (hotkeyField) hotkeyField.classList.add("capturing");
+}
+
+function emitChipDone() {
+  if (hotkeyCapture) hotkeyCapture.classList.remove("capturing");
+  if (hotkeyField) hotkeyField.classList.remove("capturing");
+}
+
+function comboFromEvent(e) {
+  // Canonical order the Rust parser recognises: Ctrl, Alt, Shift, Win, key.
+  const parts = [];
+  if (e.ctrlKey) parts.push("Ctrl");
+  if (e.altKey) parts.push("Alt");
+  if (e.shiftKey) parts.push("Shift");
+  if (e.metaKey) parts.push("Win");
+  return parts;
+}
+
+function plainKeyToken(key) {
+  const named = {
+    " ": "Space",
+    Escape: "Escape",
+    Enter: "Enter",
+    Tab: "Tab",
+    Backspace: "Backspace",
+    Delete: "Delete",
+    Insert: "Insert",
+    Home: "Home",
+    End: "End",
+    PageUp: "PageUp",
+    PageDown: "PageDown",
+    ArrowUp: "ArrowUp",
+    ArrowDown: "ArrowDown",
+    ArrowLeft: "ArrowLeft",
+    ArrowRight: "ArrowRight",
+  };
+  if (key in named) return named[key];
+  if (/^[a-zA-Z0-9]$/.test(key)) return key.toUpperCase();
+  if (key.length === 1) {
+    const punct = {
+      "`": "Backquote", "-": "Minus", "=": "Equal", ";": "Semicolon",
+      "'": "Quote", ",": "Comma", ".": "Period", "/": "Slash",
+      "\\": "Backslash", "[": "BracketLeft", "]": "BracketRight",
+    };
+    if (key in punct) return punct[key];
+  }
+  return "";
+}
+
+// Plain text, not keycap pills: the box just reads "Ctrl + Space".
+function renderHotkeyChip(value) {
+  if (!hotkeyChip) return;
+  const combo = (value || "Ctrl+Space").split("+").filter(Boolean).join(" + ");
+  hotkeyChip.textContent = combo || "Ctrl + Space";
+}
+
+let hotkeyCapturing = false;
+
+function hotkeyCaptureKeydown(e) {
+  if (!hotkeyCapturing) return;
+  e.preventDefault();
+  e.stopPropagation();
+  // Escape with no modifiers cancels, like Handy.
+  if (e.key === "Escape" && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) {
+    endHotkeyCapture(false);
+    return;
+  }
+  const mods = comboFromEvent(e);
+  const plain = hotkeyCapturing ? plainKeyToken(e.key) : "";
+  if (!plain) {
+    // Modifier alone: show a live partial so the user sees progress.
+    if (hotkeyChip) {
+      hotkeyChip.textContent = mods.length ? mods.join(" + ") + " …" : "Press keys…";
+    }
+    return;
+  }
+  const combo = [...mods, plain].join("+");
+  endHotkeyCapture(false);
+  if (hotkeyInput) hotkeyInput.value = combo;
+  renderHotkeyChip(combo);
+  saveConfig();
+}
+
+function endHotkeyCapture(restore = true) {
+  hotkeyCapturing = false;
+  emitChipDone();
+  window.removeEventListener("keydown", hotkeyCaptureKeydown, true);
+  document.removeEventListener("click", hotkeyCancelAway, true);
+  renderHotkeyChip(hotkeyInput ? hotkeyInput.value : "");
+  if (restore) return;
+}
+
+function hotkeyCancelAway(e) {
+  if (hotkeyCapturing && hotkeyCapture && !hotkeyCapture.contains(e.target)) {
+    endHotkeyCapture(false);
+  }
+}
+
+if (hotkeyCapture) {
+  hotkeyCapture.addEventListener("click", () => {
+    hotkeyCapturing = true;
+    emitChipCapturing();
+    if (hotkeyChip) hotkeyChip.textContent = "Press keys…";
+    window.addEventListener("keydown", hotkeyCaptureKeydown, true);
+    document.addEventListener("click", hotkeyCancelAway, true);
+  });
+}
+
+// ── Activation style: choose-only dropdown, description follows it ──
+function describeHotkeyMode(mode) {
+  return mode === "toggle"
+    ? "Press once to start, press again to stop. No holding."
+    : "Hold the shortcut while you speak, release to transcribe.";
+}
+
+if (hotkeyModeSelect) {
+  hotkeyModeSelect.addEventListener("change", () => {
+    if (hotkeyModeHint) hotkeyModeHint.textContent = describeHotkeyMode(hotkeyModeSelect.value);
+    saveConfig();
+  });
+}
+
+// ── Reload: put the default Ctrl+Space back ─────────────────────────
+if (hotkeyReset) {
+  hotkeyReset.addEventListener("click", () => {
+    if (hotkeyCapturing) endHotkeyCapture(false);
+    if (hotkeyInput) hotkeyInput.value = "Ctrl+Space";
+    renderHotkeyChip("Ctrl+Space");
+    saveConfig();
+  });
+}
+
+// ── "!" circle: one delegated listener drops every row's context
+// open, and the same click drops it closed again. ────────────────────
+document.addEventListener("click", (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest(".ctx-toggle") : null;
+  if (!btn) return;
+  const panel = document.getElementById(btn.getAttribute("aria-controls") || "");
+  if (!panel) return;
+  const open = btn.getAttribute("aria-expanded") === "true";
+  btn.setAttribute("aria-expanded", String(!open));
+  btn.setAttribute("aria-label", open ? "Show details" : "Hide details");
+  panel.hidden = open;
+});
+
 function updateOfflineConfig() {
   if (!currentConfig) return;
   currentConfig.offline_mode = !!offlineModeToggle?.checked;
+  currentConfig.stt_local = !!offlineModeToggle?.checked;
   if (offlineSttSelect) currentConfig.stt_version = offlineSttSelect.value;
   if (offlineLlmSelect) currentConfig.llm_model_size = offlineLlmSelect.value;
   updateOfflineModelControls();
@@ -1066,244 +1311,478 @@ function addDictionaryWord() {
 if (dictionaryAddBtn) dictionaryAddBtn.addEventListener("click", addDictionaryWord);
 if (dictionaryInput) dictionaryInput.addEventListener("keydown", (e) => { if (e.key === "Enter") addDictionaryWord(); });
 
-// History & stats
-const statTodayWords = document.getElementById("stat-today-words");
-const statTodayDictations = document.getElementById("stat-today-dictations");
-const statTotalWords = document.getElementById("stat-total-words");
-const statTotalDictations = document.getElementById("stat-total-dictations");
-const recentsList = document.getElementById("recents-list");
-const recentsEmpty = document.getElementById("recents-empty");
-const bulkDeleteBar = document.getElementById("bulk-delete-bar");
-const bulkDeleteCount = document.getElementById("bulk-delete-count");
-const bulkDeleteBtn = document.getElementById("bulk-delete-btn");
+// ── History list ────────────────────────────────────────────────────
+// Handy-style reverse-chronological rows, paged 30 at a time out of SQLite.
+// Every piece of dictation text lands via textContent — never innerHTML — so a
+// transcript can never inject markup. Stats are derived from these rows on the
+// Rust side, so the UI has no counters of its own.
+const HISTORY_PAGE_SIZE = 30;
+const historyList = document.getElementById("history-list");
+const historyEmpty = document.getElementById("history-empty");
+const historyLoadingEl = document.getElementById("history-loading");
+const historySentinel = document.getElementById("history-sentinel");
+const transcribeFileBtn = document.getElementById("transcribe-file-btn");
+const transcribeFileStatus = document.getElementById("transcribe-file-status");
 
-// Track checked indexes
-let checkedIndexes = new Set();
+// Static icon markup only — no user data ever goes through innerHTML.
+const ICON_COPY = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10"></path></svg>`;
+const ICON_CHECK = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>`;
+const ICON_STAR = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 17.8 6.2 20.9l1.1-6.5L2.6 9.8l6.5-.9Z"></path></svg>`;
+const ICON_TRASH = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path></svg>`;
+const ICON_PLAY = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="7 4 20 12 7 20 7 4"></polygon></svg>`;
+const ICON_PAUSE = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1"></rect><rect x="14" y="4" width="4" height="16" rx="1"></rect></svg>`;
+const ICON_REDICTATE = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"></path><path d="M21 3v6h-6"></path></svg>`;
 
-function updateBulkBar() {
-  const count = checkedIndexes.size;
-  if (count > 0) {
-    bulkDeleteBar.classList.add("visible");
-    bulkDeleteCount.textContent = `${count} selected`;
-  } else {
-    bulkDeleteBar.classList.remove("visible");
+// Only one clip plays at a time: starting a row stops whatever was playing.
+// `{ audio, btn }` for the active row, or null.
+let currentClipAudio = null;
+
+function stopCurrentClip() {
+  if (!currentClipAudio) return;
+  currentClipAudio.audio.pause();
+  currentClipAudio.btn.innerHTML = ICON_PLAY;
+  currentClipAudio.btn.setAttribute("aria-label", "Play recording");
+  currentClipAudio.btn.title = "Play recording";
+  currentClipAudio = null;
+}
+
+let historyEntries = [];
+let historyHasMore = false;
+let historyLoading = false;
+let historyCursor = null;
+
+function formatHistoryDate(timestampSeconds) {
+  const date = new Date((timestampSeconds || 0) * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  const day = date.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
+  const time = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return `${day} - ${time}`;
+}
+
+function updateHistoryEmptyState() {
+  if (!historyEmpty) return;
+  historyEmpty.style.display = historyEntries.length === 0 ? "flex" : "none";
+}
+
+function historyIconButton(act, label, icon) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "history-icon-btn";
+  btn.dataset.act = act;
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  btn.innerHTML = icon;
+  return btn;
+}
+
+function setStarSaved(btn, saved) {
+  btn.classList.toggle("is-saved", saved);
+  const svg = btn.querySelector("svg");
+  if (svg) svg.setAttribute("fill", saved ? "currentColor" : "none");
+}
+
+// The fold is pure CSS (-webkit-line-clamp). Only measure once the row is
+// actually laid out — inside a hidden section clientHeight is 0 and every row
+// would look truncated.
+function measureHistoryRow(row) {
+  const text = row.querySelector(".history-text");
+  const more = row.querySelector(".history-more");
+  if (!text || !more) return;
+  if (text.clientHeight === 0) return;            // section hidden — measure later
+  if (!text.classList.contains("is-folded")) return; // expanded: height tells us nothing
+  more.hidden = text.scrollHeight <= text.clientHeight + 1;
+}
+
+function measureHistoryFolds() {
+  if (!historyList) return;
+  for (const row of historyList.querySelectorAll(".history-row")) measureHistoryRow(row);
+}
+
+// A row's text changed in place (a re-dictation from its saved clip). Rebuild
+// the element rather than patching pieces: the text, the fold measurement and
+// the word count all move together.
+function replaceHistoryRow(entry) {
+  const index = historyEntries.findIndex((e) => e.id === entry.id);
+  if (index !== -1) historyEntries[index] = entry;
+  if (!historyList) return;
+  const existing = historyList.querySelector(`.history-row[data-id="${entry.id}"]`);
+  if (!existing) return;
+  // The row is about to be swapped out: an <audio> owned by the old element
+  // would keep playing from a detached button, so stop it first.
+  if (currentClipAudio && existing.contains(currentClipAudio.btn)) stopCurrentClip();
+  const row = buildHistoryRow(entry);
+  existing.replaceWith(row);
+  measureHistoryRow(row);
+}
+
+function buildHistoryRow(entry) {
+  const text = entry.post_processed_text ?? entry.transcription_text ?? "";
+
+  // A failed dictation is the only row written with an empty transcript: Rust
+  // keeps the WAV and stores the row with no text but a non-null audio_file so
+  // the clip can be retried. A successful dictation never yields an empty
+  // transcript, and a failure with clips disabled writes no row at all — so an
+  // empty text plus a clip is unambiguously a failure.
+  const failed = !text && Boolean(entry.audio_file);
+
+  const li = document.createElement("li");
+  li.className = "history-row";
+  li.dataset.id = String(entry.id);
+
+  const head = document.createElement("div");
+  head.className = "history-row-head";
+
+  const date = document.createElement("span");
+  date.className = "history-date";
+  date.textContent = formatHistoryDate(entry.timestamp);
+  head.appendChild(date);
+
+  if (entry.source_name) {
+    const source = document.createElement("span");
+    source.className = "history-source";
+    source.textContent = entry.source_name;
+    head.appendChild(source);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "history-row-actions";
+
+  // Nothing to copy on a failed row — the clipboard would get an empty string.
+  const copyBtn = failed ? null : historyIconButton("copy", "Copy", ICON_COPY);
+  const starBtn = historyIconButton("star", "Save", ICON_STAR);
+  const deleteBtn = historyIconButton("delete", "Delete", ICON_TRASH);
+  setStarSaved(starBtn, Boolean(entry.saved));
+
+  // Playback and re-dictation both need the saved clip. Clips are opt-in, so a
+  // row dictated with the setting off has no audio and shows neither control.
+  let playBtn = null;
+  let redictateBtn = null;
+  let audioEl = null;
+
+  const errorEl = document.createElement("p");
+  errorEl.className = "history-row-error";
+  errorEl.hidden = true;
+  function showRowError(message) {
+    errorEl.textContent = message;
+    errorEl.hidden = false;
+  }
+
+  if (entry.audio_file) {
+    playBtn = historyIconButton("play", "Play recording", ICON_PLAY);
+    playBtn.addEventListener("click", async () => {
+      // Resolve the asset URL lazily: most rows are never played, and this
+      // keeps one invoke per row instead of one per page.
+      if (!audioEl) {
+        try {
+          const abs = await invoke("get_audio_file_path", { fileName: entry.audio_file });
+          audioEl = new Audio(convertFileSrc(abs));
+          audioEl.addEventListener("ended", () => {
+            if (currentClipAudio && currentClipAudio.audio === audioEl) stopCurrentClip();
+          });
+          audioEl.addEventListener("error", () => {
+            if (currentClipAudio && currentClipAudio.audio === audioEl) stopCurrentClip();
+            showRowError("This recording could not be played.");
+          });
+        } catch (err) {
+          console.error("get_audio_file_path failed:", err);
+          showRowError(String(err));
+          return;
+        }
+      }
+      // Second click is a pause; a different row being active is handled by
+      // stopCurrentClip() below.
+      if (!audioEl.paused) {
+        stopCurrentClip();
+        return;
+      }
+      stopCurrentClip();
+      errorEl.hidden = true;
+      currentClipAudio = { audio: audioEl, btn: playBtn };
+      playBtn.innerHTML = ICON_PAUSE;
+      playBtn.title = "Pause recording";
+      playBtn.setAttribute("aria-label", "Pause recording");
+      try {
+        await audioEl.play();
+      } catch (err) {
+        console.error("clip playback failed:", err);
+        stopCurrentClip();
+        showRowError("This recording could not be played.");
+      }
+    });
+
+    redictateBtn = historyIconButton(
+      "redictate",
+      // On a failed row this is the primary action, so name it for what it does.
+      failed ? "Retry transcription" : "Re-dictate from the saved recording",
+      ICON_REDICTATE
+    );
+    redictateBtn.addEventListener("click", async () => {
+      if (redictateBtn.disabled) return;
+      redictateBtn.disabled = true;
+      redictateBtn.classList.add("is-busy");
+      errorEl.hidden = true;
+      try {
+        // The row itself is rebuilt by the `history-updated` listener when
+        // Rust reports the refreshed entry — nothing to patch here.
+        await invoke("redictate_from_clip", { id: entry.id });
+      } catch (err) {
+        console.error("redictate_from_clip failed:", err);
+        showRowError(String(err));
+      } finally {
+        redictateBtn.disabled = false;
+        redictateBtn.classList.remove("is-busy");
+      }
+    });
+  }
+
+  if (copyBtn) {
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        copyBtn.innerHTML = ICON_CHECK;
+        copyBtn.classList.add("is-copied");
+        setTimeout(() => {
+          copyBtn.innerHTML = ICON_COPY;
+          copyBtn.classList.remove("is-copied");
+        }, 2000);
+      } catch (err) {
+        console.error("copy failed:", err);
+      }
+    });
+  }
+
+  // Optimistic: flip the star now, revert if the write fails.
+  starBtn.addEventListener("click", async () => {
+    const next = !starBtn.classList.contains("is-saved");
+    setStarSaved(starBtn, next);
+    try {
+      await invoke("toggle_history_saved", { id: entry.id });
+      entry.saved = next;
+    } catch (err) {
+      console.error("toggle_history_saved failed:", err);
+      setStarSaved(starBtn, !next);
+    }
+  });
+
+  // Optimistic: drop the row now, reload page one if the delete fails.
+  deleteBtn.addEventListener("click", async () => {
+    if (currentClipAudio && li.contains(currentClipAudio.btn)) stopCurrentClip();
+    li.remove();
+    historyEntries = historyEntries.filter((e) => e.id !== entry.id);
+    updateHistoryEmptyState();
+    try {
+      await invoke("delete_history_entry", { id: entry.id });
+    } catch (err) {
+      console.error("delete_history_entry failed:", err);
+      await loadHistoryPage({ reset: true });
+    }
+  });
+
+  if (playBtn) actions.appendChild(playBtn);
+  if (copyBtn) actions.appendChild(copyBtn);
+  actions.appendChild(starBtn);
+  if (redictateBtn) actions.appendChild(redictateBtn);
+  actions.appendChild(deleteBtn);
+  head.appendChild(actions);
+
+  const body = document.createElement("p");
+  // No fold on a failed row: the status line is one short sentence, and there
+  // is no transcript to clamp.
+  body.className = failed ? "history-text history-text-failed" : "history-text is-folded";
+  body.textContent = failed
+    ? "Transcription failed — press ↻ to retry from the saved recording"
+    : text;
+
+  let moreBtn = null;
+  if (!failed) {
+    moreBtn = document.createElement("button");
+    moreBtn.type = "button";
+    moreBtn.className = "history-more";
+    moreBtn.textContent = "Show more";
+    moreBtn.hidden = true;
+    moreBtn.addEventListener("click", () => {
+      const folded = body.classList.toggle("is-folded");
+      moreBtn.textContent = folded ? "Show more" : "Show less";
+    });
+  }
+
+  li.appendChild(head);
+  li.appendChild(body);
+  // No toggle on a failed row — measureHistoryRow() already bails when either
+  // element is missing, so it needs no extra guard.
+  if (moreBtn) li.appendChild(moreBtn);
+  li.appendChild(errorEl);
+  return li;
+}
+
+// Infinite scroll: the sentinel is observed only while a next page exists and
+// no load is in flight, so a single intersection cannot queue two pages.
+const historyObserver = new IntersectionObserver((entries) => {
+  for (const item of entries) {
+    if (item.isIntersecting && historyHasMore && !historyLoading) {
+      loadHistoryPage({ reset: false });
+      return;
+    }
+  }
+}, { root: null, threshold: 0 });
+
+function resetHistoryView() {
+  historyEntries = [];
+  historyHasMore = false;
+  historyCursor = null;
+  if (historyList) historyList.replaceChildren();
+  if (historyObserver) historyObserver.unobserve(historySentinel);
+  updateHistoryEmptyState();
+}
+
+async function loadHistoryPage({ reset = false } = {}) {
+  if (!historyList) return;
+  if (historyLoading) return;
+  if (!reset && !historyHasMore) return;
+
+  historyLoading = true;
+  historyObserver.unobserve(historySentinel);
+  if (reset) historyLoadingEl.style.display = "block";
+
+  try {
+    const page = await invoke("get_history", {
+      cursor: reset ? null : historyCursor,
+      limit: HISTORY_PAGE_SIZE,
+    });
+    const entries = Array.isArray(page && page.entries) ? page.entries : [];
+
+    if (reset) {
+      historyEntries = [];
+      historyList.replaceChildren();
+    }
+
+    const seen = new Set(historyEntries.map((e) => e.id));
+    for (const entry of entries) {
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      historyEntries.push(entry);
+      historyList.appendChild(buildHistoryRow(entry));
+    }
+
+    // An empty page means the cursor cannot advance — stop paging instead of
+    // hammering the same query.
+    historyHasMore = Boolean(page && page.has_more) && entries.length > 0;
+    historyCursor = historyEntries.length ? historyEntries[historyEntries.length - 1].id : null;
+
+    updateHistoryEmptyState();
+    measureHistoryFolds();
+  } catch (err) {
+    console.error("get_history failed:", err);
+  } finally {
+    historyLoading = false;
+    if (historyLoadingEl) historyLoadingEl.style.display = "none";
+    if (historyHasMore) historyObserver.observe(historySentinel);
   }
 }
 
-if (bulkDeleteBtn) {
-  bulkDeleteBtn.addEventListener("click", async () => {
-    // Delete highest indexes first to avoid index shifting
-    const sorted = [...checkedIndexes].sort((a, b) => b - a);
-    for (const idx of sorted) {
-      try { await invoke("delete_history_entry", { index: idx }); }
-      catch (err) { console.error("bulk delete failed for index", idx, err); }
-    }
-    checkedIndexes.clear();
-    updateBulkBar();
-    loadHistory();
-  });
-}
-
-const popover = document.createElement("div");
-popover.className = "recent-popover";
-popover.style.display = "none";
-document.body.appendChild(popover);
-
-function closePopover() { popover.style.display = "none"; }
-
-document.addEventListener("click", (e) => {
-  if (!popover.contains(e.target)) closePopover();
+// Folding is measured from real layout, so re-measure when the window reflows.
+let historyResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(historyResizeTimer);
+  historyResizeTimer = setTimeout(measureHistoryFolds, 150);
 });
 
-function showPopover(anchor, entry) {
-  popover.innerHTML = "";
+loadHistoryPage({ reset: true });
 
-  // ── Copy ──────────────────────────────────────────
-  const copyBtn = document.createElement("button");
-  copyBtn.className = "popover-btn";
-  copyBtn.innerHTML = `Copy`;
-  copyBtn.addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText(entry.text); }
-    catch (err) { console.error("copy failed:", err); }
-    closePopover();
-  });
-
-  // ── Re-inject ─────────────────────────────────────
-  const reinjectBtn = document.createElement("button");
-  reinjectBtn.className = "popover-btn";
-  reinjectBtn.innerHTML = `Re-inject`;
-  reinjectBtn.addEventListener("click", async () => {
-    try { await invoke("inject_text", { text: entry.text }); }
-    catch (err) { console.error("re-inject failed:", err); }
-    closePopover();
-  });
-
-  // ── Delete ────────────────────────────────────────
-  const deleteBtn = document.createElement("button");
-  deleteBtn.className = "popover-btn popover-btn-danger";
-  deleteBtn.innerHTML = `Delete`;
-  deleteBtn.addEventListener("click", async () => {
-    try { await invoke("delete_history_entry", { index: entry.index }); }
-    catch (err) { console.error("delete failed:", err); }
-    closePopover();
-    loadHistory();
-  });
-
-  popover.appendChild(copyBtn);
-  popover.appendChild(reinjectBtn);
-  popover.appendChild(deleteBtn);
-
-  // ── Smart positioning ─────────────────────────────
-  // 1. Paint invisibly so we can measure real dimensions
-  popover.style.visibility = "hidden";
-  popover.style.display = "flex";
-
-  const rect = anchor.getBoundingClientRect();
-  const pw = popover.offsetWidth;
-  const ph = popover.offsetHeight;
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  const gap = 4;
-
-  // Align right edge of popover to right edge of the ⋮ button
-  let left = rect.right - pw;
-  // If it goes off the left edge, clamp to 8px
-  if (left < 8) left = 8;
-  // If it goes off the right edge, clamp
-  if (left + pw > vw - 8) left = vw - pw - 8;
-
-  // Prefer opening below the button; flip above if not enough space
-  let top;
-  if (rect.bottom + gap + ph <= vh - 8) {
-    top = rect.bottom + gap;          // below
-  } else {
-    top = rect.top - ph - gap;        // above
-    if (top < 8) top = 8;            // last resort: clamp to top
-  }
-
-  popover.style.left = left + "px";
-  popover.style.top = top + "px";
-  popover.style.visibility = "visible";
-}
-
-function padZero(num, size) {
-  let s = num + "";
-  while (s.length < size) s = "0" + s;
-  return s;
-}
-
-function renderRecents(todayEntries) {
-  if (!recentsList) return;
-  recentsList.innerHTML = "";
-
-  // Hide static placeholder slots
-  for (let i = 1; i <= 3; i++) {
-    const slot = document.getElementById(`slot-placeholder-${i}`);
-    if (slot) slot.style.display = "none";
-  }
-
-  if (!todayEntries || todayEntries.length === 0) {
-    if (recentsEmpty) recentsEmpty.style.display = "flex";
-    return;
-  }
-
-  if (recentsEmpty) recentsEmpty.style.display = "none";
-
-  // Prune stale checked indexes (entries that were deleted individually via popover)
-  const validIndexes = new Set(todayEntries.map(e => e.index));
-  for (const idx of checkedIndexes) {
-    if (!validIndexes.has(idx)) checkedIndexes.delete(idx);
-  }
-  updateBulkBar();
-
-  for (const entry of todayEntries) {
-    const li = document.createElement("li");
-    li.className = "dictation-item";
-
-    // Checkbox
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.className = "dictation-checkbox";
-    checkbox.checked = checkedIndexes.has(entry.index);
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked) {
-        checkedIndexes.add(entry.index);
-      } else {
-        checkedIndexes.delete(entry.index);
-      }
-      updateBulkBar();
-    });
-
-    const textDiv = document.createElement("div");
-    textDiv.className = "dictation-text";
-    textDiv.textContent = entry.text;
-    textDiv.title = entry.text; // full text on hover
-
-    const moreBtn = document.createElement("button");
-    moreBtn.className = "dictation-menu-btn";
-    moreBtn.textContent = "⋮";
-    moreBtn.setAttribute("aria-label", "Entry options");
-    moreBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      showPopover(moreBtn, entry);
-    });
-
-    li.appendChild(checkbox);
-    li.appendChild(textDiv);
-    li.appendChild(moreBtn);
-    recentsList.appendChild(li);
-  }
-}
-
-async function loadHistory() {
-  let data = { total_words: 0, total_dictations: 0, entries: [] };
-  try { data = await invoke("get_history"); }
-  catch (err) { console.error("get_history failed:", err); }
-
-  const entries = data.entries || [];
-  const now = new Date();
-  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-  const todayEntries = entries
-    .map((e, i) => ({ text: e.text, timestamp: e.timestamp, words: e.words, index: i }))
-    .filter(e => e.timestamp * 1000 >= midnight.getTime())
-    .reverse();
-
-  const todayWords = todayEntries.reduce((sum, e) => sum + (e.words || 0), 0);
-  if (statTodayWords) statTodayWords.textContent = todayWords;
-  if (statTodayDictations) statTodayDictations.textContent = todayEntries.length;
-  if (statTotalWords) statTotalWords.textContent = padZero(data.total_words ?? 0, 3);
-  if (statTotalDictations) statTotalDictations.textContent = padZero(data.total_dictations ?? 0, 2);
-
-  renderRecents(todayEntries);
-}
-
-loadHistory();
-
-// Refresh recents whenever a dictation completes (main window stays stale
-// otherwise — loadHistory() only runs once at startup)
+// Live updates from Rust. `deleted` and `toggled` are already applied
+// optimistically by the row itself — handling them here would double-apply.
 try {
-  listen("transcript-result", () => loadHistory());
+  listen("history-updated", ({ payload }) => {
+    if (!payload) return;
+    if (payload.action === "added" && payload.entry) {
+      if (historyEntries.some((e) => e.id === payload.entry.id)) return;
+      historyEntries.unshift(payload.entry);
+      historyList.prepend(buildHistoryRow(payload.entry));
+      updateHistoryEmptyState();
+      measureHistoryFolds();
+    } else if (payload.action === "updated" && payload.entry) {
+      replaceHistoryRow(payload.entry);
+    } else if (payload.action === "cleared") {
+      resetHistoryView();
+    }
+  });
 } catch (err) {
-  console.warn("transcript-result listener setup failed:", err);
+  console.warn("history-updated listener setup failed:", err);
+}
+
+// ── Transcribe an existing WAV file into History ─────────────────────
+// Rust does all the work (decode, engine, cleanup, History row) and emits
+// `history-updated` itself, so this never inserts a row or pastes text.
+let transcribeFileStatusTimer = null;
+
+function setTranscribeFileStatus(message, isError) {
+  if (!transcribeFileStatus) return;
+  // Any new message (or a clear) cancels the previous auto-hide timer so a
+  // second run's result can't be wiped by the first run's timeout.
+  if (transcribeFileStatusTimer) {
+    clearTimeout(transcribeFileStatusTimer);
+    transcribeFileStatusTimer = null;
+  }
+  transcribeFileStatus.classList.toggle("is-error", !!isError);
+  // textContent only: this carries file names and Rust error strings.
+  transcribeFileStatus.textContent = message || "";
+  transcribeFileStatus.hidden = !message;
+  if (!message) return;
+  transcribeFileStatusTimer = setTimeout(() => {
+    transcribeFileStatusTimer = null;
+    if (!transcribeFileStatus) return;
+    transcribeFileStatus.textContent = "";
+    transcribeFileStatus.hidden = true;
+    transcribeFileStatus.classList.remove("is-error");
+  }, 6000);
+}
+
+if (transcribeFileBtn) {
+  transcribeFileBtn.addEventListener("click", async () => {
+    let picked = null;
+    try {
+      picked = await open({ multiple: false, filters: [{ name: "Audio (WAV)", extensions: ["wav"] }] });
+    } catch (err) {
+      console.error("transcribe_audio_file: file dialog failed:", err);
+      return;
+    }
+    // Cancelled: no status text, no error, nothing to clean up.
+    if (!picked) return;
+
+    transcribeFileBtn.disabled = true;
+    transcribeFileBtn.textContent = "Transcribing…";
+    setTranscribeFileStatus("", false);
+    try {
+      const entry = await invoke("transcribe_audio_file", { path: picked });
+      const words = entry && Number.isFinite(entry.words) ? entry.words : 0;
+      setTranscribeFileStatus(`Added ${words} ${words === 1 ? "word" : "words"} to History`, false);
+    } catch (err) {
+      console.error("transcribe_audio_file failed:", err);
+      // Rust errors lead with a `[FILE-001] `-style code; show the sentence only.
+      const message = String(err).replace(/^\[[A-Z]+-\d+\]\s*/, "");
+      setTranscribeFileStatus(message || "Could not transcribe that file.", true);
+    } finally {
+      transcribeFileBtn.disabled = false;
+      transcribeFileBtn.textContent = "+ Transcribe file";
+    }
+  });
 }
 
 const statsResetBtn = document.getElementById("stats-reset-btn");
 const resetModal = document.getElementById("reset-modal");
 const resetModalClose = document.getElementById("reset-modal-close");
-const resetCountersCheck = document.getElementById("reset-counters-check");
 const resetHistoryCheck = document.getElementById("reset-history-check");
 const resetConfirmBtn = document.getElementById("reset-confirm-btn");
 const resetCancelBtn = document.getElementById("reset-cancel-btn");
 
 function updateResetConfirmState() {
   if (resetConfirmBtn) {
-    resetConfirmBtn.disabled = !((resetCountersCheck && resetCountersCheck.checked) || (resetHistoryCheck && resetHistoryCheck.checked));
+    resetConfirmBtn.disabled = !(resetHistoryCheck && resetHistoryCheck.checked);
   }
 }
 
 function openResetModal() {
   if (!resetModal || isModalClosing) return;
-  if (resetCountersCheck) resetCountersCheck.checked = false;
   if (resetHistoryCheck) resetHistoryCheck.checked = false;
   if (resetConfirmBtn) resetConfirmBtn.disabled = true;
   resetModal.classList.remove("closing");
@@ -1326,11 +1805,9 @@ function closeResetModal() {
 
 async function confirmReset() {
   if (resetConfirmBtn && resetConfirmBtn.disabled) return;
-  const counters = resetCountersCheck && resetCountersCheck.checked;
   const history = resetHistoryCheck && resetHistoryCheck.checked;
   if (resetConfirmBtn) resetConfirmBtn.disabled = true;
   try {
-    if (counters) await invoke("reset_stats");
     if (history) await invoke("clear_history");
   } catch (err) {
     log(`Reset failed: ${err}`);
@@ -1338,7 +1815,7 @@ async function confirmReset() {
     return;
   }
   closeResetModal();
-  await loadHistory();
+  resetHistoryView();
 }
 
 if (statsResetBtn) statsResetBtn.addEventListener("click", openResetModal);
@@ -1349,7 +1826,6 @@ if (resetModal) {
     if (e.target === resetModal) closeResetModal();
   });
 }
-if (resetCountersCheck) resetCountersCheck.addEventListener("change", updateResetConfirmState);
 if (resetHistoryCheck) resetHistoryCheck.addEventListener("change", updateResetConfirmState);
 if (resetConfirmBtn) resetConfirmBtn.addEventListener("click", confirmReset);
 

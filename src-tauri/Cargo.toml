@@ -13,7 +13,7 @@ crate-type = ["rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api", "protocol-asset"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-autostart = "2"
@@ -31,6 +31,10 @@ nnnoiseless = "0.5"
 arboard = "3"
 regex = "1"
 keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
+# Dictation history: SQLite (bundled compiles sqlite3.c via cc) with
+# user_version-based migrations, modelled on Handy's history manager.
+rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite_migration = "2.3"
 
 # ponytail: RNNoise is a neural net and the worst case for an unoptimized
 # build — at opt-level 0 denoise() ran 4.3s for 48s of audio and every

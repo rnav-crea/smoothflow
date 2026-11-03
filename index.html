@@ -137,21 +137,6 @@
   </head>
   <body class="theme-retro">
     <div id="app">
-      <!-- Header -->
-      <header class="app-header">
-        <div class="brand">
-          <h1 class="brand-title">SMOOTHFLOW</h1>
-        </div>
-
-        <nav class="header-nav">
-          <button id="settings-toggle" class="pill-nav-btn" aria-label="Settings">SETTINGS</button>
-          <button id="update-bell" class="pill-nav-btn" aria-label="Updates">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"></path></svg>
-            <span id="update-bell-dot"></span>
-          </button>
-        </nav>
-      </header>
-
       <!-- Update ticker. ponytail: <marquee> is deprecated but Chromium keeps it;
            if a future WebView2 removes it, restore the CSS-keyframes version -->
       <marquee id="update-marquee" style="display:none;" scrollamount="4" title="Update available"></marquee>
@@ -165,177 +150,278 @@
         </div>
       </div>
 
-      <!-- Main Content -->
-      <main class="main-content">
-        <!-- Hero Section -->
-        <section class="hero-section">
-          <div class="hero-text">
-            <h2 class="hero-title">Stop typing, Start talking</h2>
-            <p class="hero-subtitle">Type anywhere with your voice.</p>
-            <p class="hero-subtitle">Your voice is now your fastest keyboard.</p>
-            
-            <div class="hero-description">
-              <p>No login, no registration, no data collection just bring your own API key to run the entire app.</p>
-              <p>Enjoy effortless voice dictation. If you find any bug or have feedback, feel free to report it!</p>
-            </div>
+      <!-- Settings shell: sidebar + one scrollable section column -->
+      <div class="app-shell">
+        <aside class="sidebar">
+          <div class="sidebar-brand">
+            <h1 class="brand-title">SMOOTHFLOW</h1>
           </div>
 
-          <div class="hero-illustration">
-            <img src="/hero-illustration.png" alt="Desk Illustration" class="hero-img" id="hero-img" />
-          </div>
-        </section>
-
-        <div class="hero-callout-card">
-                <div class="hero-callout-label">
-                  <span>RECOMMENDED: USE GROQ</span>
-                </div>
-                <div class="hero-callout-content">
-                  For the best experience, we recommend using <a href="https://console.groq.com" target="_blank" rel="noopener noreferrer" class="hero-callout-link">Groq Cloud API</a>. It provides better performance, zero cost, and full compatibility.
-                </div>
-              </div>
-
-        <!-- Hidden stats elements for JS backward compatibility -->
-        <!-- <div style="display: none;">
-          <span id="stat-today-words">0</span>
-          <span id="stat-today-dictations">0</span>
-        </div> -->
-
-        <!-- Recent Dictations Section -->
-        <section class="recents-section">
-          <div class="recents-card-header">
-            <span class="recents-title">RECENT DICTATIONS</span>
-            <div class="recents-stats-group">
-              <div class="recents-stats">
-                TOTAL DICTATIONS = <span id="stat-total-dictations">00</span> &nbsp;&nbsp; WORDS = <span id="stat-total-words">000</span>
-              </div>
-              <button id="stats-reset-btn" class="recents-reset-btn" aria-label="Reset stats">
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>
-              </button>
-            </div>
-          </div>
-
-          <!-- Bulk-delete toolbar: lives OUTSIDE the scroll area so it never scrolls away -->
-          <div id="bulk-delete-bar" class="bulk-delete-bar">
-            <span id="bulk-delete-count" class="bulk-delete-count">0 selected</span>
-            <button id="bulk-delete-btn" class="bulk-delete-btn">DELETE SELECTED</button>
-          </div>
-
-          <div class="recents-card-body">
-            <ul id="recents-list" class="recents-list"></ul>
-            <div id="recents-empty" class="recents-empty" style="display: none;">No dictations recorded today</div>
-            
-            <!-- Static placeholder slots to complete the 4-row layout matching reference UI -->
-            <div class="dictation-slot empty-slot" id="slot-placeholder-1"></div>
-            <div class="dictation-slot empty-slot" id="slot-placeholder-2"></div>
-            <div class="dictation-slot empty-slot" id="slot-placeholder-3"></div>
-          </div>
-        </section>
-      </main>
-
-      <footer id="debug-bar">
-        <div class="debug-left-group">
-          <span id="debug-text">App loaded</span>
-          <span class="debug-info-wrapper">
-            <span id="debug-info-icon" class="debug-info-icon">ⓘ</span>
-            <div id="debug-popover" class="debug-popover"></div>
-          </span>
-        </div>
-        <div class="footer-links">
-          <span>found an issue? <a href="https://github.com/rnav-crea/smoothflow/issues/new" target="_blank" rel="noopener noreferrer" class="footer-link">report it ↗</a></span>
-          <span>like SmoothFlow? add your <a href="https://github.com/rnav-crea/smoothflow" target="_blank" rel="noopener noreferrer" class="footer-link"><span class="underline-word">star</span> ↗</a> to boost it</span>
-        </div>
-      </footer>
-
-      <!-- Settings Modal -->
-      <div id="settings-modal" class="modal-overlay">
-        <div class="modal-content">
-          <div class="modal-header">
-            <h2>settings</h2>
-            <button id="settings-close" class="pill-icon-btn" aria-label="Close">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="6" y1="6" y2="18"></line><line x1="6" x2="18" y1="6" y2="18"></line></svg>
+          <nav class="sidebar-nav" aria-label="Settings sections">
+            <button class="sidebar-item active" type="button" data-section="general" aria-current="page">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"></path><path d="M1 14h6M9 8h6M17 16h6"></path></svg>
+              <span>General</span>
             </button>
-          </div>
-          <div class="modal-body">
-            <!-- <div class="settings-group">
-              <label for="theme-select">UI Theme</label>
-              <select id="theme-select" class="settings-select">
-                <option value="retro">Retro Green (Delphitools)</option>
-                <option value="classic">Periwinkle Classic (Original)</option>
-              </select>
-              <span class="settings-hint">Switch between Delphitools retro style and original Periwinkle UI</span>
-            </div> -->
+            <button class="sidebar-item" type="button" data-section="history">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>
+              <span>History</span>
+            </button>
+            <button class="sidebar-item" type="button" data-section="models">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"></path></svg>
+              <span>Models</span>
+            </button>
+            <button class="sidebar-item" type="button" data-section="advanced">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6l-5 6 5 6M16 6l5 6-5 6"></path></svg>
+              <span>Advanced</span>
+            </button>
+            <button class="sidebar-item" type="button" data-section="about">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 16v-4M12 8h.01"></path></svg>
+              <span>About</span>
+            </button>
+          </nav>
+        </aside>
 
+        <main class="settings-content">
+          <!-- ── General ─────────────────────────────────────────────── -->
+          <section class="settings-section" id="section-general" hidden>
             <div class="settings-group">
-              <label for="api-url-input">API Base URL</label>
-              <input type="text" id="api-url-input" placeholder="https://api.groq.com/openai/v1" />
-            </div>
+              <div class="settings-group-title">General</div>
+              <div class="settings-card">
 
-            <div class="settings-group">
-              <label for="model-select">Model</label>
-              <select id="model-select" class="settings-select">
-                <option value="whisper-large-v3-turbo">whisper-large-v3-turbo (fastest)</option>
-                <option value="whisper-large-v3">whisper-large-v3 (default)</option>
-                <option value="whisper-1">whisper-1 (OpenAI)</option>
-                <option value="distil-whisper-large-v3-en">distil-whisper-large-v3-en (English only)</option>
-                <option value="">Custom...</option>
-              </select>
-              <input type="text" id="model-input" class="settings-input-custom" placeholder="Custom model name" style="display:none;" />
-            </div>
-
-            <div class="settings-group">
-              <label for="cleanup-model-select">Cleanup Model</label>
-              <select id="cleanup-model-select" class="settings-select">
-                <option value="">Disabled (no LLM cleanup)</option>
-                <option value="openai/gpt-oss-20b">openai/gpt-oss-20b (Groq, fast — recommended)</option>
-                <option value="qwen/qwen3.6-27b">qwen/qwen3.6-27b (Groq, best at self-corrections)</option>
-                <option value="openai/gpt-oss-120b">openai/gpt-oss-120b (Groq, highest quality)</option>
-                <option value="gpt-4o-mini">gpt-4o-mini (OpenAI)</option>
-                <option value="gpt-4o">gpt-4o (OpenAI)</option>
-                <option value="">Custom...</option>
-              </select>
-              <input type="text" id="cleanup-model-input" class="settings-input-custom" placeholder="Custom model name" style="display:none;" />
-              <span class="settings-hint">LLM that cleans up self-corrections and formatting. Leave empty to disable.</span>
-            </div>
-
-            <div class="settings-group">
-              <label for="api-key-input">API Key</label>
-              <div class="input-wrapper">
-                <input type="password" id="api-key-input" placeholder="gsk_..." />
-                <button id="toggle-key-visibility" class="icon-btn password-toggle" aria-label="Toggle key visibility">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+              <div class="settings-row">
+                <div class="settings-row-label-wrap">
+                  <label for="hotkey-input">Activation shortcut</label>
+                  <button type="button" class="ctx-toggle" aria-expanded="false" aria-controls="hotkey-ctx" aria-label="Show details">?</button>
+                </div>
+                <div class="hotkey-field">
+                  <button type="button" id="hotkey-capture" class="hotkey-capture" aria-label="Record a new shortcut: click, then press the keys">
+                    <span id="hotkey-chip" class="hotkey-chip"></span>
+                  </button>
+                </div>
+                <button type="button" id="hotkey-reset" class="field-icon-btn" aria-label="Reset the shortcut to Ctrl+Space">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v5h5"></path></svg>
                 </button>
-              </div>
-              <div id="test-api-status"></div>
-            </div>
-
-            <!-- ── 1. Local models: what it is + the master switch ─────── -->
-            <div class="settings-group" style="border-top: 1.5px solid #58264b; padding-top: 16px; gap: 8px;">
-              <div class="section-head">
-                <span class="section-title">Local models</span>
-                <button class="help-dot" type="button" aria-expanded="false" aria-controls="local-models-help" aria-label="How local models work">?</button>
-              </div>
-              <span class="settings-hint" style="margin-top: 0;">Choose the models that run on this computer. You download them once and they stay here.</span>
-
-              <div id="local-models-help" class="help-panel" hidden>
-                <ul>
-                  <li>Your voice and your text stay on this computer. Nothing is sent to the internet.</li>
-                  <li>Nothing downloads until you press DOWNLOAD. SmoothFlow never downloads on its own.</li>
-                  <li>Once a model is here it is reused. You never download the same model twice.</li>
-                  <li>If a model is missing or fails, you see an error. SmoothFlow does not quietly use the internet instead.</li>
-                </ul>
-                <div class="help-panel-field">
-                  <label class="help-panel-label" for="models-dir-input">Where models are stored</label>
-                  <div class="help-panel-row">
-                    <input type="text" id="models-dir-input" placeholder="Loading..." />
-                    <button id="browse-models-dir-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">BROWSE</button>
-                    <button id="models-dir-default-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">USE DEFAULT</button>
-                  </div>
-                  <span id="models-dir-hint" class="settings-hint">Loading models folder...</span>
-                  <span class="settings-hint">You can store models on another drive. Change this before downloading if space is tight.</span>
+                <input type="hidden" id="hotkey-input" />
+                <div id="hotkey-ctx" class="ctx-panel" hidden>
+                  <span class="settings-hint">Click it, press the combo. Ctrl+Space by default.</span>
                 </div>
               </div>
 
-              <div class="settings-group toggle-group" style="border-bottom: none; padding: 4px 0 0;">
+              <div class="settings-group toggle-group">
+                <div class="toggle-label-desc">
+                  <label for="autopaste-toggle">Auto-Paste</label>
+                  <button type="button" class="ctx-toggle" aria-expanded="false" aria-controls="autopaste-ctx" aria-label="Show details">?</button>
+                </div>
+                <div class="toggle-actions">
+                  <label class="switch">
+                    <input type="checkbox" id="autopaste-toggle" checked />
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div id="autopaste-ctx" class="ctx-panel" hidden>
+                  <span class="settings-hint">Type transcript directly into active window</span>
+                </div>
+              </div>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <div class="settings-group-title">Text</div>
+              <div class="settings-card">
+
+              <div class="settings-group toggle-group">
+                <div class="toggle-label-desc">
+                  <label for="punctuation-toggle">Auto Punctuation</label>
+                  <button type="button" class="ctx-toggle" aria-expanded="false" aria-controls="punctuation-ctx" aria-label="Show details">?</button>
+                </div>
+                <div class="toggle-actions">
+                  <label class="switch">
+                    <input type="checkbox" id="punctuation-toggle" checked />
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div id="punctuation-ctx" class="ctx-panel" hidden>
+                  <span class="settings-hint">Automatically add ending punctuation</span>
+                </div>
+              </div>
+
+              <div class="settings-group toggle-group">
+                <div class="toggle-label-desc">
+                  <label for="fillers-toggle">Remove Filler Words</label>
+                  <button type="button" class="ctx-toggle" aria-expanded="false" aria-controls="fillers-ctx" aria-label="Show details">?</button>
+                </div>
+                <div class="toggle-actions">
+                  <label class="switch">
+                    <input type="checkbox" id="fillers-toggle" checked />
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div id="fillers-ctx" class="ctx-panel" hidden>
+                  <span class="settings-hint">Strip "um", "uh", "you know", etc.</span>
+                </div>
+              </div>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <div class="settings-group-title">Startup</div>
+              <div class="settings-card">
+
+              <div class="settings-group toggle-group">
+                <div class="toggle-label-desc">
+                  <label for="startup-toggle">Launch on Startup</label>
+                  <button type="button" class="ctx-toggle" aria-expanded="false" aria-controls="startup-ctx" aria-label="Show details">?</button>
+                </div>
+                <div class="toggle-actions">
+                  <label class="switch">
+                    <input type="checkbox" id="startup-toggle" />
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div id="startup-ctx" class="ctx-panel" hidden>
+                  <span class="settings-hint">Auto-start SmoothFlow when you log in</span>
+                </div>
+              </div>
+              </div>
+            </div>
+
+            <!-- End of the body, Handy-style: a choose-only control whose
+                 description follows the selection; the ? circle drops it
+                 open and closed like every other General row. -->
+            <div class="settings-group">
+              <div class="settings-group-title">Activation</div>
+              <div class="settings-card">
+
+              <div class="settings-row">
+                <div class="settings-row-head">
+                  <label for="hotkey-mode-select">Activation style</label>
+                  <button type="button" class="ctx-toggle" aria-expanded="false" aria-controls="hotkey-mode-ctx" aria-label="Show details">?</button>
+                </div>
+                <select id="hotkey-mode-select" class="settings-select hotkey-mode-select">
+                  <option value="hold">Hold to talk</option>
+                  <option value="toggle">Toggle</option>
+                </select>
+                <div id="hotkey-mode-ctx" class="ctx-panel" hidden>
+                  <span id="hotkey-mode-hint" class="settings-hint">Hold the shortcut while you speak, release to transcribe.</span>
+                </div>
+              </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ── History ─────────────────────────────────────────────── -->
+          <section class="settings-section" id="section-history" hidden>
+            <div class="settings-group">
+              <div class="settings-group-title">History</div>
+
+              <!-- Transcribe an existing WAV into History. Rust owns the whole
+                   job (decode, engine, cleanup, row); this only picks the file
+                   and reports the result — it never pastes. -->
+              <div class="history-toolbar">
+                <button type="button" class="pill-nav-btn" id="transcribe-file-btn">+ Transcribe file</button>
+                <span class="settings-hint" id="transcribe-file-status" hidden></span>
+              </div>
+
+              <!-- Off by default: clips are the only dictation artifact that
+                   is raw audio, so keeping them is opt-in. -->
+              <div class="settings-card">
+                <div class="settings-row">
+                  <div class="toggle-label-desc">
+                    <label for="keep-clips-toggle">Save audio clips</label>
+                    <button type="button" class="ctx-toggle" aria-expanded="false" aria-controls="keep-clips-ctx" aria-label="Show details">?</button>
+                  </div>
+                  <div class="toggle-actions">
+                    <label class="switch">
+                      <input type="checkbox" id="keep-clips-toggle" />
+                      <span class="slider"></span>
+                    </label>
+                  </div>
+                  <div id="keep-clips-ctx" class="ctx-panel" hidden>
+                    <span class="settings-hint">Keep the recording of each dictation so you can play it back and re-run cleanup without speaking again. Stored only on this computer, and deleted with the dictation.</span>
+                  </div>
+                </div>
+
+                <ul id="history-list" class="history-list"></ul>
+                <div id="history-empty" class="history-empty" style="display: none;">No dictations yet</div>
+                <div id="history-loading" class="history-loading">Loading…</div>
+                <div id="history-sentinel" class="history-sentinel"></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ── Models ──────────────────────────────────────────────── -->
+          <section class="settings-section" id="section-models" hidden>
+            <div class="settings-group">
+              <div class="settings-group-title">Cloud</div>
+
+              <div class="settings-row">
+                <label for="api-url-input">API Base URL</label>
+                <input type="text" id="api-url-input" placeholder="https://api.groq.com/openai/v1" />
+                <span class="settings-hint">OpenAI-compatible endpoint for cloud transcription. The model lists below follow the provider this URL points at.</span>
+              </div>
+
+              <div class="settings-row">
+                <label for="api-key-input">API Key</label>
+                <div class="input-wrapper">
+                  <input type="password" id="api-key-input" placeholder="gsk_..." />
+                  <button id="toggle-key-visibility" class="icon-btn password-toggle" aria-label="Toggle key visibility">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                  </button>
+                </div>
+                <div id="test-api-status"></div>
+                <span class="settings-hint">Needed for cloud transcription and cloud cleanup. Tested against the endpoint above whenever it changes.</span>
+              </div>
+
+              <div class="settings-row">
+                <label for="model-select">Model</label>
+                <select id="model-select" class="settings-select">
+                  <option value="whisper-large-v3-turbo">whisper-large-v3-turbo (fastest)</option>
+                  <option value="whisper-large-v3">whisper-large-v3 (default)</option>
+                  <option value="whisper-1">whisper-1 (OpenAI)</option>
+                  <option value="distil-whisper-large-v3-en">distil-whisper-large-v3-en (English only)</option>
+                  <option value="">Custom...</option>
+                </select>
+                <input type="text" id="model-input" class="settings-input-custom" placeholder="Custom model name" style="display:none;" />
+                <span class="settings-hint">Speech model used for cloud transcription.</span>
+              </div>
+
+              <div class="settings-row">
+                <label for="cleanup-model-select">Cleanup Model</label>
+                <select id="cleanup-model-select" class="settings-select">
+                  <option value="">Disabled (no LLM cleanup)</option>
+                  <option value="openai/gpt-oss-20b">openai/gpt-oss-20b (Groq, fast — recommended)</option>
+                  <option value="qwen/qwen3.6-27b">qwen/qwen3.6-27b (Groq, best at self-corrections)</option>
+                  <option value="openai/gpt-oss-120b">openai/gpt-oss-120b (Groq, highest quality)</option>
+                  <option value="gpt-4o-mini">gpt-4o-mini (OpenAI)</option>
+                  <option value="gpt-4o">gpt-4o (OpenAI)</option>
+                  <option value="">Custom...</option>
+                </select>
+                <input type="text" id="cleanup-model-input" class="settings-input-custom" placeholder="Custom model name" style="display:none;" />
+                <span class="settings-hint">LLM that cleans up self-corrections and formatting. Leave empty to disable.</span>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <div class="settings-group-title">On this computer</div>
+
+              <div class="settings-row">
+                <div class="section-head">
+                  <span class="section-title">Local models</span>
+                  <button class="help-dot" type="button" aria-expanded="false" aria-controls="local-models-help" aria-label="How local models work">?</button>
+                </div>
+                <span class="settings-hint" style="margin-top: 0;">Choose the models that run on this computer. You download them once and they stay here.</span>
+
+                <div id="local-models-help" class="help-panel" hidden>
+                  <ul>
+                    <li>Your voice and your text stay on this computer. Nothing is sent to the internet.</li>
+                    <li>Nothing downloads until you press DOWNLOAD. SmoothFlow never downloads on its own.</li>
+                    <li>Once a model is here it is reused. You never download the same model twice.</li>
+                    <li>If a model is missing or fails, you see an error. SmoothFlow does not quietly use the internet instead.</li>
+                  </ul>
+                </div>
+              </div>
+
+              <div class="settings-group toggle-group">
                 <div class="toggle-label-desc">
                   <label for="offline-mode-toggle">Use local models</label>
                   <span>Speech and text stay on this computer</span>
@@ -348,7 +434,8 @@
             </div>
 
             <div id="offline-models-controls" class="settings-group" style="display: none; gap: 12px;">
-              <!-- ── 2. Speech + optional AI cleanup ───────────────────── -->
+              <div class="settings-group-title">Speech</div>
+
               <div class="settings-group">
                 <label for="offline-stt-select">Speech model</label>
                 <select id="offline-stt-select" class="settings-select">
@@ -357,6 +444,8 @@
                 </select>
                 <span class="settings-hint">Turns the sound of your voice into words.</span>
               </div>
+
+              <div class="settings-group-title">Cleanup</div>
 
               <div class="settings-group toggle-group">
                 <div class="toggle-label-desc">
@@ -394,6 +483,7 @@
                 <button id="download-models-btn" class="save-settings-btn" type="button" style="max-width: none; flex: 1;">DOWNLOAD</button>
                 <button id="delete-models-btn" class="reset-cancel-btn" type="button" style="padding: 10px 14px;">DELETE DOWNLOADED</button>
               </div>
+              <span class="settings-hint">Nothing downloads until you press DOWNLOAD. Files go to the folder in STORAGE below.</span>
 
               <div class="settings-group">
                 <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
@@ -403,7 +493,7 @@
                 <ul id="offline-model-files" aria-live="polite" style="max-height: 180px; overflow-y: auto; margin: 0; padding-left: 18px; font-family: var(--font-mono); font-size: 11px; color: #cdafa0;"></ul>
               </div>
 
-              <!-- ── 3. Choose your own models ────────────────────────── -->
+              <!-- ── Choose your own models ────────────────────────── -->
               <div class="settings-group" style="gap: 10px; border-top: 1.5px solid #58264b; padding-top: 12px;">
                 <div class="section-head">
                   <span class="section-title">Choose your own models</span>
@@ -434,6 +524,7 @@
                     <button id="browse-custom-llm-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">BROWSE</button>
                     <button id="find-local-models-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">FIND MODELS</button>
                   </div>
+                  <span class="settings-hint">A .gguf file that already sits on this computer. Nothing is copied.</span>
                   <ul id="local-models-list" aria-live="polite" style="display: none; list-style: none; margin: 0; padding: 0; max-height: 200px; overflow-y: auto; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px;"></ul>
                   <span id="local-models-empty" class="settings-hint" style="display: none;">No local models found. Install one with Ollama, LM Studio, Jan or GPT4All, or browse for a .gguf file.</span>
                   <span id="custom-llm-bypass-note" class="settings-hint" style="display: none; color: #f4d1ba;">A custom .gguf file is set, so it is used instead of the cleanup model above. No Qwen download is needed.</span>
@@ -441,73 +532,101 @@
               </div>
             </div>
 
-            <div class="settings-group toggle-group">
-              <div class="toggle-label-desc">
-                <label for="punctuation-toggle">Auto Punctuation</label>
-                <span>Automatically add ending punctuation</span>
-              </div>
-              <label class="switch">
-                <input type="checkbox" id="punctuation-toggle" checked />
-                <span class="slider"></span>
-              </label>
-            </div>
+            <div class="settings-group">
+              <div class="settings-group-title">Storage</div>
 
-            <div class="settings-group toggle-group">
-              <div class="toggle-label-desc">
-                <label for="fillers-toggle">Remove Filler Words</label>
-                <span>Strip "um", "uh", "you know", etc.</span>
+              <div class="settings-row">
+                <label for="models-dir-input" class="help-panel-label">Where models are stored</label>
+                <div class="help-panel-row">
+                  <input type="text" id="models-dir-input" placeholder="Loading..." />
+                  <button id="browse-models-dir-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">BROWSE</button>
+                  <button id="models-dir-default-btn" class="reset-cancel-btn" type="button" style="padding: 10px 12px; white-space: nowrap;">USE DEFAULT</button>
+                </div>
+                <span id="models-dir-hint" class="settings-hint">Loading models folder...</span>
+                <span class="settings-hint">You can store models on another drive. Change this before downloading if space is tight.</span>
               </div>
-              <label class="switch">
-                <input type="checkbox" id="fillers-toggle" checked />
-                <span class="slider"></span>
-              </label>
             </div>
+          </section>
 
-            <div class="settings-group toggle-group">
-              <div class="toggle-label-desc">
-                <label for="autopaste-toggle">Auto-Paste</label>
-                <span>Type transcript directly into active window</span>
+          <!-- ── Advanced ────────────────────────────────────────────── -->
+          <section class="settings-section" id="section-advanced" hidden>
+            <div class="settings-group">
+              <div class="settings-group-title">Personal Dictionary</div>
+
+              <div class="settings-row">
+                <label for="dictionary-input">Words</label>
+                <span class="settings-hint">Words the transcriber should recognize (names, jargon, terms)</span>
+                <div class="dictionary-tags" id="dictionary-tags"></div>
+                <div class="dictionary-add">
+                  <input type="text" id="dictionary-input" placeholder="Add a word..." />
+                  <button id="dictionary-add-btn" class="pill-nav-btn">Add</button>
+                </div>
               </div>
-              <label class="switch">
-                <input type="checkbox" id="autopaste-toggle" checked />
-                <span class="slider"></span>
-              </label>
             </div>
+          </section>
 
-            <div class="settings-group toggle-group">
-              <div class="toggle-label-desc">
-                <label for="startup-toggle">Launch on Startup</label>
-                <span>Auto-start SmoothFlow when you log in</span>
+          <!-- ── About ───────────────────────────────────────────────── -->
+          <section class="settings-section" id="section-about" hidden>
+            <div class="settings-group">
+              <div class="settings-group-title">Save</div>
+
+              <div class="settings-row">
+                <span class="settings-hint" style="margin-top: 0;">Writes the settings from every section to smoothflow.json.</span>
+                <button id="save-settings-btn" class="save-settings-btn">SAVE</button>
+                <div id="settings-status"></div>
               </div>
-              <label class="switch">
-                <input type="checkbox" id="startup-toggle" />
-                <span class="slider"></span>
-              </label>
             </div>
 
             <div class="settings-group">
-              <label for="hotkey-input">Hotkey</label>
-              <input type="text" id="hotkey-input" placeholder="Ctrl+Space" />
-              <span class="settings-hint">Modifier keys (Ctrl, Alt, Shift, Win) + key name</span>
-            </div>
+              <div class="settings-group-title">Data</div>
 
-            <div class="settings-group">
-              <label>Personal Dictionary</label>
-              <span class="settings-hint">Words the transcriber should recognize (names, jargon, terms)</span>
-              <div class="dictionary-tags" id="dictionary-tags"></div>
-              <div class="dictionary-add">
-                <input type="text" id="dictionary-input" placeholder="Add a word..." />
-                <button id="dictionary-add-btn" class="pill-nav-btn">Add</button>
+              <div class="settings-row">
+                <span class="settings-row-label">Clear history</span>
+                <span class="settings-hint">Deletes the dictation history stored on this computer.</span>
+                <div>
+                  <button id="stats-reset-btn" class="recents-reset-btn" aria-label="Clear history">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>
+                  </button>
+                </div>
               </div>
             </div>
 
-            <div class="settings-footer">
-              <button id="save-settings-btn" class="save-settings-btn">SAVE</button>
-              <div id="settings-status"></div>
+            <div class="settings-group">
+              <div class="settings-group-title">About SmoothFlow</div>
+
+              <div class="settings-row">
+                <p class="settings-hint" style="margin-top: 0;">No login, no registration, no data collection — just bring your own API key to run the entire app. Cloud transcription when you want it, models on this computer when you do not.</p>
+              </div>
             </div>
+          </section>
+
+          <!-- Nodes app.js still looks up by id, but the shell no longer shows them. -->
+          <div hidden aria-hidden="true">
+            <select id="theme-select" class="settings-select">
+              <option value="retro">Retro Green (Delphitools)</option>
+              <option value="classic">Periwinkle Classic (Original)</option>
+            </select>
+            <img id="hero-img" class="hero-img" alt="" />
+            <div class="dictation-slot empty-slot" id="slot-placeholder-1"></div>
+            <div class="dictation-slot empty-slot" id="slot-placeholder-2"></div>
+            <div class="dictation-slot empty-slot" id="slot-placeholder-3"></div>
           </div>
-        </div>
+        </main>
       </div>
+
+      <footer id="debug-bar">
+        <div class="debug-left-group">
+          <span id="debug-text">App loaded</span>
+          <span class="debug-info-wrapper">
+            <span id="debug-info-icon" class="debug-info-icon">ⓘ</span>
+            <div id="debug-popover" class="debug-popover"></div>
+          </span>
+        </div>
+        <div class="footer-links">
+          <span>found an issue? <a href="https://github.com/rnav-crea/smoothflow/issues/new" target="_blank" rel="noopener noreferrer" class="footer-link">report it ↗</a></span>
+          <span>like SmoothFlow? add your <a href="https://github.com/rnav-crea/smoothflow" target="_blank" rel="noopener noreferrer" class="footer-link"><span class="underline-word">star</span> ↗</a> to boost it</span>
+        </div>
+      </footer>
 
       <!-- Reset Stats Modal -->
       <div id="reset-modal" class="modal-overlay">
@@ -519,8 +638,7 @@
             </button>
           </div>
           <div class="modal-body">
-            <label class="reset-check-row"><input type="checkbox" id="reset-counters-check"> RESET WORD &amp; DICTATION COUNT</label>
-            <label class="reset-check-row"><input type="checkbox" id="reset-history-check"> CLEAR RECENT HISTORY</label>
+            <label class="reset-check-row"><input type="checkbox" id="reset-history-check"> CLEAR HISTORY</label>
             <div class="reset-modal-footer">
               <button id="reset-cancel-btn" class="reset-cancel-btn" type="button">CANCEL</button>
               <button id="reset-confirm-btn" class="reset-confirm-btn" type="button" disabled>CONFIRM</button>

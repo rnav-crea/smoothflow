@@ -65,6 +65,57 @@ body {
     margin: 0 4px;
     font-weight: 400;
 }
+/* hidden by default; the transcription-state handler shows it with an inline
+   style.display (an inline style is what beats this ID rule) */
+#working {
+    display: none;
+    pointer-events: auto;
+    gap: 8px;
+    padding: 6px 10px 6px 16px;
+}
+.spinner {
+    width: 12px;
+    height: 12px;
+    border-radius: 9999px;
+    border: 2px solid rgba(36, 32, 31, 0.25);
+    border-top-color: #24201f;
+    animation: spin 0.7s linear infinite;
+}
+.working-label {
+    font-size: 12px;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: #24201f;
+    letter-spacing: normal;
+}
+.cancel {
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    color: #24201f;
+    opacity: 0.55;
+    width: 20px;
+    height: 20px;
+    display: grid;
+    place-items: center;
+    border-radius: 9999px;
+}
+.cancel:hover {
+    opacity: 1;
+    background: rgba(36, 32, 31, 0.12);
+}
+.cancel:focus-visible {
+    outline: 2px solid #24201f;
+    outline-offset: 1px;
+}
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .spinner {
+        animation: none;
+    }
+}
 @keyframes fadeIn {
     from { opacity: 0; transform: translateY(-4px); }
     to { opacity: 1; transform: translateY(0); }
@@ -82,12 +133,21 @@ body {
     </div>
 </div>
 <div class="error-bubble" id="error"><span class="code" id="err-code"></span><span id="err-msg"></span></div>
+<div class="bubble working" id="working">
+    <span class="spinner" aria-hidden="true"></span>
+    <span class="working-label">Transcribing</span>
+    <button class="cancel" id="cancel-btn" type="button" aria-label="Cancel transcription" title="Cancel transcription">
+        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg>
+    </button>
+</div>
 <script>
 const bars = document.querySelectorAll('.bar');
 const vu = document.getElementById('vu');
 const errEl = document.getElementById('error');
 const errCode = document.getElementById('err-code');
 const errMsg = document.getElementById('err-msg');
+const workingEl = document.getElementById('working');
+const cancelBtn = document.getElementById('cancel-btn');
 let hideTimer = null;
 
 function showError(msg) {
@@ -126,6 +186,37 @@ if (invoke && transformCallback) {
     });
     listen('recording-error', (e) => showError(e.payload));
     listen('transcription-error', (e) => showError(e.payload));
+    listen('transcription-state', (e) => {
+        if (e.payload === 'working') {
+            // a pending error auto-hide must not fire mid-run
+            clearTimeout(hideTimer);
+            errEl.style.display = 'none';
+            vu.style.display = 'none';
+            workingEl.style.display = 'inline-flex';
+        } else {
+            // "idle": Rust already hid the window on success/cancel — never hide here.
+            // The error path ends here too, and showError() has just put the error
+            // bubble up with the VU bars hidden, so restoring them would render
+            // both pills at once.
+            workingEl.style.display = 'none';
+            if (errEl.style.display !== 'inline-flex') {
+                vu.style.display = 'inline-flex';
+            }
+        }
+    });
+}
+if (cancelBtn) {
+    cancelBtn.addEventListener('click', () => {
+        // optimistic hide so the click feels instant; Rust hides the window on idle
+        workingEl.style.display = 'none';
+        if (!invoke) return;
+        try {
+            Promise.resolve(invoke('cancel_transcription'))
+                .catch((err) => console.error('cancel_transcription failed:', err));
+        } catch (err) {
+            console.error('cancel_transcription failed:', err);
+        }
+    });
 }
 </script>
 </body>
