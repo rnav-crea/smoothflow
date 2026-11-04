@@ -85,6 +85,26 @@ fn should_warm_llm(config: &Config) -> bool {
     config.cleanup_engine == "local"
 }
 
+/// One warm at a time, process-wide.
+///
+/// The frontend saves its config during startup, so `update_config` fired right
+/// after the `setup` warm and started a second one. That second thread parked on
+/// the engine mutex for the whole ~9 s model load and printed a duplicate
+/// "pre-warming" line. Harmless, but a wasted thread and a misleading log.
+///
+/// A warm skipped here is not lost: if the incoming config enables a leg the
+/// running warm is not covering, that leg spawns on its first use instead.
+static ENGINES_WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Clears `ENGINES_WARMING` however the warm thread ends, panic included — a
+/// stuck flag would disable pre-warming for the rest of the session.
+struct WarmingGuard;
+impl Drop for WarmingGuard {
+    fn drop(&mut self) {
+        ENGINES_WARMING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Start the engines this config actually uses in the background so the
 /// Parakeet (~4 s) and llama-server (~9 s) model loads overlap the user speaking.
 /// Must run off the UI thread — a warm is a few seconds of blocking work.
@@ -95,8 +115,13 @@ fn start_offline_engines(app: &tauri::AppHandle) {
     if !stt && !llm {
         return;
     }
+    if ENGINES_WARMING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        sf_log!("ENGINES: skipping pre-warm, one is already running (stt={stt}, llm={llm})");
+        return;
+    }
     sf_log!("ENGINES: pre-warming local engines (stt={stt}, llm={llm})");
     std::thread::spawn(move || {
+        let _warm = WarmingGuard;
         if stt {
             stt_local::prewarm(&config);
         }
@@ -897,12 +922,12 @@ async fn redictate_from_clip(
         let run = tauri::async_runtime::spawn_blocking(move || {
             let t0 = std::time::Instant::now();
             sf_log!(
-                "RE-DICTATE: re-transcribing {} samples at {} Hz",
+                "RE-DICTATE: history #{id} — re-transcribing {} samples at {} Hz",
                 samples.len(),
                 sample_rate
             );
             let raw = transcription::transcribe_any(&samples, sample_rate, &config)?;
-            sf_log!("RE-DICTATE: transcript received in {:?}", t0.elapsed());
+            sf_log!("RE-DICTATE: history #{id} — transcript received in {:?}", t0.elapsed());
 
             let context = transcription::active_window_title();
             let text = postprocess::postprocess_with_context(&raw, &config, &context);
@@ -912,7 +937,11 @@ async fn redictate_from_clip(
 
             // The new raw and the text cleaned from it move together, so the
             // row never pairs one run's raw transcript with another's result.
-            history::update_after_redictation(id, &raw, &text)
+            let updated = history::update_after_redictation(id, &raw, &text)?;
+            // Whole run, cleanup included — the id makes a duplicate click
+            // visible as the same row doing the work twice.
+            sf_log!("RE-DICTATE: history #{id} — updated in {:?}", t0.elapsed());
+            Ok(updated)
         })
         .await
         .map_err(|e| format!("[HIST-016] The re-dictation task failed: {e}"))?;

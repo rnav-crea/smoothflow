@@ -1351,6 +1351,14 @@ let historyHasMore = false;
 let historyLoading = false;
 let historyCursor = null;
 
+// Re-dictations in flight, by history id.
+//
+// A row is rebuilt from scratch when Rust reports its refresh, so the button's
+// own `disabled` flag dies with the old element and the replacement starts
+// enabled — which let a second run of the same clip start while the first was
+// still being handled. This set outlives the rebuild instead.
+const redictatingIds = new Set();
+
 function formatHistoryDate(timestampSeconds) {
   const date = new Date((timestampSeconds || 0) * 1000);
   if (Number.isNaN(date.getTime())) return "";
@@ -1516,8 +1524,12 @@ function buildHistoryRow(entry) {
       failed ? "Retry transcription" : "Re-dictate from the saved recording",
       ICON_REDICTATE
     );
+    // A row rebuilt mid-run has to come back disabled.
+    redictateBtn.disabled = redictatingIds.has(entry.id);
+    redictateBtn.classList.toggle("is-busy", redictatingIds.has(entry.id));
     redictateBtn.addEventListener("click", async () => {
-      if (redictateBtn.disabled) return;
+      if (redictateBtn.disabled || redictatingIds.has(entry.id)) return;
+      redictatingIds.add(entry.id);
       redictateBtn.disabled = true;
       redictateBtn.classList.add("is-busy");
       errorEl.hidden = true;
@@ -1529,8 +1541,19 @@ function buildHistoryRow(entry) {
         console.error("redictate_from_clip failed:", err);
         showRowError(String(err));
       } finally {
-        redictateBtn.disabled = false;
-        redictateBtn.classList.remove("is-busy");
+        redictatingIds.delete(entry.id);
+        // `history-updated` has usually replaced this row already, so re-enable
+        // whichever button is live now — not just this (possibly detached) one.
+        const live =
+          historyList &&
+          historyList.querySelector(
+            `.history-row[data-id="${entry.id}"] .history-icon-btn[data-act="redictate"]`
+          );
+        for (const btn of [redictateBtn, live]) {
+          if (!btn) continue;
+          btn.disabled = false;
+          btn.classList.remove("is-busy");
+        }
       }
     });
   }

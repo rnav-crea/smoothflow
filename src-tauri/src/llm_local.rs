@@ -60,7 +60,14 @@ static PRIMED_CATEGORY: Mutex<Option<&'static str>> = Mutex::new(None);
 /// Never falls back to the network.
 pub fn cleanup(text: &str, config: &Config, context: &str) -> Result<String, String> {
     with_session(config, |session| {
-        (request(session, text, config, context), true)
+        let result = request(session, text, config, context);
+        // Only a failed request leaves the session untrustworthy. This used to
+        // tear the server down unconditionally, so every non-streaming cleanup
+        // (every re-dictation, plus live dictation with auto-paste off) killed
+        // the engine and made the *next* call load the model from scratch on a
+        // new port — a ~9 s stall with no error in the log explaining it.
+        let tear_down = result.is_err();
+        (result, tear_down)
     })
 }
 
@@ -105,12 +112,14 @@ fn with_session<T>(
     // several GB of RAM on a file we no longer need.
     if guard.as_ref().is_some_and(|s| s.model != model) {
         if let Some(mut old) = guard.take() {
+            sf_log!("LLM: dropping the local cleanup engine — the model path changed");
             old.shutdown();
             // New process, empty KV cache: the next dictation must re-prime.
             set_primed_category(None);
         }
     }
     if guard.is_none() {
+        sf_log!("LLM: starting a local cleanup engine for {}", model.display());
         *guard = Some(spawn(&server, &model)?);
     }
     let (outcome, tear_down) = match guard.as_ref() {
@@ -123,7 +132,10 @@ fn with_session<T>(
     };
     if tear_down {
         // Never cache a half-dead session: the next call must respawn cleanly.
+        // Logged, because the respawn otherwise showed up as nothing but a new
+        // port number on the next "engine ready" line.
         if let Some(mut dead) = guard.take() {
+            sf_log!("LLM: dropping the local cleanup engine after a failed request");
             dead.shutdown();
             set_primed_category(None);
         }
@@ -438,6 +450,13 @@ fn request(
     let raw = resp
         .text()
         .map_err(|e| format!("[LLM-002] Could not read the local cleanup response. ({e})"))?;
+    // Same one-line usage metric as the streaming path: without it a
+    // re-dictation (non-streaming only) had no measured cleanup cost at all.
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
+        let mut usage = TokenUsage::default();
+        usage.absorb(&parsed);
+        log_usage(&usage);
+    }
     // Qwen3.5 can emit a thinking block; the shared stripper already handles it.
     Ok(strip_reasoning_block(&extract_content(&raw)?))
 }

@@ -137,8 +137,16 @@ fn default_llm_model_size() -> String {
     "4b".into()
 }
 
+/// Words at or below which local cleanup takes the deterministic rules instead
+/// of the LLM, per `postprocess::fast_path_applies`.
+///
+/// 4 was far too low to matter: a 39-word dictation spent 6 s of CPU decode to
+/// change 2 words, and it is the decode — not speech-to-text — that decides how
+/// long a dictation feels. At 40 the same utterance skips inference entirely.
+/// The trade-off is explicit: medium-length dictations lose the model's cleanup
+/// and keep only the rules.
 fn default_casual_fast_path_words() -> usize {
-    4
+    40
 }
 
 fn default_cleanup_engine() -> String {
@@ -194,6 +202,28 @@ fn migrate_split_switch(value: &mut serde_json::Value) {
     );
 }
 
+/// Raise a stored threshold of 4 to the current default.
+///
+/// 4 was only ever the shipped default: no setting exposes this field, so a
+/// config file holding 4 came from the default, not from a choice. Without this
+/// every existing install — the ones that actually feel the 6 s decode — would
+/// keep 4 forever, because `Config::save` writes the value back out.
+fn migrate_casual_fast_path(value: &mut serde_json::Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if object
+        .get("casual_fast_path_words")
+        .and_then(serde_json::Value::as_u64)
+        == Some(4)
+    {
+        object.insert(
+            "casual_fast_path_words".into(),
+            serde_json::json!(default_casual_fast_path_words()),
+        );
+    }
+}
+
 /// Ctrl+Space everywhere by default — macOS reserves Fn/Globe for the Emoji &
 /// Symbols picker, making it a bad default. Bare "Fn" remains user-selectable
 /// and routes through the CGEventTap backend in hotkey.rs.
@@ -240,7 +270,7 @@ impl Default for Config {
             custom_llm_path: String::new(),
             custom_stt_dir: String::new(),
             auto_download_models: false,
-            casual_fast_path_words: 4,
+            casual_fast_path_words: default_casual_fast_path_words(),
             keep_audio_clips: false,
         }
     }
@@ -283,6 +313,7 @@ impl Config {
             return Self::default();
         };
         migrate_split_switch(&mut value);
+        migrate_casual_fast_path(&mut value);
         let mut config: Self = serde_json::from_value(value).unwrap_or_default();
         config.normalize();
         config
@@ -335,7 +366,7 @@ mod tests {
         assert!(c.custom_llm_path.is_empty());
         assert!(c.custom_stt_dir.is_empty());
         assert!(!c.auto_download_models);
-        assert_eq!(c.casual_fast_path_words, 4);
+        assert_eq!(c.casual_fast_path_words, default_casual_fast_path_words());
         assert!(!c.keep_audio_clips);
     }
 
@@ -398,7 +429,7 @@ mod tests {
         assert_eq!(c.cleanup_fallback_model, "qwen/qwen3.6-27b");
         assert_eq!(c.cleanup_model, "openai/gpt-oss-20b");
         // fields added in Phase 1 load with their defaults from old files
-        assert_eq!(c.casual_fast_path_words, 4);
+        assert_eq!(c.casual_fast_path_words, default_casual_fast_path_words());
         assert!(!c.keep_audio_clips);
         assert!(!c.offline_mode);
         assert!(!c.stt_local);
@@ -460,6 +491,29 @@ mod tests {
         ));
         assert!(!only_stt.stt_local);
         assert_eq!(only_stt.cleanup_engine, "off");
+    }
+
+    #[test]
+    fn the_old_fast_path_default_is_raised_but_a_chosen_value_is_kept() {
+        // 4 was only ever the shipped default, so a stored 4 is not a choice.
+        let raised = parse(&format!(
+            r#"{{{LEGACY_BASE},"casual_fast_path_words":4}}"#
+        ));
+        assert_eq!(raised.casual_fast_path_words, default_casual_fast_path_words());
+        assert!(default_casual_fast_path_words() > 4);
+
+        // Anything else was set deliberately and must survive a load.
+        let kept = parse(&format!(
+            r#"{{{LEGACY_BASE},"casual_fast_path_words":9}}"#
+        ));
+        assert_eq!(kept.casual_fast_path_words, 9);
+
+        // A file written before the field existed gets the default.
+        let missing = parse(&format!("{{{LEGACY_BASE}}}"));
+        assert_eq!(
+            missing.casual_fast_path_words,
+            default_casual_fast_path_words()
+        );
     }
 
     #[test]
