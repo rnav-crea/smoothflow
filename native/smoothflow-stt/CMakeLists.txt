@@ -19,12 +19,13 @@ endif()
 # static bundle for the same pinned version. Building sherpa-onnx from source
 # produces identical objects and costs hours.
 if(NOT DEFINED SHERPA_ONNX_PREBUILT_DIR OR SHERPA_ONNX_PREBUILT_DIR STREQUAL "")
-  message(FATAL_ERROR "SHERPA_ONNX_PREBUILT_DIR must point to the extracted sherpa-onnx v1.13.8 win-x64 static MT Release no-tts lib bundle")
+  message(FATAL_ERROR "SHERPA_ONNX_PREBUILT_DIR must point to the extracted sherpa-onnx v1.13.8 static no-tts lib bundle for this platform")
 endif()
 
-file(GLOB SHERPA_ONNX_PREBUILT_LIBS "${SHERPA_ONNX_PREBUILT_DIR}/lib/*.lib")
+# Windows ships .lib, Linux and macOS ship .a. Both are the same static bundle.
+file(GLOB SHERPA_ONNX_PREBUILT_LIBS "${SHERPA_ONNX_PREBUILT_DIR}/lib/*.lib" "${SHERPA_ONNX_PREBUILT_DIR}/lib/*.a")
 if(NOT SHERPA_ONNX_PREBUILT_LIBS)
-  message(FATAL_ERROR "SHERPA_ONNX_PREBUILT_DIR contains no lib/*.lib")
+  message(FATAL_ERROR "SHERPA_ONNX_PREBUILT_DIR contains no lib/*.lib or lib/*.a")
 endif()
 message(STATUS "Prebuilt sherpa-onnx libs: ${SHERPA_ONNX_PREBUILT_LIBS}")
 
@@ -35,8 +36,20 @@ target_compile_features(smoothflow-stt PRIVATE cxx_std_17)
 target_include_directories(smoothflow-stt PRIVATE "${SHERPA_ONNX_SOURCE_DIR}")
 target_link_libraries(smoothflow-stt PRIVATE ${SHERPA_ONNX_PREBUILT_LIBS})
 
-# The prebuilt bundle is /MT, so the helper must be /MT too or the CRTs mismatch.
-set_property(TARGET smoothflow-stt PROPERTY
-  MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# The static bundle is /MT, so the helper must be /MT too or the CRTs mismatch.
+# The property is MSVC-only; GCC/Clang have no equivalent and do not need one.
+if(MSVC)
+  set_property(TARGET smoothflow-stt PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+# Static onnxruntime still needs the platform's thread and dynamic-loading libs.
+find_package(Threads REQUIRED)
+target_link_libraries(smoothflow-stt PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+
+if(APPLE)
+  # onnxruntime's static archive references Accelerate for its CPU kernels.
+  target_link_libraries(smoothflow-stt PRIVATE "-framework Accelerate")
+endif()
 
 install(TARGETS smoothflow-stt RUNTIME DESTINATION bin)

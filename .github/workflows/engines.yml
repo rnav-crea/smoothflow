@@ -1,0 +1,222 @@
+name: engines
+
+# Builds the offline inference engines and publishes them as downloadable
+# release assets. SmoothFlow does not ship these in the installer: the app is
+# ~16 MB, the engines are ~45 MB unpacked, and shipping them made every install
+# pay for an engine it may never use.
+#
+# Two very different jobs:
+#   - llama: no build at all. llama.cpp publishes a pinned release per platform;
+#     we download it, trim the ~40 unused files, and republish. Pinned by
+#     LLAMA_BUILD so the app and the engine cannot drift.
+#   - stt: a real compile. smoothflow-stt links sherpa-onnx's official static
+#     no-tts bundle, which exists per platform, so no sherpa-onnx build either.
+#
+# Assets land on one fixed, prerelease tag (`engines`) so the download URL is
+# stable across versions and never shadows the app's `latest` updater endpoint.
+
+on:
+  # Runs when the engine's own inputs change, NOT on app releases. Rebuilding on
+  # every `v*` tag would re-upload byte-identical assets, and because the app
+  # pins the sha256 from engines.json, a non-reproducible rebuild would change
+  # hashes users never saw. Bump LLAMA_BUILD / SHERPA_ONNX_VERSION or edit the
+  # helper to trigger a rebuild.
+  push:
+    branches: [main]
+    paths:
+      - "native/smoothflow-stt/**"
+      - "scripts/package-llama-engine.mjs"
+      - "scripts/engines-manifest.mjs"
+      - ".github/workflows/engines.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SHERPA_ONNX_VERSION: "1.13.8"
+  LLAMA_BUILD: "b11214"
+  RELEASE_TAG: "engines"
+
+jobs:
+  llama:
+    name: llama engine (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: win-x64
+            asset: llama-b11214-bin-win-cpu-x64.zip
+          - target: linux-x64
+            asset: llama-b11214-bin-ubuntu-x64.tar.gz
+          - target: macos-arm64
+            asset: llama-b11214-bin-macos-arm64.tar.gz
+          - target: macos-x64
+            asset: llama-b11214-bin-macos-x64.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Fetch upstream llama.cpp ${{ env.LLAMA_BUILD }}
+        run: |
+          mkdir -p upstream out
+          curl -fsSL -o "upstream/${{ matrix.asset }}" \
+            "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_BUILD}/${{ matrix.asset }}"
+          case "${{ matrix.asset }}" in
+            *.zip) unzip -q "upstream/${{ matrix.asset }}" -d upstream/extracted ;;
+            *)     tar -xzf "upstream/${{ matrix.asset }}" -C upstream/extracted ;;
+          esac
+
+      - name: Trim to the llama-server runtime
+        run: |
+          # Archives differ: the Windows zip is flat, the tarballs have a top
+          # directory. Locate the directory that actually holds the server.
+          src="$(dirname "$(find upstream/extracted -type f \( -name 'llama-server' -o -name 'llama-server.exe' \) | head -1)")"
+          test -n "$src" || { echo "no llama-server in upstream archive"; exit 1; }
+          node scripts/package-llama-engine.mjs \
+            --from "$src" --to "out/${{ matrix.target }}" --target "${{ matrix.target }}"
+
+      - name: Package
+        run: |
+          cd "out/${{ matrix.target }}"
+          # No -y: every file here is already a regular file (the trim step's
+          # copyFileSync dereferenced upstream's soname symlinks), and forcing
+          # symlink storage would produce an archive that cannot be extracted on
+          # Windows.
+          zip -qr "../smoothflow-llama-${{ matrix.target }}.zip" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llama-${{ matrix.target }}
+          path: out/smoothflow-llama-${{ matrix.target }}.zip
+          if-no-files-found: error
+
+  stt:
+    name: stt helper (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: win-x64
+            os: windows-latest
+            prebuilt: sherpa-onnx-v1.13.8-win-x64-static-MT-Release-no-tts-lib.tar.bz2
+          - target: linux-x64
+            os: ubuntu-latest
+            prebuilt: sherpa-onnx-v1.13.8-linux-x64-static-no-tts-lib.tar.bz2
+          - target: macos-arm64
+            os: macos-14
+            prebuilt: sherpa-onnx-v1.13.8-osx-arm64-static-no-tts-lib.tar.bz2
+          - target: macos-x64
+            os: macos-13
+            prebuilt: sherpa-onnx-v1.13.8-osx-x64-static-no-tts-lib.tar.bz2
+    steps:
+      - uses: actions/checkout@v4
+
+      # Headers only — the code comes from the prebuilt static bundle below.
+      - name: Fetch sherpa-onnx ${{ env.SHERPA_ONNX_VERSION }} source
+        shell: bash
+        run: |
+          mkdir -p deps
+          curl -fsSL -o deps/sherpa-src.tar.gz \
+            "https://github.com/k2-fsa/sherpa-onnx/archive/refs/tags/v${SHERPA_ONNX_VERSION}.tar.gz"
+          tar -xzf deps/sherpa-src.tar.gz -C deps
+
+      - name: Fetch sherpa-onnx prebuilt static libs
+        shell: bash
+        run: |
+          curl -fsSL -o deps/sherpa-lib.tar.bz2 \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_ONNX_VERSION}/${{ matrix.prebuilt }}"
+          mkdir -p deps/sherpa-lib
+          tar -xjf deps/sherpa-lib.tar.bz2 -C deps/sherpa-lib
+
+      - name: Configure
+        shell: bash
+        run: |
+          prebuilt="$(find deps/sherpa-lib -type d -name lib | head -1)"
+          test -n "$prebuilt" || { echo "no lib/ in the prebuilt bundle"; exit 1; }
+          # CMake resolves relative paths against the source dir, so both deps
+          # must be absolute.
+          cmake -S native/smoothflow-stt -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSHERPA_ONNX_SOURCE_DIR="$PWD/deps/sherpa-onnx-${SHERPA_ONNX_VERSION}" \
+            -DSHERPA_ONNX_PREBUILT_DIR="$(realpath "$(dirname "$prebuilt")")"
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p out/${{ matrix.target }}
+          # Multi-config generators (MSVC) put the binary in build/Release.
+          bin="$(find build -type f \( -name 'smoothflow-stt' -o -name 'smoothflow-stt.exe' \) | head -1)"
+          test -n "$bin" || { echo "build produced no smoothflow-stt"; exit 1; }
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            # Symbols are the difference between a 17 MB helper and a 3 MB one.
+            strip "$bin"
+          fi
+          cp "$bin" "out/${{ matrix.target }}/"
+          cd "out/${{ matrix.target }}"
+          zip -qr "../smoothflow-stt-${{ matrix.target }}.zip" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stt-${{ matrix.target }}
+          path: out/smoothflow-stt-${{ matrix.target }}.zip
+          if-no-files-found: error
+
+  publish:
+    name: publish engines
+    needs: [llama, stt]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Build manifest
+        run: |
+          node scripts/engines-manifest.mjs \
+            --dir artifacts --out artifacts/engines.json \
+            --llama "$LLAMA_BUILD" --sherpa "$SHERPA_ONNX_VERSION"
+
+      - name: Publish to the engines release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" \
+              --prerelease \
+              --title "Offline engines" \
+              --notes "Inference engines downloaded by SmoothFlow on first offline enable. Not an app release — the app's updater points at latest.json elsewhere."
+          # --clobber so a rebuilt engine replaces the previous bytes instead of
+          # failing on an existing asset name.
+          gh release upload "$RELEASE_TAG" artifacts/*.zip artifacts/engines.json --clobber
+
+      - name: Summary
+        run: |
+          {
+            echo "### Engines published to \`$RELEASE_TAG\`"
+            echo ""
+            echo "| kind | target | size | sha256 |"
+            echo "|---|---|---|---|"
+            node -e '
+              const m = require("./artifacts/engines.json");
+              for (const e of m.engines) {
+                console.log(`| ${e.kind} | ${e.target} | ${(e.size/1048576).toFixed(1)} MB | ${e.sha256.slice(0,16)}… |`);
+              }
+            '
+          } >> "$GITHUB_STEP_SUMMARY"
