@@ -41,3 +41,7 @@ NOTICE
 *.md
 !README.md
 !PRIVACY.md
+# The agent workflow contract and the bench write-up the bench script points at
+# are part of the repo, not local scratch notes like the rest of the .md files.
+!AGENTS.md
+!bench/phonon-notes.md
