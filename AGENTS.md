@@ -133,12 +133,14 @@ src-tauri/src/
   llm_local.rs     — llama.cpp server manager + local cleanup client (streaming + prompt-cache prime)
   text_rules.rs    — deterministic pre/post-processing rules (ported from JezFlow)
   wav.rs           — std-only 16-bit mono WAV writer for optional audio clips
-src-tauri/binaries/win-x64/  — COMMITTED, ~44 MB: smoothflow-stt.exe + llama/ (12 files).
-                      Bundled via bundle.resources in tauri.conf.json, flattened into the
-                      exe dir. Both stt_local::helper_path and llm_local::server_path
-                      resolve there. scripts/sync-engines.mjs mirrors it into
-                      target/debug so dev and release cannot drift. Never ship only
-                      llama-server.exe — it is a 9 KB stub.
+src-tauri/binaries/win-x64/  — NOT bundled any more (see engines.rs). ~46 MB of
+                      smoothflow-stt.exe + llama/ (12 files). Both path resolvers
+                      (stt_local::helper_path, llm_local::server_path) now prefer
+                      <config dir>/engines/<target>/, written by engines::download
+                      from the `engines` prerelease, and fall back to the exe dir.
+                      scripts/sync-engines.mjs only mirrors a local tree into
+                      target/debug for dev. Never ship only llama-server.exe — it
+                      is a 9 KB stub.
                       llama/ is trimmed to the llama-server runtime only (server exe +
                       its import closure + 3 ggml-cpu tiers). Re-trim with
                       scripts/package-llama-engine.mjs rather than copying a raw
@@ -148,12 +150,22 @@ native/smoothflow-stt/      — C++ source for the helper (CMake + main.cpp). Bu
                       Windows (MSVC) and, since the CMakeLists now globs lib/*.a and
                       guards the /MT runtime flag, on Linux/macOS via CI. The spawn
                       paths still return a clear "not available on macOS or Linux"
-                      error until the download path lands.
+                      error until the download path lands. Since 2026-11-05 the
+                      helper is family-agnostic: per-family optional flags
+                      (--encoder/--decoder/--joiner, --paraformer, --nemo-ctc,
+                      --sensevoice, --whisper-*, --moonshine-*, --canary-*,
+                      --firered-*, --dolphin, --zipformer-ctc), exactly one family
+                      may be configured, and `model_type` is left empty so sherpa
+                      auto-detects — adding a family never rebuilds the helper.
+                      stt_local.rs mirrors this as FAMILIES shapes and resolves the
+                      first complete one in a model folder.
 .github/workflows/engines.yml — builds/packages both engines per platform and
                       publishes them to the fixed prerelease tag `engines`
                       (smoothflow-stt-<target>.zip, smoothflow-llama-<target>.zip,
-                      engines.json). This is the supply side for the planned
-                      ship-nothing installer; the app does not download from it yet.
+                      engines.json). This is the supply side for the ship-nothing
+                      installer; engines.rs is the demand side (download_engines).
+                      The workflow has never been run — dispatch it once via
+                      workflow_dispatch before the release assets are real.
 ```
 
 Frontend is in the repo root (`index.html`, `app.js`, `public/`), not under `src-tauri/`.
@@ -254,10 +266,10 @@ struct Config {
 }
 ```
 
-**Implementation note (2026-10-03):** offline is functional on Windows and verified end-to-end. `get_offline_status` / `download_models` / `delete_models` / `test_local_pipeline` / `get_models_dir` are registered in `lib.rs`. The Windows engines ship inside the installer (`src-tauri/binaries/win-x64/`, verified against a real NSIS install). Local STT runs at ~0.19 s per second of audio; local cleanup is generation-bound and streams, so the first word lands ~1.2 s after release. macOS and Linux have no engines yet and both spawn paths return a clear "not available, use cloud mode" error. `cargo test` still cannot run on this Windows box (the test binary fails to load, `0xc0000139`; CI on ubuntu/macos is the only working test path), so new unit tests are compile-verified only. **Read `PORT-PLAN.md` for measured latencies, dead ends and the ranked open problems.** Read **`BENCHMARK.md`** for public-corpus accuracy/speed numbers and the comparison against published leaderboard figures (produced by `bench/`, reproducible, no private audio). `plan.md` is stale — its only actionable section shipped in `5c42a54`.
+**Implementation note (2026-10-03, engines unbundled 2026-11-05):** offline is functional on Windows and verified end-to-end. `get_offline_status` / `download_models` / `delete_models` / `test_local_pipeline` / `get_models_dir` are registered in `lib.rs`. The ~46 MB engines are **no longer shipped in the installer**: `engines.rs` downloads them from the fixed `engines` prerelease into `<config dir>/engines/<target>/` on an explicit user action, and both spawn paths fall back to the exe dir. **That release does not exist yet — `engines.yml` has never run, so `download_engines` currently fails with `[ENG-002]` HTTP 404 until the workflow is dispatched once.** Local STT runs at ~0.19 s per second of audio; local cleanup is generation-bound and streams, so the first word lands ~1.2 s after release. macOS and Linux have no engines yet and both spawn paths return a clear "not available, use cloud mode" error. `cargo test` still cannot run on this Windows box (the test binary fails to load, `0xc0000139`; CI on ubuntu/macos is the only working test path), so new unit tests are compile-verified only. **Read `PORT-PLAN.md` for measured latencies, dead ends and the ranked open problems.** Read **`BENCHMARK.md`** for public-corpus accuracy/speed numbers and the comparison against published leaderboard figures (produced by `bench/`, reproducible, no private audio). `plan.md` is stale — its only actionable section shipped in `5c42a54`.
 
 **Two Tauri 2 traps, both learned the hard way:**
-- A **synchronous** `#[tauri::command]` runs **on the main thread**. `tauri-macros/src/command/wrapper.rs` `body_blocking` generates a direct call with no `spawn`. A multi-GB model download froze the entire app. Six heavy commands are now `async fn` + `tauri::async_runtime::spawn_blocking`: `stop_recording`, `inject_text`, `test_api_connection`, `download_models`, `delete_models`, `test_local_pipeline`. Do not "fix" this with `#[tauri::command(async)]` on a sync fn — that only moves blocking onto a tokio worker.
+- A **synchronous** `#[tauri::command]` runs **on the main thread**. `tauri-macros/src/command/wrapper.rs` `body_blocking` generates a direct call with no `spawn`. A multi-GB model download froze the entire app. Eight heavy commands are now `async fn` + `tauri::async_runtime::spawn_blocking`: `stop_recording`, `inject_text`, `test_api_connection`, `download_models`, `delete_models`, `download_engines`, `delete_engines`, `test_local_pipeline`. Do not "fix" this with `#[tauri::command(async)]` on a sync fn — that only moves blocking onto a tokio worker.
 - Anything that blocks for more than a few hundred ms belongs in `spawn_blocking`. Microsecond commands (`get_config`, `get_history`, `get_offline_status`) are fine as sync.
 
 ## Tauri commands (invoke from JS)
@@ -280,6 +292,10 @@ struct Config {
 | `inject_text` | `text: String` | `Result<(), String>` |
 | `test_api_connection` | `base_url: String, api_key: String` | `Result<(), String>` |
 | `get_offline_status` | none | `ModelStatus` |
+| `get_engine_status` | none | `EngineStatus` — `{ target, stt_installed, llama_installed, installed_bytes }`, on-disk reality only (never a network call) |
+| `download_engines` | none | `Result<EngineStatus, String>` — the only engine fetch; emits `engine-download-progress` `{id,status,message,percent?}`, same shape as `model-download-progress` |
+| `delete_engines` | none | `Result<EngineStatus, String>` — removes `<config dir>/engines/<target>/` |
+| `cancel_downloads` | none | `bool` — sets the shared `TRANSFER_CANCELLED` flag; the running engine/model transfer checks it between 256 KiB chunks and stops within ~1 s, keeping `.part` for resume |
 | `get_models_dir` | none | `ModelsLocation` — `{ resolved: String (absolute path models are read from), is_custom: bool (true when `models_dir` overrides the default) }` |
 | `download_models` | `{ stt_version: String, llm_size: String }` | `Result<DownloadProgress, String>` |
 | `delete_models` | none | `Result<(), String>` |

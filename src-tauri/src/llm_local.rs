@@ -888,9 +888,18 @@ fn unsupported_platform_message() -> String {
     "[LLM-001] Offline mode is not yet available on macOS or Linux. Please use cloud mode in Settings.".to_string()
 }
 
-/// `<app dir>/llama/llama-server[.exe]`. The llama.cpp build ships as a 9 KB
-/// stub next to a pile of DLLs, so the whole directory has to be installed.
+/// Resolve the `llama-server` binary.
+///
+/// Order: the downloaded runtime under the config directory
+/// (`<config dir>/engines/<target>/llama/llama-server[.exe]`, written by
+/// `engines::download`) first, then `<app dir>/llama/llama-server[.exe]`. The
+/// llama.cpp build ships as a 9 KB stub next to a pile of DLLs, so the whole
+/// directory has to be installed — either way, the server must sit inside a
+/// `llama/` folder.
 fn server_path() -> Result<PathBuf, String> {
+    if let Some(server) = crate::engines::installed_server() {
+        return Ok(server);
+    }
     let exe = std::env::current_exe()
         .map_err(|e| format!("[LLM-001] Could not locate the SmoothFlow executable: {e}"))?;
     let dir = exe.parent().ok_or_else(|| {

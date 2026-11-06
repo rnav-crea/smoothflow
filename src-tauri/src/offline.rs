@@ -6,6 +6,28 @@ use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Shared by every transfer (engines and models): set by the user's Cancel,
+/// and checked between chunks so a multi-GB download stops within about a
+/// second. The `.part` file is deliberately kept on a cancel — resuming costs
+/// one HTTP Range request and nothing already fetched is thrown away.
+pub static TRANSFER_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+pub fn request_cancel() {
+    TRANSFER_CANCELLED.store(true, Ordering::Relaxed);
+}
+
+pub fn cancel_requested() -> bool {
+    TRANSFER_CANCELLED.load(Ordering::Relaxed)
+}
+
+/// Clear at the start of a fresh transfer, so a leftover flag from a cancelled
+/// transfer cannot kill the next one before its first byte. Never call this
+/// from inside a running transfer — the running one owns its flag.
+pub fn reset_cancel() {
+    TRANSFER_CANCELLED.store(false, Ordering::Relaxed);
+}
 
 #[derive(Debug, Clone)]
 pub struct ModelSpec {
@@ -157,6 +179,181 @@ pub fn catalog() -> &'static [ModelSpec] {
     CATALOG
 }
 
+/// One logical model in Settings, backed by one or more `CATALOG` files.
+///
+/// `CATALOG` is per *file* (a Parakeet model is four ONNX/text files, Qwen is
+/// one GGUF). The Settings table shows per *model*, so this table groups them.
+/// The `id` values are load-bearing: they are already stored in
+/// `smoothflow.json` as `stt_version` / `llm_model_size`, so renaming one
+/// silently orphans a user's downloaded model.
+#[derive(Debug, Clone)]
+pub struct ModelGroup {
+    pub id: &'static str,
+    /// `"stt"` or `"llm"` — the same strings `CATALOG` uses as `category`.
+    pub kind: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    pub file_ids: &'static [&'static str],
+    pub supported: bool,
+    pub languages: &'static [&'static str],
+    pub streaming: bool,
+    pub language_detection: bool,
+    pub benchmark: ModelBenchmark,
+}
+
+/// Measured numbers only, copied from `BENCHMARK.md`. `None` means the group was
+/// never measured and the UI must say "not benchmarked" — never guess, never
+/// extrapolate from another size, never copy a competitor's figure.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ModelBenchmark {
+    /// WER on the earnings22 subset at `BENCHMARK.md` §3.
+    pub wer_earnings22: Option<f32>,
+    /// Audio seconds ÷ processing seconds, CPU-only (§3 "speed").
+    pub realtime_factor: Option<f32>,
+}
+
+const UNBENCHMARKED: ModelBenchmark = ModelBenchmark {
+    wer_earnings22: None,
+    realtime_factor: None,
+};
+
+/// Parakeet TDT 0.6B v3's 25 European languages.
+const PARAKEET_V3_LANGUAGES: &[&str] = &[
+    "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt",
+    "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk",
+];
+
+/// SenseVoice's headline five. The model card advertises "50+ languages" but
+/// does not enumerate a verified 50-code set, and nothing in this repo pins one
+/// down, so inventing the other 45 would be a lie in the UI. The full set lands
+/// with engine support (phase 3); until then `supported: false` greys the row.
+const SENSEVOICE_LANGUAGES: &[&str] = &["yue", "zh", "en", "ja", "ko"];
+
+const GROUPS: &[ModelGroup] = &[
+    ModelGroup {
+        id: "v2",
+        kind: "stt",
+        name: "Parakeet TDT 0.6B v2",
+        description: "Best for clear spoken English, dictation into any field. Needs a 4-core CPU and 8 GB RAM; no GPU.",
+        file_ids: &[
+            "parakeet-v2-encoder",
+            "parakeet-v2-decoder",
+            "parakeet-v2-joiner",
+            "parakeet-v2-tokens",
+        ],
+        supported: true,
+        languages: &["en"],
+        // The helper runs sherpa-onnx's *offline* recognizer, so partial text
+        // arrives after release, not while speaking. The old HTML badge said
+        // "Streaming"; that was never true of this pipeline.
+        streaming: false,
+        language_detection: false,
+        // BENCHMARK.md §3, earnings22 row: 15.7% WER at 9.7× realtime.
+        benchmark: ModelBenchmark {
+            wer_earnings22: Some(0.157),
+            realtime_factor: Some(9.7),
+        },
+    },
+    ModelGroup {
+        id: "v3",
+        kind: "stt",
+        name: "Parakeet TDT 0.6B v3",
+        description: "Automatic language detection across 25 European languages. Good if you dictate in more than one language.",
+        file_ids: &[
+            "parakeet-v3-encoder",
+            "parakeet-v3-decoder",
+            "parakeet-v3-joiner",
+            "parakeet-v3-tokens",
+        ],
+        supported: true,
+        languages: PARAKEET_V3_LANGUAGES,
+        streaming: false,
+        language_detection: true,
+        // v3 was never benchmarked on our corpora (BENCHMARK.md cites
+        // Superwhisper's published v3 figures, not our own run).
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "sv",
+        kind: "stt",
+        name: "SenseVoice Small",
+        description: "Compact multilingual model, smaller download. Not available in this build yet.",
+        // Deliberately empty: there is no SenseVoice entry in `CATALOG`, and
+        // `bundle_ids` rejects "sv". The row exists so Settings can grey it out
+        // as "not available yet" instead of offering a download that cannot work.
+        file_ids: &[],
+        supported: false,
+        languages: SENSEVOICE_LANGUAGES,
+        streaming: false,
+        // SenseVoice ships a language-ID head; unwired until phase 3.
+        language_detection: true,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "2b",
+        kind: "llm",
+        name: "Qwen 3.5 2B",
+        description: "Lighter cleanup model for 8 GB machines. Fastest of the three.",
+        file_ids: &["qwen-2b"],
+        supported: true,
+        // Text cleanup models do not care about the spoken language strings.
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        // BENCHMARK.md §5 records the 2B cleanup run as "*running*" — no numbers.
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "4b",
+        kind: "llm",
+        name: "Qwen 3.5 4B",
+        description: "Best balance of cleanup quality and memory. Needs 8 GB RAM.",
+        file_ids: &["qwen-4b"],
+        supported: true,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "9b",
+        kind: "llm",
+        name: "Qwen 3.5 9B",
+        description: "Highest quality rewriting. Needs 16 GB RAM.",
+        file_ids: &["qwen-9b"],
+        supported: true,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+];
+
+/// One row of the Settings model table.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelGroupStatus {
+    /// == `ModelGroup.id`; the value stored in config.
+    pub id: String,
+    /// `"stt"` | `"llm"`.
+    pub kind: String,
+    pub name: String,
+    pub description: String,
+    pub supported: bool,
+    pub languages: Vec<String>,
+    pub streaming: bool,
+    pub language_detection: bool,
+    /// Expected total for the whole group.
+    pub size_bytes: u64,
+    pub installed_bytes: u64,
+    /// Every file present and size-valid.
+    pub installed: bool,
+    /// Some files on disk but the group is incomplete (`installed == false`).
+    pub partial: bool,
+    pub file_count: usize,
+    pub installed_file_count: usize,
+    pub benchmark: ModelBenchmark,
+}
+
 pub fn models_dir(config_dir: &Path, custom_dir: &str) -> PathBuf {
     if custom_dir.trim().is_empty() {
         config_dir.join("models")
@@ -214,7 +411,20 @@ pub fn status(config_dir: &Path, custom_dir: &str) -> Result<ModelStatus, String
     })
 }
 
-pub fn download(id: &str, config_dir: &Path, custom_dir: &str) -> Result<PathBuf, String> {
+pub fn download(
+    id: &str,
+    config_dir: &Path,
+    custom_dir: &str,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<PathBuf, String> {
+    if cancel_requested() {
+        // A stale flag would otherwise abort the transfer before its first
+        // byte; commands clear it at the start, this is the belt for every
+        // other caller.
+        return Err(
+            "[DL-009] Download cancelled — press DOWNLOAD on the model to resume.".into(),
+        );
+    }
     let spec = CATALOG
         .iter()
         .find(|spec| spec.id == id)
@@ -277,8 +487,33 @@ pub fn download(id: &str, config_dir: &Path, custom_dir: &str) -> Result<PathBuf
         .truncate(!append)
         .open(&part)
         .map_err(|error| format!("Could not open partial model '{}': {}", part.display(), error))?;
-    std::io::copy(&mut response, &mut file)
-        .map_err(|error| format!("Could not write model '{}': {}", spec.id, error))?;
+    // Chunked copy, not io::copy: the loop is where the transfer reports real
+    // percent progress and honours a user cancel. `expected_size` is verified
+    // right after, so using it as the denominator is safe.
+    const CHUNK: usize = 256 * 1024;
+    let mut buffer = vec![0_u8; CHUNK];
+    let expected = spec.expected_size;
+    let mut done = part_size;
+    loop {
+        if cancel_requested() {
+            // Keep the .part file: a later press of DOWNLOAD resumes from the
+            // same byte instead of starting over.
+            return Err(format!(
+                "[DL-009] Download cancelled — the partial file was kept in {}. Press DOWNLOAD on the model to resume.",
+                part.display()
+            ));
+        }
+        let read = response
+            .read(&mut buffer)
+            .map_err(|error| format!("Could not download model '{}': {}", spec.id, error))?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read])
+            .map_err(|error| format!("Could not write model '{}': {}", spec.id, error))?;
+        done += read as u64;
+        progress(done.min(expected), expected);
+    }
     file.flush()
         .map_err(|error| format!("Could not flush model '{}': {}", spec.id, error))?;
     let actual_size = fs::metadata(&part)
@@ -333,7 +568,8 @@ pub fn download_bundle(
 ) -> Result<(), String> {
     for id in bundle_ids(stt_version, llm_size)? {
         progress(id, "starting", "Download starting.");
-        match download(id, config_dir, custom_dir) {
+        // The legacy bundle path predates the percent field; no percent events.
+        match download(id, config_dir, custom_dir, |_, _| {}) {
             Ok(_) => progress(id, "complete", "Download complete."),
             Err(error) => {
                 progress(id, "failed", &error);
@@ -342,6 +578,167 @@ pub fn download_bundle(
         }
     }
     Ok(())
+}
+
+/// The Settings model table: one row per logical model, resolved from the
+/// existing per-file check.
+///
+/// Named `group_catalog`, not `catalog`, because `catalog()` above is the
+/// per-file accessor that `llm_local` already consumes — Rust has no overloads
+/// and that call site is outside this change.
+pub fn group_catalog(
+    config_dir: &Path,
+    custom_dir: &str,
+) -> Result<Vec<ModelGroupStatus>, String> {
+    // ponytail: reuse `status()` instead of walking the filesystem again. It is
+    // already size-only (see the hash note in `status`), so opening Settings
+    // stays microseconds even with 3.4 GB of models on disk.
+    let files = status(config_dir, custom_dir)?;
+    let mut groups = Vec::with_capacity(GROUPS.len());
+    for group in GROUPS {
+        validate_group(group)?;
+        let mut size_bytes = 0_u64;
+        let mut installed_bytes = 0_u64;
+        let mut file_count = 0_usize;
+        let mut installed_file_count = 0_usize;
+        let mut every_file_valid = true;
+        for file_id in group.file_ids {
+            let file = files
+                .files
+                .iter()
+                .find(|file| file.id == *file_id)
+                .ok_or_else(|| {
+                    format!("Model group '{}' references unknown file '{}'.", group.id, file_id)
+                })?;
+            file_count += 1;
+            size_bytes += file.expected_size;
+            if file.installed {
+                installed_file_count += 1;
+                installed_bytes += file.installed_bytes;
+            }
+            // `verified` is the same size-only rule `status()` reports.
+            if !file.verified {
+                every_file_valid = false;
+            }
+        }
+        let installed = group.supported && file_count > 0 && every_file_valid;
+        // `partial` also covers "all files are on disk but one failed the size
+        // check": that is a broken group, not a missing one, and the UI should
+        // offer a re-download rather than claim it is ready.
+        let partial = !installed && installed_file_count > 0;
+        groups.push(ModelGroupStatus {
+            id: group.id.to_string(),
+            kind: group.kind.to_string(),
+            name: group.name.to_string(),
+            description: group.description.to_string(),
+            supported: group.supported,
+            languages: group.languages.iter().map(|code| code.to_string()).collect(),
+            streaming: group.streaming,
+            language_detection: group.language_detection,
+            size_bytes,
+            installed_bytes,
+            installed,
+            partial,
+            file_count,
+            installed_file_count,
+            benchmark: group.benchmark,
+        });
+    }
+    Ok(groups)
+}
+
+/// Download every file of one logical model, in catalog order.
+///
+/// The only fetch path for the Settings table — there is no automatic or
+/// background download (binding offline-contract rule). `progress` is called
+/// with `(group id, "starting"|"progress"|"complete"|"failed", message, percent)`;
+/// `progress` events carry the percent for the whole group, so the UI fills one
+/// smooth bar across the group's files instead of jumping file to file.
+pub fn download_group(
+    id: &str,
+    config_dir: &Path,
+    custom_dir: &str,
+    mut progress: impl FnMut(&str, &str, &str, Option<f32>),
+) -> Result<(), String> {
+    let group = GROUPS
+        .iter()
+        .find(|group| group.id == id)
+        .ok_or_else(|| format!("Unknown model '{}'.", id))?;
+    if !group.supported {
+        return Err(format!(
+            "{} is not available in this build yet. Keep Parakeet for speech, or switch to cloud mode in Settings.",
+            group.name
+        ));
+    }
+    // Also rejects a supported group with no files: that would be a silent
+    // no-op, which reads to the user as "downloaded" when nothing was fetched.
+    validate_group(group)?;
+    let total: u64 = group
+        .file_ids
+        .iter()
+        .filter_map(|file_id| {
+            CATALOG
+                .iter()
+                .find(|spec| spec.id == *file_id)
+                .map(|spec| spec.expected_size)
+        })
+        .sum();
+    let mut done: u64 = 0;
+    for file_id in group.file_ids {
+        let message = format!("Downloading {} ({}).", group.name, file_id);
+        progress(group.id, "starting", &message, None);
+        let file_done = done;
+        let result = download(file_id, config_dir, custom_dir, |file_bytes, _expected| {
+            // Sizes come from the validated catalog, so the denominators match;
+            // min keeps the bar from exceeding 100 on a server that could not
+            // honour the resume Range and sent a longer body.
+            let percent = if total > 0 {
+                ((file_done + file_bytes) as f32 / total as f32 * 100.0).min(100.0)
+            } else {
+                0.0
+            };
+            progress(
+                group.id,
+                "progress",
+                &format!("{} — {:.0}%.", file_id, percent),
+                Some(percent),
+            );
+        });
+        // The inner progress closure is a temporary dropped with the `let`
+        // above, so its borrow of `progress` has ended here.
+        match result {
+            Ok(_) => {
+                let spec = CATALOG
+                    .iter()
+                    .find(|spec| spec.id == *file_id)
+                    .map(|spec| spec.expected_size)
+                    .unwrap_or(0);
+                done += spec;
+                progress(
+                    group.id,
+                    "complete",
+                    "Download complete.",
+                    Some(done_percent(done, total)),
+                );
+            }
+            Err(error) => {
+                progress(group.id, "failed", &error, None);
+                return Err(error);
+            }
+        }
+    }
+    // No separate "group is ready" event: the last file's "complete" is it, and
+    // the returned catalog carries the authoritative installed/count fields.
+    Ok(())
+}
+
+/// Percent helper for the completed-file counter; 0 on a zero-byte group.
+fn done_percent(done: u64, total: u64) -> f32 {
+    if total > 0 {
+        (done as f32 / total as f32 * 100.0).min(100.0)
+    } else {
+        0.0
+    }
 }
 
 pub fn delete(config_dir: &Path, custom_dir: &str) -> Result<(), String> {
@@ -444,6 +841,28 @@ fn validate_component(name: &str, value: &str) -> Result<(), String> {
 
 fn validate_filename(filename: &str) -> Result<(), String> {
     validate_component("filename", filename)
+}
+
+fn validate_group(group: &ModelGroup) -> Result<(), String> {
+    validate_component("model group id", group.id)?;
+    if group.kind != "stt" && group.kind != "llm" {
+        return Err(format!("Model group '{}' has an unknown kind.", group.id));
+    }
+    if group.name.trim().is_empty() || group.description.trim().is_empty() {
+        return Err(format!("Model group '{}' is missing a name or description.", group.id));
+    }
+    if group.supported && group.file_ids.is_empty() {
+        return Err(format!(
+            "Model group '{}' is marked supported but lists no files. This is a bug in SmoothFlow, not something you did.",
+            group.id
+        ));
+    }
+    for file_id in group.file_ids {
+        if !CATALOG.iter().any(|spec| spec.id == *file_id) {
+            return Err(format!("Model group '{}' references unknown file '{}'.", group.id, file_id));
+        }
+    }
+    Ok(())
 }
 
 fn file_is_valid(path: &Path, spec: &ModelSpec) -> Result<bool, String> {
@@ -577,5 +996,113 @@ mod tests {
         // Unknown values still fail, so a typo is never read as "skip".
         assert!(bundle_ids("v4", "4b").is_err());
         assert!(bundle_ids("v2", "12b").is_err());
+    }
+
+    /// A path that does not exist, so `status()` reports "not installed" without
+    /// touching the real models folder or the network.
+    fn missing_models_root() -> (PathBuf, String) {
+        (
+            std::env::temp_dir().join("smoothflow-group-catalog-test"),
+            String::new(),
+        )
+    }
+
+    #[test]
+    fn every_group_id_is_a_value_the_config_can_hold() {
+        // The ids are written to smoothflow.json, so they must round-trip through
+        // the same parser `download_bundle` uses. A new id here means a new config
+        // value, which must be taught to `bundle_ids` in the same change.
+        let stt_ids: Vec<&str> = GROUPS.iter().filter(|g| g.kind == "stt").map(|g| g.id).collect();
+        let llm_ids: Vec<&str> = GROUPS.iter().filter(|g| g.kind == "llm").map(|g| g.id).collect();
+        assert_eq!(stt_ids, vec!["v2", "v3", "sv"]);
+        assert_eq!(llm_ids, vec!["2b", "4b", "9b"]);
+        for group in GROUPS {
+            if group.kind == "stt" {
+                assert_eq!(bundle_ids(group.id, "4b").is_ok(), group.supported, "stt '{}' disagrees with bundle_ids", group.id);
+            } else {
+                assert_eq!(bundle_ids("v2", group.id).is_ok(), group.supported, "llm '{}' disagrees with bundle_ids", group.id);
+            }
+        }
+        // v3 lists the 25 codes Parakeet v3 advertises; v2 is English only.
+        let v2 = GROUPS.iter().find(|g| g.id == "v2").unwrap();
+        let v3 = GROUPS.iter().find(|g| g.id == "v3").unwrap();
+        assert_eq!(v2.languages, &["en"]);
+        assert_eq!(v3.languages.len(), 25);
+        assert!(v3.languages.contains(&"en"));
+        // Cleanup models are language-agnostic and must not claim languages.
+        assert!(GROUPS.iter().filter(|g| g.kind == "llm").all(|g| g.languages.is_empty()));
+    }
+
+    #[test]
+    fn sensevoice_is_unsupported_with_no_files() {
+        let sv = GROUPS.iter().find(|g| g.id == "sv").unwrap();
+        assert!(!sv.supported);
+        assert!(sv.file_ids.is_empty());
+        assert!(validate_group(sv).is_ok(), "an unsupported empty group is catalogued, not broken");
+        // Nothing in the file catalog backs it, so downloading must fail loudly.
+        let (root, custom) = missing_models_root();
+        let mut events = 0;
+        let error = download_group("sv", &root, &custom, |_, _, _, _| events += 1).unwrap_err();
+        assert!(error.contains("not available"), "unexpected error: {error}");
+        assert_eq!(events, 0, "an unsupported group must not emit progress as if it downloaded");
+    }
+
+    #[test]
+    fn every_group_size_is_the_sum_of_its_file_specs() {
+        let (root, custom) = missing_models_root();
+        let catalog = group_catalog(&root, &custom).unwrap();
+        assert_eq!(catalog.len(), GROUPS.len());
+        for status in &catalog {
+            let group = GROUPS.iter().find(|g| g.id == status.id).unwrap();
+            let expected: u64 = group
+                .file_ids
+                .iter()
+                .map(|id| CATALOG.iter().find(|spec| spec.id == *id).unwrap().expected_size)
+                .sum();
+            assert_eq!(status.size_bytes, expected, "group '{}' size mismatch", group.id);
+            assert_eq!(status.file_count, group.file_ids.len());
+            // No files on disk, so nothing is installed and nothing is partial.
+            assert!(!status.installed, "group '{}' cannot be installed in an empty dir", group.id);
+            assert!(!status.partial);
+            assert_eq!(status.installed_bytes, 0);
+            assert_eq!(status.installed_file_count, 0);
+        }
+        // The Parakeet groups are four files each; the Qwen groups are one GGUF.
+        let by_id = |id: &str| catalog.iter().find(|s| s.id == id).unwrap().clone();
+        assert_eq!(by_id("v2").file_count, 4);
+        assert_eq!(by_id("v3").file_count, 4);
+        assert_eq!(by_id("sv").file_count, 0);
+        assert_eq!(by_id("2b").file_count, 1);
+        assert_eq!(by_id("4b").file_count, 1);
+        assert_eq!(by_id("9b").file_count, 1);
+        assert_eq!(by_id("sv").size_bytes, 0);
+    }
+
+    #[test]
+    fn only_the_measured_v2_group_carries_a_benchmark() {
+        for group in GROUPS {
+            if group.id == "v2" {
+                // BENCHMARK.md §3: 15.7% WER on earnings22 at 9.7x realtime.
+                assert_eq!(group.benchmark.wer_earnings22, Some(0.157));
+                assert_eq!(group.benchmark.realtime_factor, Some(9.7));
+            } else {
+                assert_eq!(group.benchmark.wer_earnings22, None, "group '{}' must not invent a WER", group.id);
+                assert_eq!(group.benchmark.realtime_factor, None, "group '{}' must not invent a speed", group.id);
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_and_unsupported_group_downloads_error() {
+        let (root, custom) = missing_models_root();
+        let unknown = download_group("v4", &root, &custom, |_, _, _, _| {}).unwrap_err();
+        assert!(unknown.contains("Unknown model"), "unexpected error: {unknown}");
+        assert!(download_group("", &root, &custom, |_, _, _, _| {}).is_err());
+        // A supported group without files is a bug, and must never read as success.
+        let mut broken = GROUPS[0].clone();
+        broken.id = "broken";
+        broken.file_ids = &[];
+        assert!(validate_group(&broken).is_err());
+        assert!(validate_group(&GROUPS[0]).is_ok());
     }
 }

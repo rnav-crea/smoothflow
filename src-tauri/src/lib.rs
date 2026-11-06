@@ -1,6 +1,7 @@
 mod accessibility;
 mod audio;
 pub mod config;
+mod engines;
 mod history;
 #[cfg(target_os = "macos")]
 mod hotkey;
@@ -1069,6 +1070,9 @@ struct ModelDownloadProgress<'a> {
     id: &'a str,
     status: &'a str,
     message: &'a str,
+    /// 0..=100 when known. Optional so older payloads (per-file "starting"/
+    /// "failed") stay valid and old frontend listeners simply ignore it.
+    percent: Option<f32>,
 }
 
 #[tauri::command]
@@ -1125,6 +1129,8 @@ async fn download_models(
 
     // ponytail: spawn_blocking, not #[command(async)] — a multi-minute download
     // on a tokio worker starves every other async task; the blocking pool won't.
+    // A fresh transfer clears a stale cancel flag from a previous one first.
+    offline::reset_cancel();
     tauri::async_runtime::spawn_blocking(move || {
         offline::download_bundle(
             &stt_version,
@@ -1138,6 +1144,8 @@ async fn download_models(
                         id,
                         status,
                         message,
+                        // The legacy bundle path has no percent signal.
+                        percent: None,
                     },
                 );
             },
@@ -1161,6 +1169,126 @@ async fn delete_models(state: tauri::State<'_, AppState>) -> Result<offline::Mod
     })
     .await
     .map_err(|e| format!("[DL-002] The model delete task failed: {e}"))?
+}
+
+/// The Settings model table, one row per logical model, grouped from the same
+/// per-file check `get_offline_status` uses. Filesystem only: no network call
+/// and no hashing (Settings opens this every time), so it stays synchronous.
+#[tauri::command]
+fn get_model_catalog(
+    state: tauri::State<AppState>,
+) -> Result<Vec<offline::ModelGroupStatus>, String> {
+    let custom_dir = state.config.lock().unwrap().models_dir.clone();
+    let config_dir = Config::path()
+        .parent()
+        .ok_or_else(|| "Could not determine the SmoothFlow config directory.".to_string())?
+        .to_path_buf();
+    offline::group_catalog(&config_dir, &custom_dir)
+}
+
+/// Download one logical model by its config id (`v2`/`v3`/`2b`/`4b`/`9b`).
+/// Returns the refreshed table so the caller does not need a second round trip.
+#[tauri::command]
+async fn download_model(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Vec<offline::ModelGroupStatus>, String> {
+    let custom_dir = state.config.lock().unwrap().models_dir.clone();
+    let config_dir = Config::path()
+        .parent()
+        .ok_or_else(|| "Could not determine the SmoothFlow config directory.".to_string())?
+        .to_path_buf();
+
+    // ponytail: spawn_blocking, not #[command(async)] — up to 5.7 GB on a tokio
+    // worker starves every other async task; the blocking pool won't.
+    // A fresh transfer clears a stale cancel flag from a previous one first.
+    offline::reset_cancel();
+    tauri::async_runtime::spawn_blocking(move || {
+        offline::download_group(&id, &config_dir, &custom_dir, |id, status, message, percent| {
+            // Same payload shape as `model-download-progress`; the event name is
+            // what tells the two apart. `&str` fields, like the model one.
+            let _ = app.emit(
+                "model-group-download-progress",
+                ModelDownloadProgress {
+                    id,
+                    status,
+                    message,
+                    percent,
+                },
+            );
+        })?;
+        offline::group_catalog(&config_dir, &custom_dir)
+    })
+    .await
+    .map_err(|e| format!("[DL-003] The model download task failed: {e}"))?
+}
+
+/// The engines are two native child processes (~46 MB) downloaded on demand
+/// instead of shipped in the installer. Reports on-disk reality only: no network
+/// call, so it is a microsecond command and stays synchronous.
+#[tauri::command]
+fn get_engine_status() -> Result<engines::EngineStatus, String> {
+    let config_dir = Config::path()
+        .parent()
+        .ok_or_else(|| "Could not determine the SmoothFlow config directory.".to_string())?
+        .to_path_buf();
+    engines::status(&config_dir)
+}
+
+/// Cancel the running transfer (engines or models). The Rust transfer loop
+/// checks this flag between 256 KiB chunks, so a multi-GB download stops within
+/// about a second; the `.part` file is kept so a retry resumes. One flag is
+/// fine because a Cancel button only appears while one transfer runs.
+#[tauri::command]
+fn cancel_downloads() -> bool {
+    offline::request_cancel();
+    true
+}
+
+/// Download and install the engines for this platform. The only place an engine
+/// fetch can start — there is no automatic or background download anywhere
+/// (binding offline-contract rule).
+#[tauri::command]
+async fn download_engines(app: tauri::AppHandle) -> Result<engines::EngineStatus, String> {
+    let config_dir = Config::path()
+        .parent()
+        .ok_or_else(|| "Could not determine the SmoothFlow config directory.".to_string())?
+        .to_path_buf();
+    // ponytail: spawn_blocking, not #[command(async)] — a ~46 MB download on a
+    // tokio worker starves every other async task; the blocking pool won't.
+    tauri::async_runtime::spawn_blocking(move || {
+        engines::download(&config_dir, |id, status, message, percent| {
+            // Same payload shape as `model-download-progress`; the event name is
+            // what tells the two apart. `&str` fields, like the model one.
+            let _ = app.emit(
+                "engine-download-progress",
+                ModelDownloadProgress {
+                    id,
+                    status,
+                    message,
+                    percent,
+                },
+            );
+        })?;
+        engines::status(&config_dir)
+    })
+    .await
+    .map_err(|e| format!("[ENG-002] The engine download task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn delete_engines() -> Result<engines::EngineStatus, String> {
+    let config_dir = Config::path()
+        .parent()
+        .ok_or_else(|| "Could not determine the SmoothFlow config directory.".to_string())?
+        .to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        engines::delete(&config_dir)?;
+        engines::status(&config_dir)
+    })
+    .await
+    .map_err(|e| format!("[ENG-007] The engine delete task failed: {e}"))?
 }
 
 /// Text-in / text-out check for the on-device cleanup model: deterministic rules
@@ -1741,6 +1869,12 @@ pub fn run() {
             get_models_dir,
             download_models,
             delete_models,
+            get_model_catalog,
+            download_model,
+            get_engine_status,
+            download_engines,
+            cancel_downloads,
+            delete_engines,
             test_local_pipeline,
             local_models::list_local_models,
             local_models::inspect_stt_dir,

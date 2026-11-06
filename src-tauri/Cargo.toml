@@ -30,6 +30,11 @@ sha2 = "0.10"
 nnnoiseless = "0.5"
 arboard = "3"
 regex = "1"
+# On-demand engine download: the offline engines are unpacked from the zip
+# archives published to the `engines` prerelease instead of shipping in the
+# installer (~46 MB per install). deflate-only: the published archives use
+# deflate and nothing else, so aes, bzip2, zstd and time stay out of the build.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
 # Dictation history: SQLite (bundled compiles sqlite3.c via cc) with
 # user_version-based migrations, modelled on Handy's history manager.

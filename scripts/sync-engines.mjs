@@ -1,7 +1,16 @@
-// Copy the offline engines next to the dev binary so dev matches an install.
-// tauri-build also copies `bundle.resources` into the cargo target dir, so this
-// is a belt-and-braces path for a target dir that was cleaned or a build script
-// that did not rerun. Never deletes anything.
+// Mirror a locally built engine tree next to the dev binary.
+//
+// The engines no longer ship in the installer: the app downloads them on
+// demand into `<config dir>/engines/<target>/`, which `stt_local` and
+// `llm_local` prefer. This script only covers the fallback path — the
+// executable's own directory — so a dev machine that has a `binaries/win-x64`
+// tree (left over from a manual build of `native/smoothflow-stt` plus a
+// packaged llama runtime) gets it copied into `target/debug` without anyone
+// touching the config directory by hand. A dev machine without one downloads
+// the engines through the app like any user.
+//
+// Never deletes anything, and never fails the dev server: a missing source is
+// only a warning.
 import { cpSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +25,9 @@ if (process.platform !== "win32") {
 }
 
 if (!existsSync(from)) {
-  console.warn(`[sync-engines] ${from} is missing — dev will not have offline engines.`);
+  console.log(
+    `[sync-engines] ${from} is not present — the app will download the engines into its config directory instead.`,
+  );
   process.exit(0);
 }
 

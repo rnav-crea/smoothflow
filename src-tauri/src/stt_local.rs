@@ -26,6 +26,195 @@ const DECODER: &str = "decoder.int8.onnx";
 const JOINER: &str = "joiner.int8.onnx";
 const TOKENS: &str = "tokens.txt";
 
+/// One file a model family needs: how to recognise it in a folder and which
+/// helper flag feeds it. `pick` matches the prefix so the same part can ship
+/// as `encoder.onnx` or `encoder.int8.onnx`; `int8` wins (see `local_models`).
+struct Part {
+    prefix: &'static str,
+    extension: &'static str,
+    /// Exact flag name the helper accepts (`main.cpp` `DestinationFor`).
+    flag: &'static str,
+}
+
+/// One supported model family: the file set the helper needs to load it.
+struct Family {
+    id: &'static str,
+    parts: &'static [Part],
+}
+
+const fn file_part(prefix: &'static str, flag: &'static str) -> Part {
+    Part {
+        prefix,
+        extension: ".onnx",
+        flag,
+    }
+}
+
+// Order is load-bearing: the first family whose file set is complete wins, so
+// families are listed longest-and-most-specific first. `transducer` is unique
+// (nothing else has a joiner); whisper/canary/firered are distinguished from
+// the two-file families only by order, which is fine for a *custom* folder —
+// catalog folders resolve by their configured model id in phase 3.
+const FAMILIES: &[Family] = &[
+    // Parakeet TDT (v2/v3): encoder + decoder + joiner + tokens.
+    Family {
+        id: "transducer",
+        parts: &[
+            file_part("encoder", "--encoder"),
+            file_part("decoder", "--decoder"),
+            file_part("joiner", "--joiner"),
+            Part {
+                prefix: "tokens",
+                extension: ".txt",
+                flag: "--tokens",
+            },
+        ],
+    },
+    // Whisper: encoder + decoder + tokens (no joiner).
+    Family {
+        id: "whisper",
+        parts: &[
+            file_part("encoder", "--whisper-encoder"),
+            file_part("decoder", "--whisper-decoder"),
+            Part {
+                prefix: "tokens",
+                extension: ".txt",
+                flag: "--tokens",
+            },
+        ],
+    },
+    // Moonshine v1: preprocessor + encoder + uncached + cached decoders.
+    Family {
+        id: "moonshine",
+        parts: &[
+            file_part("preprocessor", "--moonshine-preprocessor"),
+            file_part("encoder", "--moonshine-encoder"),
+            file_part("uncacheddecoder", "--moonshine-uncached-decoder"),
+            file_part("cacheddecoder", "--moonshine-cached-decoder"),
+            Part {
+                prefix: "tokens",
+                extension: ".txt",
+                flag: "--tokens",
+            },
+        ],
+    },
+    // Moonshine v2: preprocessor + encoder + one merged decoder.
+    Family {
+        id: "moonshine-v2",
+        parts: &[
+            file_part("preprocessor", "--moonshine-preprocessor"),
+            file_part("encoder", "--moonshine-encoder"),
+            file_part("mergeddecoder", "--moonshine-merged-decoder"),
+            Part {
+                prefix: "tokens",
+                extension: ".txt",
+                flag: "--tokens",
+            },
+        ],
+    },
+    // Canary / FireRed ASR: encoder + decoder + tokens.
+    Family {
+        id: "canary",
+        parts: &[
+            file_part("encoder", "--canary-encoder"),
+            file_part("decoder", "--canary-decoder"),
+            Part {
+                prefix: "tokens",
+                extension: ".txt",
+                flag: "--tokens",
+            },
+        ],
+    },
+    Family {
+        id: "fire_red_asr",
+        parts: &[
+            file_part("encoder", "--firered-encoder"),
+            file_part("decoder", "--firered-decoder"),
+            Part {
+                prefix: "tokens",
+                extension: ".txt",
+                flag: "--tokens",
+            },
+        ],
+    },
+    // SenseVoice / Paraformer / Dolphin / FireRed CTC: model.onnx + tokens.
+    Family {
+        id: "sense_voice",
+        parts: &[
+            file_part("model", "--sensevoice"),
+            Part {
+                prefix: "tokens",
+                extension: ".txt",
+                flag: "--tokens",
+            },
+        ],
+    },
+    Family {
+        id: "paraformer",
+        parts: &[
+            file_part("model", "--paraformer"),
+            Part {
+                prefix: "tokens",
+                extension: ".txt",
+                flag: "--tokens",
+            },
+        ],
+    },
+    Family {
+        id: "dolphin",
+        parts: &[
+            file_part("model", "--dolphin"),
+            Part {
+                prefix: "tokens",
+                extension: ".txt",
+                flag: "--tokens",
+            },
+        ],
+    },
+    Family {
+        id: "fire_red_asr_ctc",
+        parts: &[
+            file_part("model", "--firered-ctc"),
+            Part {
+                prefix: "tokens",
+                extension: ".txt",
+                flag: "--tokens",
+            },
+        ],
+    },
+    // NeMo CTC (Parakeet CTC) / Zipformer CTC: encoder.onnx + tokens.
+    Family {
+        id: "nemo_ctc",
+        parts: &[
+            file_part("encoder", "--nemo-ctc"),
+            Part {
+                prefix: "tokens",
+                extension: ".txt",
+                flag: "--tokens",
+            },
+        ],
+    },
+    Family {
+        id: "zipformer2_ctc",
+        parts: &[
+            file_part("encoder", "--zipformer-ctc"),
+            Part {
+                prefix: "tokens",
+                extension: ".txt",
+                flag: "--tokens",
+            },
+        ],
+    },
+];
+
+/// A resolved model: which family it is and the `(flag, path)` list to spawn
+/// the helper with, in family part order.
+#[derive(Debug)]
+struct ModelFiles {
+    family: &'static str,
+    args: Vec<(&'static str, PathBuf)>,
+}
+
 /// A live helper process plus the two pipes we speak to it over.
 struct Session {
     child: Child,
@@ -145,22 +334,15 @@ fn spawn(config: &Config) -> Result<Session, String> {
     }
 
     let files = model_files(config)?;
-    let encoder = files.encoder.as_path();
-    let decoder = files.decoder.as_path();
-    let joiner = files.joiner.as_path();
-    let tokens = files.tokens.as_path();
+    sf_log!("STT: local helper loading the {} family", files.family);
 
     let threads = stt_threads();
     sf_log!("STT: local helper decoding with {threads} threads");
-    let mut child = Command::new(&helper)
-        .arg("--encoder")
-        .arg(&encoder)
-        .arg("--decoder")
-        .arg(&decoder)
-        .arg("--joiner")
-        .arg(&joiner)
-        .arg("--tokens")
-        .arg(&tokens)
+    let mut command = Command::new(&helper);
+    for (flag, path) in &files.args {
+        command.arg(flag).arg(path);
+    }
+    let mut child = command
         .arg("--threads")
         .arg(threads.to_string())
         .stdin(Stdio::piped())
@@ -212,8 +394,17 @@ fn unsupported_platform_message() -> String {
     "[STT-001] Offline mode is not yet available on macOS or Linux. Please use cloud mode in Settings.".to_string()
 }
 
-/// `<app dir>/smoothflow-stt[.exe]`, next to the running binary.
+/// Resolve the helper binary.
+///
+/// Order: the downloaded engine under the config directory
+/// (`<config dir>/engines/<target>/smoothflow-stt[.exe]`, written by
+/// `engines::download`) first, then `<app dir>/smoothflow-stt[.exe]` next to the
+/// running binary. The second branch is what a dev build and a hand-installed
+/// copy use, so neither has to download anything.
 fn helper_path() -> Result<PathBuf, String> {
+    if let Some(helper) = crate::engines::installed_helper() {
+        return Ok(helper);
+    }
     let exe = std::env::current_exe()
         .map_err(|e| format!("[STT-001] Could not locate the SmoothFlow executable: {e}"))?;
     let dir = exe
@@ -234,39 +425,13 @@ fn model_dir(config: &Config) -> Result<PathBuf, String> {
         .join(&config.stt_version))
 }
 
-/// The four files handed to the helper. Paths are resolved but not yet checked.
-#[derive(Debug)]
-struct ModelFiles {
-    encoder: PathBuf,
-    decoder: PathBuf,
-    joiner: PathBuf,
-    tokens: PathBuf,
-}
-
-/// The four parts found in `dir`, `None` where a part is missing.
-///
-/// Prefix matching, not the exact catalog filenames: a bundle ships as
-/// `encoder.onnx`, `encoder.int8.onnx` or with a language suffix. This must
-/// agree with what `inspect_stt_dir` accepts in Settings — otherwise a folder
-/// the UI reports as complete would fail at spawn instead.
-fn resolve_in(dir: &Path) -> [Option<PathBuf>; 4] {
-    let files = match std::fs::read_dir(dir) {
-        Ok(entries) => crate::local_models::collect_files(entries),
-        Err(_) => Vec::new(),
-    };
-    let mut found: [Option<PathBuf>; 4] = [None, None, None, None];
-    for (slot, (prefix, extension)) in found.iter_mut().zip(crate::local_models::STT_PARTS) {
-        *slot = crate::local_models::pick(&files, prefix, extension).map(PathBuf::from);
-    }
-    found
-}
-
-/// Resolve and verify the four Parakeet files for `config`.
+/// Resolve and verify the model files for `config`.
 ///
 /// A non-empty `custom_stt_dir` wins, so a user's own bundle is read where they
-/// put it; otherwise the catalog layout for `stt_version` applies. Every path
-/// is checked here — a missing file is a user-fixable error with the fix in the
-/// message, never a spawn the helper would fail to load.
+/// put it; otherwise the catalog layout for `stt_version` applies. The folder
+/// is matched against `FAMILIES` by shape: the first family whose whole file
+/// set is present wins. A folder no family recognises is a user-fixable error
+/// with the fix in the message, never a spawn the helper would fail to load.
 fn model_files(config: &Config) -> Result<ModelFiles, String> {
     let custom = config.custom_stt_dir.trim();
     let dir = if custom.is_empty() {
@@ -274,36 +439,59 @@ fn model_files(config: &Config) -> Result<ModelFiles, String> {
     } else {
         PathBuf::from(custom)
     };
-    let found = resolve_in(&dir);
-    let expected = [ENCODER, DECODER, JOINER, TOKENS];
-    for (index, path) in found.iter().enumerate() {
-        if path.is_some() {
-            continue;
-        }
-        let name = crate::local_models::STT_PARTS[index].0;
-        return Err(if custom.is_empty() {
-            // Catalog download: name the file it expects, so the fix is obvious.
-            format!(
-                "[STT-002] Speech model file not found at {}. Download the Parakeet models in Settings, or enable cloud mode in Settings.",
-                dir.join(expected[index]).display()
-            )
-        } else {
-            format!(
-                "[STT-002] Speech model file '{name}' not found in {}. Pick a folder that holds encoder, decoder and joiner (.onnx) plus tokens.txt, or enable cloud mode in Settings.",
-                dir.display()
-            )
-        });
+    if let Some(files) = resolve_in(&dir) {
+        return Ok(files);
     }
-    let [Some(encoder), Some(decoder), Some(joiner), Some(tokens)] = found else {
-        // Unreachable: every slot was checked above.
-        return Err("[STT-002] The speech model folder is incomplete.".to_string());
+    let err = if custom.is_empty() {
+        // Catalog download: name what the folder was expected to hold.
+        format!(
+            "[STT-002] Speech model files not recognised in {}. Download the Parakeet models in Settings, or enable cloud mode in Settings.",
+            dir.display()
+        )
+    } else {
+        format!(
+            "[STT-002] Speech model files not recognised in {}. Pick a folder that holds one supported model family — for example a Parakeet folder (encoder, decoder and joiner .onnx plus tokens.txt) or a SenseVoice folder (model.onnx plus tokens.txt) — or enable cloud mode in Settings.",
+            dir.display()
+        )
     };
-    Ok(ModelFiles {
-        encoder,
-        decoder,
-        joiner,
-        tokens,
-    })
+    Err(err)
+}
+
+/// Match `dir` against `FAMILIES` by shape: the first family whose whole file
+/// set is found wins.
+///
+/// Prefix matching, not exact catalog filenames: a bundle ships as
+/// `encoder.onnx`, `encoder.int8.onnx` or with a language suffix. This must
+/// agree with what `inspect_stt_dir` accepts in Settings — otherwise a folder
+/// the UI reports as complete would fail at spawn instead (Settings' inspector
+/// is still Parakeet-only; that widens with the catalog in phase 3).
+fn resolve_in(dir: &Path) -> Option<ModelFiles> {
+    let files = match std::fs::read_dir(dir) {
+        Ok(entries) => crate::local_models::collect_files(entries),
+        Err(_) => Vec::new(),
+    };
+    for family in FAMILIES {
+        let mut args = Vec::with_capacity(family.parts.len());
+        let mut complete = true;
+        for part in family.parts {
+            match crate::local_models::pick(&files, part.prefix, part.extension) {
+                Some(path) => args.push((part.flag, PathBuf::from(path))),
+                // A family never lists the same part twice, so `args` holds a
+                // strict prefix; a break cannot leave a wrong-looking list.
+                None => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        if complete {
+            return Some(ModelFiles {
+                family: family.id,
+                args,
+            });
+        }
+    }
+    None
 }
 
 /// LE `u32` sample count followed by LE `f32` samples. `to_le_bytes` keeps this
@@ -445,11 +633,49 @@ mod tests {
             ..Config::default()
         };
         let files = model_files(&config).unwrap();
-        assert_eq!(files.encoder, dir.join(ENCODER));
-        assert_eq!(files.decoder, dir.join(DECODER));
-        assert_eq!(files.joiner, dir.join(JOINER));
-        assert_eq!(files.tokens, dir.join(TOKENS));
+        assert_eq!(files.family, "transducer");
+        assert_eq!(arg_path(&files, "--encoder"), dir.join(ENCODER));
+        assert_eq!(arg_path(&files, "--decoder"), dir.join(DECODER));
+        assert_eq!(arg_path(&files, "--joiner"), dir.join(JOINER));
+        assert_eq!(arg_path(&files, "--tokens"), dir.join(TOKENS));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolution_picks_the_first_complete_family_by_shape() {
+        // encoder + tokens only: not transducer (no joiner), not whisper (no
+        // decoder) — but it is exactly the NeMo CTC (Parakeet CTC) shape.
+        let dir = temp_dir("ctc-shape");
+        for name in ["encoder.int8.onnx", TOKENS] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let files = resolve_in(&dir).unwrap();
+        assert_eq!(files.family, "nemo_ctc");
+        assert_eq!(arg_path(&files, "--nemo-ctc"), dir.join("encoder.int8.onnx"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_model_tokens_dir_resolves_to_sense_voice_before_its_rivals() {
+        // model.onnx + tokens.txt is the SenseVoice, Paraformer, Dolphin and
+        // FireRed-CTC shape; the family table order decides, SenseVoice first.
+        let dir = temp_dir("sv-shape");
+        for name in ["model.int8.onnx", TOKENS] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let files = resolve_in(&dir).unwrap();
+        assert_eq!(files.family, "sense_voice");
+        assert_eq!(arg_path(&files, "--sensevoice"), dir.join("model.int8.onnx"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn arg_path(files: &ModelFiles, flag: &str) -> PathBuf {
+        files
+            .args
+            .iter()
+            .find(|(name, _)| *name == flag)
+            .map(|(_, path)| path.clone())
+            .unwrap_or_else(|| panic!("no {flag} in {:?}", files.args))
     }
 
     #[test]
@@ -461,7 +687,7 @@ mod tests {
         };
         let err = model_files(&config).unwrap_err();
         assert!(err.starts_with("[STT-002]"), "got: {err}");
-        assert!(err.contains(ENCODER), "got: {err}");
+        assert!(err.contains("not recognised"), "got: {err}");
         let dir_text = dir.to_string_lossy().into_owned();
         assert!(err.contains(&dir_text), "got: {err}");
         assert!(err.contains("cloud mode"), "got: {err}");
