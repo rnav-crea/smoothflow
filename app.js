@@ -29,7 +29,7 @@ function log(msg) {
   if (debugPopover) debugPopover.textContent = msg;
 }
 
-// Info icon hover — show/hide popover with full message
+// Info icon hover â€” show/hide popover with full message
 if (debugIcon && debugPopover) {
   debugIcon.addEventListener("mouseenter", () => {
     debugPopover.textContent = lastDebugMessage;
@@ -90,34 +90,100 @@ const startupToggle = document.getElementById("startup-toggle");
 const keepClipsToggle = document.getElementById("keep-clips-toggle");
 const hotkeyInput = document.getElementById("hotkey-input");
 const settingsStatus = document.getElementById("settings-status");
-const offlineModeToggle = document.getElementById("offline-mode-toggle");
-const offlineModelsControls = document.getElementById("offline-models-controls");
-const offlineSttSelect = document.getElementById("offline-stt-select");
-const offlineLlmSelect = document.getElementById("offline-llm-select");
-const downloadModelsBtn = document.getElementById("download-models-btn");
+// ── Models panel ──────────────────────────────────────────────────────────
+// Two cards (Speech, AI cleanup), each with its own source picker. There is no
+// stored field for "the source": `saveConfig()` derives `stt_local`,
+// `cleanup_engine` and `cleanup_model` from the two radios below.
+const sttProviderSelect = document.getElementById("stt-provider-select");
+const sttUrlRow = document.getElementById("stt-url-row");
+const offlineSpeechControls = document.getElementById("offline-speech-controls");
+const sttCloudControls = document.getElementById("stt-cloud-controls");
+const cleanupLocalControls = document.getElementById("cleanup-local-controls");
+const cleanupCloudControls = document.getElementById("cleanup-cloud-controls");
+const summarySpeech = document.getElementById("summary-speech");
+const summaryCleanup = document.getElementById("summary-cleanup");
+const cleanupProviderNote = document.getElementById("cleanup-provider-note");
+const cleanupFallbackNote = document.getElementById("cleanup-fallback-note");
 const deleteModelsBtn = document.getElementById("delete-models-btn");
 const refreshModelsBtn = document.getElementById("refresh-models-btn");
 const offlineModelStatus = document.getElementById("offline-model-status");
-const offlineModelFiles = document.getElementById("offline-model-files");
-const modelsDirInput = document.getElementById("models-dir-input");
-const browseModelsDirBtn = document.getElementById("browse-models-dir-btn");
-const modelsDirDefaultBtn = document.getElementById("models-dir-default-btn");
-const modelsDirHint = document.getElementById("models-dir-hint");
-const customLlmPathInput = document.getElementById("custom-llm-path-input");
-const browseCustomLlmBtn = document.getElementById("browse-custom-llm-btn");
-const findLocalModelsBtn = document.getElementById("find-local-models-btn");
-const localModelsList = document.getElementById("local-models-list");
-const localModelsEmpty = document.getElementById("local-models-empty");
-const localModelsEmptyText = localModelsEmpty ? localModelsEmpty.textContent : "";
-const customLlmBypassNote = document.getElementById("custom-llm-bypass-note");
-const cleanupEnabledToggle = document.getElementById("cleanup-enabled-toggle");
-const cleanupModelRows = document.getElementById("cleanup-model-rows");
-const customSttDirInput = document.getElementById("custom-stt-dir-input");
-const browseCustomSttBtn = document.getElementById("browse-custom-stt-btn");
-const customSttStatus = document.getElementById("custom-stt-status");
-const customSttStatusText = customSttStatus ? customSttStatus.textContent : "";
+const engineStatusEl = document.getElementById("engine-status");
+// One dialog owns every download: it is the only place that knows the folder
+// the bytes land in, so it also owns the folder picker.
+const downloadModal = document.getElementById("download-modal");
+const downloadModalTitle = document.getElementById("download-modal-title");
+const downloadModalClose = document.getElementById("download-modal-close");
+const downloadModalSize = document.getElementById("download-modal-size");
+const downloadModalDest = document.getElementById("download-modal-dest");
+const downloadModalChangeBtn = document.getElementById("download-modal-change-btn");
+const downloadModalEngine = document.getElementById("download-modal-engine");
+const downloadModalProgress = document.getElementById("download-modal-progress");
+const downloadModalPercent = document.getElementById("download-modal-percent");
+const downloadModalMessage = document.getElementById("download-modal-message");
+const downloadModalCancel = document.getElementById("download-modal-cancel");
+const downloadModalContinue = document.getElementById("download-modal-continue");
+// Shared destructive confirm (removing models), replacing window.confirm().
+const confirmModal = document.getElementById("confirm-modal");
+const confirmModalTitle = document.getElementById("confirm-modal-title");
+const confirmModalClose = document.getElementById("confirm-modal-close");
+const confirmModalMessage = document.getElementById("confirm-modal-message");
+const confirmModalCancel = document.getElementById("confirm-modal-cancel");
+const confirmModalConfirm = document.getElementById("confirm-modal-confirm");
+// Model table (rendered from get_model_catalog — no model names or sizes live
+// in the HTML any more).
+const modelTableEl = document.getElementById("model-table");
+const modelTableCleanupEl = document.getElementById("cleanup-model-rows");
+const modelSearchInput = document.getElementById("model-search");
 
-// ── Click-to-expand "?" help panels ──────────────────────────────────
+function speechSource() {
+  // Anything other than an explicit "local" is cloud, matching the Rust default
+  // (`stt_local: false`): a missing radio must not silently turn on local STT.
+  return document.getElementById("speech-source-local")?.checked ? "local" : "cloud";
+}
+
+function cleanupSource() {
+  if (document.getElementById("cleanup-source-local")?.checked) return "local";
+  if (document.getElementById("cleanup-source-cloud")?.checked) return "cloud";
+  return "off";
+}
+
+function setSpeechSource(source) {
+  const radio = document.getElementById(source === "local" ? "speech-source-local" : "speech-source-cloud");
+  if (radio) radio.checked = true;
+}
+
+function setCleanupSource(source) {
+  const id = source === "local"
+    ? "cleanup-source-local"
+    : source === "cloud" ? "cleanup-source-cloud" : "cleanup-source-off";
+  const radio = document.getElementById(id);
+  if (radio) radio.checked = true;
+}
+
+// The local model rows live in a table that renders after `get_model_catalog`
+// returns, so at startup there is a window where no radio is checked yet. The
+// fallback keeps a save made in that window from rewriting a v3 / 9B user back
+// to the v2 / 4B default.
+function getSttChoice(fallback = "v2") {
+  return document.querySelector('input[name="offline-stt-choice"]:checked')?.value || fallback;
+}
+function getLlmChoice(fallback = "4b") {
+  return document.querySelector('input[name="offline-llm-choice"]:checked')?.value || fallback;
+}
+function setSttChoice(value) {
+  for (const r of document.querySelectorAll('input[name="offline-stt-choice"]')) {
+    r.checked = r.value === value;
+    r.closest(".model-card")?.classList.toggle("is-selected", r.checked);
+  }
+}
+function setLlmChoice(value) {
+  for (const r of document.querySelectorAll('input[name="offline-llm-choice"]')) {
+    r.checked = r.value === value;
+    r.closest(".model-card")?.classList.toggle("is-selected", r.checked);
+  }
+}
+
+// â”€â”€ Click-to-expand "?" help panels â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // One delegated listener drives every `.help-dot` in the app: the button names
 // its panel with aria-controls, and the panel is a `.help-panel[hidden]` div.
 // New panels need markup only, no extra JS.
@@ -131,7 +197,7 @@ function setHelpPanelOpen(button, open) {
 }
 
 // Escape closes every open panel. Clicking another `?` deliberately leaves
-// sibling panels open — collapsing them would hide whatever the reader
+// sibling panels open â€” collapsing them would hide whatever the reader
 // already opened.
 document.addEventListener("click", (e) => {
   const dot = e.target instanceof Element ? e.target.closest(".help-dot") : null;
@@ -163,6 +229,7 @@ let currentConfig = null;
 let offlineModelStatusData = null;
 let offlineModelProgress = new Map();
 let modelOperationRunning = false;
+let engineStatusData = null;
 
 // Theme Switcher & Persistence
 function applyTheme(themeName) {
@@ -181,7 +248,7 @@ if (themeSelect) {
   });
 }
 
-// ── Settings shell ───────────────────────────────────────────────────
+// â”€â”€ Settings shell â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // The main window is a shell: a sidebar of sections plus one scrollable
 // column. Switching is client-side only and the last section is restored on
 // load. `#settings-toggle` (header) jumps to General, `#settings-close`
@@ -271,8 +338,10 @@ for (const btn of sectionButtons) {
 // Restore the last section the user looked at.
 currentSection = setSection(storedSection());
 
-// Model dropdown handlers - show custom input when "Custom" selected
-function setupModelSelect(selectEl, inputEl) {
+// Model dropdown handlers - show custom input when "Custom" selected.
+// `afterChange` lets the Models panel repaint its summary chip before saving;
+// it defaults to a plain save so a third dropdown need not touch this.
+function setupModelSelect(selectEl, inputEl, afterChange = () => saveConfig()) {
   if (!selectEl || !inputEl) return;
   selectEl.addEventListener("change", () => {
     const isCustom = selectEl.value === "";
@@ -280,18 +349,18 @@ function setupModelSelect(selectEl, inputEl) {
     if (!isCustom) {
       inputEl.value = selectEl.value;
     }
-    saveConfig();
+    afterChange();
   });
   // Also sync when custom input changes
   inputEl.addEventListener("change", () => {
     if (selectEl.value === "") {
-      saveConfig();
+      afterChange();
     }
   });
 }
 
-setupModelSelect(modelSelect, modelInput);
-setupModelSelect(cleanupModelSelect, cleanupModelInput);
+setupModelSelect(modelSelect, modelInput, afterModelChoiceChange);
+setupModelSelect(cleanupModelSelect, cleanupModelInput, afterCleanupCloudModelChange);
 
 // Provider detection & model filtering
 const GROQ_MODELS = [
@@ -301,11 +370,10 @@ const GROQ_MODELS = [
 ];
 
 const GROQ_CLEANUP_MODELS = [
-  { value: "", label: "Disabled (no LLM cleanup)" },
   // Groq shut llama-3.1-8b-instant and llama-3.3-70b-versatile down on
   // 2026-08-16. Offering them 404'd on every dictation and, because cleanup
   // failures are silent, looked like the transcript was simply not cleaned.
-  { value: "openai/gpt-oss-20b", label: "openai/gpt-oss-20b (Groq, fast — recommended)" },
+  { value: "openai/gpt-oss-20b", label: "openai/gpt-oss-20b (Groq, fast â€” recommended)" },
   { value: "qwen/qwen3.6-27b", label: "qwen/qwen3.6-27b (Groq, best at self-corrections)" },
   { value: "openai/gpt-oss-120b", label: "openai/gpt-oss-120b (Groq, highest quality)" },
 ];
@@ -317,21 +385,32 @@ const OPENAI_MODELS = [
 ];
 
 const OPENAI_CLEANUP_MODELS = [
-  { value: "", label: "Disabled (no LLM cleanup)" },
   { value: "gpt-4o-mini", label: "gpt-4o-mini (OpenAI)" },
   { value: "gpt-4o", label: "gpt-4o (OpenAI)" },
 ];
 
-function detectProvider(baseUrl) {
+// Which endpoint a stored URL points at. Only used to initialise the provider
+// select from an existing config — the dropdowns follow the select, not the URL,
+// so a custom base URL never silently rewrites the model ids.
+function providerFromUrl(baseUrl) {
   const url = (baseUrl || "").toLowerCase();
   if (url.includes("groq")) return "groq";
   if (url.includes("openai")) return "openai";
   return "custom";
 }
 
+// The two endpoints whose model ids are known up front.
+const PROVIDER_URLS = {
+  groq: "https://api.groq.com/openai/v1",
+  openai: "https://api.openai.com/v1",
+};
+
+function defaultCleanupCloudModel(provider) {
+  return provider === "openai" ? "gpt-4o-mini" : "openai/gpt-oss-20b";
+}
+
 function populateSelect(selectEl, options, currentValue) {
   if (!selectEl) return;
-  const customShown = selectEl.value === "" && selectEl.querySelector('option[value=""]');
   // Preserve the "Custom..." option at the end
   const customOption = selectEl.querySelector('option[value=""]');
   selectEl.innerHTML = "";
@@ -354,8 +433,10 @@ function populateSelect(selectEl, options, currentValue) {
   }
 }
 
-function updateModelDropdowns(baseUrl) {
-  const provider = detectProvider(baseUrl);
+// Repopulate both cloud dropdowns from a provider id. The provider select is
+// the source of truth, not the URL: typing a URL must not swap model ids under
+// the user's cursor.
+function updateModelDropdowns(provider) {
   let sttModels, cleanupModels;
   if (provider === "groq") {
     sttModels = GROQ_MODELS;
@@ -364,13 +445,25 @@ function updateModelDropdowns(baseUrl) {
     sttModels = OPENAI_MODELS;
     cleanupModels = OPENAI_CLEANUP_MODELS;
   } else {
-    // Custom provider - keep current options, just ensure Custom is available
+    // Custom endpoint - keep the current ids, just ensure Custom stays available
     return;
   }
   const currentModel = modelSelect ? modelSelect.value : "";
   const currentCleanup = cleanupModelSelect ? cleanupModelSelect.value : "";
   populateSelect(modelSelect, sttModels, currentModel);
   populateSelect(cleanupModelSelect, cleanupModels, currentCleanup);
+  // A model id from the other provider matches nothing, so land on the
+  // provider's default instead of an empty "Custom..." box.
+  if (modelSelect && !modelSelect.value) {
+    modelSelect.value = sttModels[0].value;
+    if (modelInput) {
+      modelInput.value = modelSelect.value;
+      modelInput.style.display = "none";
+    }
+  }
+  if (cleanupModelSelect && !cleanupModelSelect.value) {
+    writeCleanupCloudModel(defaultCleanupCloudModel(provider));
+  }
   // Sync custom inputs visibility
   if (modelSelect && modelInput) {
     modelInput.style.display = modelSelect.value === "" ? "block" : "none";
@@ -378,16 +471,6 @@ function updateModelDropdowns(baseUrl) {
   if (cleanupModelSelect && cleanupModelInput) {
     cleanupModelInput.style.display = cleanupModelSelect.value === "" ? "block" : "none";
   }
-}
-
-// Auto-update dropdowns when API URL changes
-if (apiUrlInput) {
-  apiUrlInput.addEventListener("input", () => {
-    updateModelDropdowns(apiUrlInput.value);
-  });
-  apiUrlInput.addEventListener("paste", () => {
-    setTimeout(() => updateModelDropdowns(apiUrlInput.value), 0);
-  });
 }
 
 // Toggle API key visibility
@@ -428,7 +511,7 @@ async function validateApiKeyAuto(attempt = 0) {
     }
   } catch (err) {
     if (attempt < API_RETRY_ATTEMPTS) {
-      testApiStatus.textContent = "Offline — retrying...";
+      testApiStatus.textContent = "Offline â€” retrying...";
       testApiStatus.className = "testing";
       setTimeout(
         () => validateApiKeyAuto(attempt + 1),
@@ -460,66 +543,56 @@ async function loadConfig() {
   try {
     const config = await invoke("get_config");
     currentConfig = config;
-    apiUrlInput.value = config.api_base_url;
-    
-    // Model select
+    if (apiUrlInput) apiUrlInput.value = config.api_base_url || "";
+    if (apiKeyInput) apiKeyInput.value = config.api_key || "";
+    if (sttProviderSelect) sttProviderSelect.value = providerFromUrl(config.api_base_url);
+
+    // Cloud speech model
     const modelVal = config.model || "";
     if (modelSelect) {
       const hasOption = [...modelSelect.options].some(o => o.value === modelVal);
       if (hasOption && modelVal) {
         modelSelect.value = modelVal;
-        modelInput.style.display = "none";
+        if (modelInput) modelInput.style.display = "none";
       } else {
         modelSelect.value = "";
-        modelInput.value = modelVal;
-        modelInput.style.display = "block";
+        if (modelInput) {
+          modelInput.value = modelVal;
+          modelInput.style.display = "block";
+        }
       }
     }
-    
-    // Cleanup model select
-    const cleanupVal = config.cleanup_model || "";
-    if (cleanupModelSelect) {
-      const hasOption = [...cleanupModelSelect.options].some(o => o.value === cleanupVal);
-      if (hasOption || cleanupVal === "") {
-        cleanupModelSelect.value = cleanupVal;
-        cleanupModelInput.style.display = "none";
-      } else {
-        cleanupModelSelect.value = "";
-        cleanupModelInput.value = cleanupVal;
-        cleanupModelInput.style.display = "block";
-      }
-    }
-    
-    apiKeyInput.value = config.api_key;
+
+    // Cloud cleanup model. The stored model wins while cleanup actually points
+    // at the cloud; otherwise the last cloud choice is restored so a trip
+    // through Local/Off does not lose it.
+    const cleanupEngine = config.cleanup_engine || "off";
+    const cloudModel = cleanupEngine === "cloud" && (config.cleanup_model || "").trim()
+      ? config.cleanup_model.trim()
+      : rememberedCleanupCloudModel();
+    writeCleanupCloudModel(cloudModel);
+    rememberCleanupCloudModel();
+
     renderDictionary(config.dictionary);
     punctuationToggle.checked = config.auto_punctuation;
     fillersToggle.checked = config.remove_fillers;
     autopasteToggle.checked = config.auto_paste;
     startupToggle.checked = config.launch_on_startup;
     if (keepClipsToggle) keepClipsToggle.checked = !!config.keep_audio_clips;
-    // The leg fields are the real switches; `offline_mode` is the retired
-    // legacy mirror (still written so old configs keep round-tripping).
-    offlineModeToggle.checked = !!config.stt_local;
+    // `stt_local` and `cleanup_engine` are the real switches; `offline_mode` is
+    // the retired legacy mirror (still read here so old configs round-trip).
+    setSpeechSource(config.stt_local ? "local" : "cloud");
+    setCleanupSource(cleanupEngine);
     currentConfig.stt_local = !!config.stt_local;
     currentConfig.offline_mode = !!config.offline_mode;
-    if (offlineSttSelect) {
-      offlineSttSelect.value = ["v2", "v3"].includes(config.stt_version) ? config.stt_version : "v2";
-      currentConfig.stt_version = offlineSttSelect.value;
-    }
-    if (offlineLlmSelect) {
-      offlineLlmSelect.value = ["2b", "4b", "9b"].includes(config.llm_model_size) ? config.llm_model_size : "4b";
-      currentConfig.llm_model_size = offlineLlmSelect.value;
-    }
+    setSttChoice(["v2", "v3", "sv"].includes(config.stt_version) ? config.stt_version : "v2");
+    currentConfig.stt_version = getSttChoice();
+    setLlmChoice(["2b", "4b", "9b"].includes(config.llm_model_size) ? config.llm_model_size : "4b");
+    currentConfig.llm_model_size = getLlmChoice();
     currentConfig.models_dir = config.models_dir || "";
     currentConfig.custom_llm_path = config.custom_llm_path || "";
-    if (customLlmPathInput) customLlmPathInput.value = currentConfig.custom_llm_path;
-    // Folder of Parakeet files, when the user brought their own. Saved by the
-    // Rust side as `custom_stt_dir`; absent from older configs -> "".
     currentConfig.custom_stt_dir = config.custom_stt_dir || "";
-    if (customSttDirInput) customSttDirInput.value = currentConfig.custom_stt_dir;
-    renderModelsDir();
-    updateOfflineModelControls();
-    renderCleanupToggle();
+    renderModelPanel();
     // The offline model status used to be loaded when SETTINGS was clicked;
     // the shell is now the whole window and the button is gone, so it loads
     // with the config instead.
@@ -534,7 +607,7 @@ async function loadConfig() {
       hotkeyModeSelect.value = config.hotkey_mode === "toggle" ? "toggle" : "hold";
       if (hotkeyModeHint) hotkeyModeHint.textContent = describeHotkeyMode(hotkeyModeSelect.value);
     }
-    if (apiKeyInput.value) {
+    if (apiKeyInput && apiKeyInput.value) {
       validateApiKeyAuto();
     }
   } catch (err) {
@@ -544,12 +617,37 @@ async function loadConfig() {
 
 async function saveConfig() {
   if (!currentConfig) return;
+  const speech = speechSource();
+  const cleanup = cleanupSource();
+  // The two source radios are the only thing the panel stores. Everything the
+  // Rust side reads is derived here, so the pair can never disagree:
+  //   speech  local -> stt_local true,  cloud -> stt_local false
+  //   cleanup off   -> cleanup_engine "off"   + cleanup_model ""
+  //   cleanup local -> cleanup_engine "local" + cleanup_model "2b"|"4b"|"9b"
+  //                    (the local engine needs a non-empty model id to run;
+  //                    the Qwen row id is the marker it has always used)
+  //   cleanup cloud -> cleanup_engine "cloud" + cleanup_model <provider id>
+  // An empty model id is not a neutral value here: `cleanup_engine: "cloud"`
+  // with `cleanup_model: ""` passes Rust's gate as "no model at all", so a cloud
+  // user would silently get rules-only output. Land on the provider's default
+  // and paint it, so what runs is exactly what the card shows.
+  const provider = sttProviderSelect ? sttProviderSelect.value : "groq";
+  const cleanupModel = cleanup === "off"
+    ? ""
+    : cleanup === "local"
+      ? getLlmChoice(currentConfig.llm_model_size || "4b")
+      : cleanupCloudModel() || defaultCleanupCloudModel(provider);
+  if (cleanup === "cloud" && cleanupModel && !cleanupCloudModel()) {
+    writeCleanupCloudModel(cleanupModel);
+  }
   const updatedConfig = {
     ...currentConfig,
-    api_base_url: apiUrlInput.value,
-    model: modelSelect && modelSelect.value ? modelSelect.value : modelInput.value,
-    cleanup_model: cleanupModelSelect && cleanupModelSelect.value ? cleanupModelSelect.value : cleanupModelInput.value,
-    api_key: apiKeyInput.value,
+    api_base_url: apiUrlInput ? apiUrlInput.value : currentConfig.api_base_url,
+    model: modelSelect && modelSelect.value
+      ? modelSelect.value
+      : (modelInput ? modelInput.value : currentConfig.model),
+    cleanup_model: cleanupModel,
+    api_key: apiKeyInput ? apiKeyInput.value : currentConfig.api_key,
     auto_punctuation: punctuationToggle.checked,
     remove_fillers: fillersToggle.checked,
     auto_paste: autopasteToggle.checked,
@@ -558,20 +656,16 @@ async function saveConfig() {
     dictionary: currentConfig.dictionary || [],
     hotkey: hotkeyInput ? hotkeyInput.value : "Ctrl+Space",
     hotkey_mode: hotkeyModeSelect ? hotkeyModeSelect.value : "hold",
-    offline_mode: !!offlineModeToggle?.checked,
-    // `offline_mode` is retired (the Rust side reads `stt_local` /
-    // `cleanup_engine` instead); it is still written so older configs keep
-    // round-tripping. `cleanup_engine` carries the leg the AI-cleanup toggle
-    // drives: local engine when this machine does the cleanup, cloud engine
-    // when cleanup runs through the API provider.
-    stt_local: !!offlineModeToggle?.checked,
-    cleanup_engine: readCleanupModel()
-      ? (offlineModeToggle?.checked ? "local" : "cloud")
-      : "off",
-    stt_version: offlineSttSelect ? offlineSttSelect.value : currentConfig.stt_version,
-    llm_model_size: offlineLlmSelect ? offlineLlmSelect.value : currentConfig.llm_model_size,
+    // `stt_local` and `cleanup_engine` are the fields Rust actually reads;
+    // `offline_mode` is the retired legacy mirror, still written so older
+    // configs keep round-tripping.
+    stt_local: speech === "local",
+    cleanup_engine: cleanup,
+    offline_mode: speech === "local" || cleanup === "local",
+    stt_version: getSttChoice(currentConfig.stt_version || "v2"),
+    llm_model_size: getLlmChoice(currentConfig.llm_model_size || "4b"),
     models_dir: currentConfig.models_dir || "",
-    custom_llm_path: customLlmPathInput ? customLlmPathInput.value.trim() : (currentConfig.custom_llm_path || ""),
+    custom_llm_path: currentConfig.custom_llm_path || "",
     custom_stt_dir: (currentConfig.custom_stt_dir || "").trim(),
   };
   try {
@@ -589,6 +683,15 @@ async function saveConfig() {
     log("Config saved");
   } catch (err) {
     log(`Config save error: ${err}`);
+    // `update_config` rejects the whole save when a cloud leg is incomplete
+    // ("[CFG-002] API key cannot be empty…", "[CFG-005] Cloud AI cleanup needs an
+    // API key…"). The About section is not where the user just clicked, so the
+    // reason also lands in the Models footer — otherwise the radios look saved
+    // and silently revert on the next launch.
+    if (String(err).includes("[CFG-") && offlineModelStatus) {
+      offlineModelStatus.textContent = `Not saved — ${err}`;
+      offlineModelStatus.style.color = "#ff6b6b";
+    }
     if (settingsStatus) {
       settingsStatus.className = "error";
       settingsStatus.replaceChildren();
@@ -616,12 +719,8 @@ if (saveSettingsBtn) {
 }
 
 try {
-  apiUrlInput.addEventListener("change", saveConfig);
-  if (modelSelect) modelSelect.addEventListener("change", saveConfig);
-  modelInput.addEventListener("change", saveConfig);
-  if (cleanupModelSelect) cleanupModelSelect.addEventListener("change", () => { renderCleanupToggle(); saveConfig(); });
-  cleanupModelInput.addEventListener("change", () => { renderCleanupToggle(); saveConfig(); });
-  apiKeyInput.addEventListener("change", saveConfig);
+  if (apiUrlInput) apiUrlInput.addEventListener("change", saveConfig);
+  if (apiKeyInput) apiKeyInput.addEventListener("change", saveConfig);
   punctuationToggle.addEventListener("change", saveConfig);
   fillersToggle.addEventListener("change", saveConfig);
   autopasteToggle.addEventListener("change", saveConfig);
@@ -636,41 +735,287 @@ function formatModelSize(bytes) {
   return `${(size / 1_000_000).toFixed(2)} MB`;
 }
 
-function updateOfflineModelControls() {
-  if (offlineModelsControls && offlineModeToggle) {
-    offlineModelsControls.style.display = offlineModeToggle.checked ? "flex" : "none";
+// Fill the transfer bar with the real percent the Rust loop reports per event.
+// No percent (starting/failed events) leaves the indeterminate slide running.
+function setDownloadDialogBarPercent(percent) {
+  if (!downloadModalProgress) return;
+  const bar = downloadModalProgress.querySelector(".model-card-bar");
+  if (!bar) return;
+  if (typeof percent !== "number" || Number.isNaN(percent)) return;
+  const clamped = Math.max(0, Math.min(100, percent));
+  bar.classList.add("is-determinate");
+  const fill = bar.querySelector("i");
+  if (fill) fill.style.setProperty("width", `${clamped.toFixed(0)}%`);
+  if (downloadModalPercent) downloadModalPercent.textContent = `${clamped.toFixed(0)}%`;
+}
+
+let pendingDownloadGroup = null;
+
+function engineDialogText() {
+  if (!engineStatusData) return "Checking…";
+  const sttInstalled = !!engineStatusData.stt_installed;
+  const llamaInstalled = !!engineStatusData.llama_installed;
+  if (sttInstalled && llamaInstalled) {
+    const megabytes = Math.round((Number(engineStatusData.installed_bytes) || 0) / (1024 * 1024));
+    return `Engine ready — ${megabytes} MB on this computer`;
   }
-  if (customLlmBypassNote && customLlmPathInput) {
-    customLlmBypassNote.style.display = customLlmPathInput.value.trim() ? "block" : "none";
+  return "Engine missing — it downloads first with this model";
+}
+
+function openDownloadDialog(group) {
+  if (!downloadModal || !downloadModalTitle) return;
+  pendingDownloadGroup = group;
+  if (downloadModalTitle) downloadModalTitle.textContent = `Download ${group.name}`;
+  if (downloadModalSize) downloadModalSize.textContent = formatCatalogBytes(group.size_bytes);
+  if (downloadModalDest) downloadModalDest.textContent = modelsDirResolved
+    ? `${modelsDirResolved}${modelsDirIsCustom ? " (custom)" : ""}`
+    : "Not chosen yet — you'll pick a folder";
+  if (downloadModalEngine) downloadModalEngine.textContent = engineDialogText();
+  if (downloadModalMessage) {
+    downloadModalMessage.textContent = "Press CONTINUE to start.";
+    downloadModalMessage.className = "settings-hint";
+  }
+  if (downloadModalProgress) downloadModalProgress.hidden = true;
+  if (downloadModalPercent) downloadModalPercent.textContent = "0%";
+  if (downloadModalChangeBtn) downloadModalChangeBtn.disabled = false;
+  if (downloadModalCancel) {
+    downloadModalCancel.textContent = "CANCEL";
+    downloadModalCancel.disabled = false;
+  }
+  if (downloadModalContinue) downloadModalContinue.disabled = false;
+  downloadModal.classList.remove("closing");
+  downloadModal.classList.add("open");
+}
+
+function closeDownloadDialog() {
+  if (!downloadModal) return;
+  downloadModal.classList.remove("open");
+  downloadModal.classList.add("closing");
+  const group = pendingDownloadGroup;
+  const button = group ? group.rowButton : null;
+  setTimeout(() => {
+    downloadModal.classList.remove("closing");
+    if (group) group.inFlight = false;
+    if (button) {
+      button.disabled = false;
+      button.textContent = "DOWNLOAD";
+    }
+  }, 200);
+}
+
+function pickDownloadFolder() {
+  return open({ directory: true, multiple: false, defaultPath: modelsDirResolved || undefined }).then((picked) => {
+    if (!picked) return false;
+    if (currentConfig) currentConfig.models_dir = picked;
+    return Promise.resolve().then(async () => { await saveConfig(); await loadModelsDir(); }).then(() => true);
+  }).catch(() => false);
+}
+
+async function startPendingDownload() {
+  const group = pendingDownloadGroup;
+  if (!group || !downloadModal) return;
+  let engineMissing = !engineStatusData
+    || !(engineStatusData.stt_installed && engineStatusData.llama_installed);
+  if (engineMissing) {
+    if (downloadModalEngine) downloadModalEngine.textContent = "Downloading engine…";
+    if (downloadModalMessage) {
+      downloadModalMessage.textContent = "The engine is missing — downloading it first…";
+      downloadModalMessage.className = "settings-hint";
+    }
+    setModelOperationRunning(true, "Downloading engine…");
+    try {
+      engineStatusData = await invoke("download_engines");
+      renderEngineStatus();
+      if (downloadModalEngine) downloadModalEngine.textContent = engineDialogText();
+      setModelOperationRunning(false);
+      engineMissing = false;
+    } catch (err) {
+      if (downloadModalMessage) {
+        downloadModalMessage.textContent = `Engine download failed: ${err}`;
+        downloadModalMessage.className = "settings-hint download-modal-message is-error";
+      }
+      setModelOperationRunning(false);
+      return;
+    }
+  }
+  if (downloadModalProgress) downloadModalProgress.hidden = false;
+  if (downloadModalCancel) {
+    downloadModalCancel.textContent = "CANCEL";
+    downloadModalCancel.disabled = false;
+  }
+  if (downloadModalContinue) downloadModalContinue.disabled = true;
+  if (downloadModalChangeBtn) downloadModalChangeBtn.disabled = true;
+  setModelOperationRunning(true, `Downloading ${group.name}…`);
+  setDownloadDialogBarPercent(0);
+  try {
+    modelCatalogData = await invoke("download_model", { id: group.id });
+    renderModelTables();
+    setDownloadDialogBarPercent(100);
+    if (downloadModalMessage) {
+      downloadModalMessage.textContent = `${group.name} installed`;
+      downloadModalMessage.className = "settings-hint download-modal-message is-ok";
+    }
+    if (downloadModalCancel) {
+      downloadModalCancel.textContent = "CLOSE";
+      downloadModalCancel.disabled = true;
+    }
+    if (downloadModalContinue) downloadModalContinue.disabled = true;
+    setTimeout(() => closeDownloadDialog(), 1400);
+  } catch (err) {
+    if (downloadModalMessage) {
+      const cancelled = String(err).includes("cancelled");
+      downloadModalMessage.textContent = cancelled
+        ? "Download cancelled — the partial file is kept. Press DOWNLOAD to resume."
+        : `Model download failed: ${err}`;
+      downloadModalMessage.className = cancelled
+        ? "settings-hint download-modal-message is-ok"
+        : "settings-hint download-modal-message is-error";
+    }
+    if (downloadModalCancel) {
+      downloadModalCancel.textContent = "CLOSE";
+      downloadModalCancel.disabled = true;
+    }
+    if (downloadModalContinue) downloadModalContinue.disabled = false;
+  } finally {
+    setModelOperationRunning(false);
   }
 }
 
-// ── Optional: AI cleanup ─────────────────────────────────────────────
-// The Rust side needs BOTH fields for a model to run: `cleanup_engine`
-// ("local" | "cloud" — which machine does the cleanup) and a non-empty
-// `cleanup_model` ("off" engine means no model at all). The toggle writes the
-// `cleanup_model` side and saveConfig derives `cleanup_engine` from it, so the
-// pair always satisfies gate in `postprocess::prepare`. The value the toggle
-// restores lives in localStorage so turning it back on reuses the last choice.
-const CLEANUP_MODEL_STORAGE_KEY = "smoothflow_cleanup_model";
-const DEFAULT_CLEANUP_MODEL = "4b"; // matches the "Qwen 4B" option of #offline-llm-select
+async function cancelPendingDownload() {
+  const cancelBtn = downloadModalCancel;
+  if (!cancelBtn) return;
+  cancelBtn.disabled = true;
+  cancelBtn.textContent = "CANCELLING…";
+  try {
+    await invoke("cancel_downloads");
+    if (downloadModalMessage) {
+      downloadModalMessage.textContent = "Cancelled — the partial file is kept. Press DOWNLOAD to resume.";
+      downloadModalMessage.className = "settings-hint download-modal-message is-ok";
+    }
+  } catch (err) {
+    if (downloadModalMessage) {
+      downloadModalMessage.textContent = `Cancel failed: ${err}`;
+      downloadModalMessage.className = "settings-hint download-modal-message is-error";
+    }
+  } finally {
+    if (cancelBtn) {
+      cancelBtn.textContent = "CLOSE";
+      cancelBtn.disabled = false;
+    }
+  }
+}
 
-function readCleanupModel() {
+function setupDownloadModal() {
+  if (downloadModalClose) downloadModalClose.addEventListener("click", closeDownloadDialog);
+  document.addEventListener("click", (e) => {
+    const target = e.target && e.target.closest ? e.target.closest("#download-modal") : null;
+    if (target) closeDownloadDialog();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && downloadModal && downloadModal.classList.contains("open")) closeDownloadDialog();
+  });
+  if (downloadModalCancel) {
+    downloadModalCancel.addEventListener("click", async () => {
+      if (downloadModalCancel.disabled) return;
+      if (downloadModalContinue && !downloadModalContinue.disabled) return; // downloading
+      await cancelPendingDownload();
+    });
+  }
+  if (downloadModalContinue) {
+    downloadModalContinue.addEventListener("click", async () => {
+      if (downloadModalContinue.disabled) return;
+      if (!pendingDownloadGroup) return;
+      await startPendingDownload();
+    });
+  }
+  if (downloadModalChangeBtn) {
+    downloadModalChangeBtn.addEventListener("click", async () => {
+      const picked = await pickDownloadFolder();
+      if (picked && downloadModalDest) {
+        downloadModalDest.textContent = modelsDirResolved
+          ? `${modelsDirResolved}${modelsDirIsCustom ? " (custom)" : ""}`
+          : "Not chosen yet — you'll pick a folder";
+      }
+      if (downloadModalEngine) downloadModalEngine.textContent = engineDialogText();
+    });
+  }
+}
+
+function openRemoveModelsModal() {
+  if (!confirmModal || !confirmModalMessage) return;
+  if (offlineModelStatusData) {
+    confirmModalMessage.textContent = `Remove all downloaded SmoothFlow models? This frees ${formatModelSize(offlineModelStatusData.total_bytes)} from ${modelsDirResolved || "the default models folder"}. The engine files are kept.`;
+  } else {
+    confirmModalMessage.textContent = "Remove all downloaded SmoothFlow models?";
+  }
+  if (confirmModalTitle) confirmModalTitle.textContent = "Remove models";
+  if (confirmModalConfirm) confirmModalConfirm.disabled = false;
+  if (confirmModalCancel) confirmModalCancel.disabled = false;
+  confirmModal.classList.remove("closing");
+  confirmModal.classList.add("open");
+}
+
+function closeRemoveModelsModal() {
+  if (!confirmModal) return;
+  confirmModal.classList.remove("open");
+  confirmModal.classList.add("closing");
+  setTimeout(() => {
+    confirmModal.classList.remove("closing");
+  }, 200);
+}
+
+async function confirmRemoveModels() {
+  if (confirmModalConfirm) confirmModalConfirm.disabled = true;
+  setModelOperationRunning(true, "Deleting downloaded models...");
+  try {
+    offlineModelStatusData = await invoke("delete_models");
+    if (offlineModelStatus) offlineModelStatus.textContent = "Downloaded models deleted.";
+    await loadModelCatalog();
+  } catch (err) {
+    setModelOperationRunning(false);
+    await loadOfflineModelStatus(`Model deletion failed: ${err}`);
+  }
+  closeRemoveModelsModal();
+}
+
+setupDownloadModal();
+if (confirmModalClose) confirmModalClose.addEventListener("click", closeRemoveModelsModal);
+if (confirmModalCancel) confirmModalCancel.addEventListener("click", closeRemoveModelsModal);
+if (confirmModalConfirm) confirmModalConfirm.addEventListener("click", async () => {
+  if (modelOperationRunning) return;
+  await confirmRemoveModels();
+});
+document.addEventListener("click", (e) => {
+  const target = e.target && e.target.closest ? e.target.closest("#confirm-modal") : null;
+  if (target) closeRemoveModelsModal();
+});
+
+// Models panel: which machine runs each stage.
+// The Rust side needs BOTH fields for a cleanup model to run: `cleanup_engine`
+// ("off" | "local" | "cloud") and a non-empty `cleanup_model`. saveConfig()
+// derives that pair from the card radios so they cannot drift, and the cloud
+// model id is remembered in localStorage so a trip through Local/Off keeps it.
+const CLEANUP_CLOUD_MODEL_STORAGE_KEY = "smoothflow_cleanup_cloud_model";
+
+function cleanupCloudModel() {
   if (cleanupModelSelect && cleanupModelSelect.value) return cleanupModelSelect.value;
-  // Only a *visible* custom box counts — a hidden stale value must not read as "enabled".
+  // Only a *visible* custom box counts - a hidden stale value is not a choice.
   if (cleanupModelInput && cleanupModelInput.style.display !== "none") {
     return (cleanupModelInput.value || "").trim();
   }
   return "";
 }
 
-function writeCleanupModel(value) {
+function writeCleanupCloudModel(value) {
   const next = (value || "").trim();
   if (!cleanupModelSelect) {
     if (cleanupModelInput) cleanupModelInput.value = next;
     return;
   }
-  const hasOption = [...cleanupModelSelect.options].some((option) => option.value === next);
+  // "" is the "Custom..." option, never a model id: an empty value belongs in
+  // the text box, not selected as the placeholder option.
+  const hasOption = next !== ""
+    && [...cleanupModelSelect.options].some((option) => option.value === next);
   if (hasOption) {
     cleanupModelSelect.value = next;
     if (cleanupModelInput) {
@@ -679,7 +1024,6 @@ function writeCleanupModel(value) {
     }
     return;
   }
-  // Not one of the listed models (e.g. "4b" restored in cloud mode) -> custom box.
   cleanupModelSelect.value = "";
   if (cleanupModelInput) {
     cleanupModelInput.value = next;
@@ -687,276 +1031,160 @@ function writeCleanupModel(value) {
   }
 }
 
-function storedCleanupModel() {
+function rememberedCleanupCloudModel() {
+  const fallback = defaultCleanupCloudModel(sttProviderSelect ? sttProviderSelect.value : "groq");
   try {
-    return (localStorage.getItem(CLEANUP_MODEL_STORAGE_KEY) || "").trim();
+    return (localStorage.getItem(CLEANUP_CLOUD_MODEL_STORAGE_KEY) || "").trim() || fallback;
   } catch (err) {
-    return "";
+    return fallback;
   }
 }
 
-function renderCleanupToggle() {
-  const enabled = !!readCleanupModel();
-  if (cleanupEnabledToggle) cleanupEnabledToggle.checked = enabled;
-  if (cleanupModelRows) cleanupModelRows.style.display = enabled ? "flex" : "none";
+function rememberCleanupCloudModel() {
+  const model = cleanupCloudModel();
+  if (!model) return;
+  try {
+    localStorage.setItem(CLEANUP_CLOUD_MODEL_STORAGE_KEY, model);
+  } catch (err) { /* storage blocked: the provider default still restores */ }
 }
 
-if (cleanupEnabledToggle) {
-  cleanupEnabledToggle.addEventListener("change", () => {
-    if (!currentConfig) return;
-    if (cleanupEnabledToggle.checked) {
-      writeCleanupModel(storedCleanupModel() || DEFAULT_CLEANUP_MODEL);
-    } else {
-      const previous = readCleanupModel();
-      if (previous) {
-        try { localStorage.setItem(CLEANUP_MODEL_STORAGE_KEY, previous); } catch (err) { /* storage blocked: the default still restores */ }
-      }
-      writeCleanupModel("");
-    }
-    currentConfig.cleanup_model = readCleanupModel();
-    renderCleanupToggle();
-    saveConfig();
-  });
+// One-line name for the summary strip: the catalog carries the full name, but
+// "Parakeet TDT 0.6B v2" is too long to sit beside another value.
+function shortModelName(group) {
+  if (!group) return "";
+  return String(group.name || "").replace(/^Parakeet TDT 0\.6B\s+/i, "Parakeet ");
 }
 
+function catalogGroup(kind, id) {
+  return (modelCatalogData || []).find((group) => group.kind === kind && group.id === id) || null;
+}
+
+// The dialog is the only consumer of the resolved folder now: the destination
+// line is where the choice is confirmed, and the picker is right next to it.
+function renderDownloadDialogDestination() {
+  if (!downloadModalDest) return;
+  downloadModalDest.textContent = modelsDirResolved
+    ? `${modelsDirResolved}${modelsDirIsCustom ? " (custom)" : ""}`
+    : "Not chosen yet — you'll pick a folder";
+}
+
+// The single place that paints the two cards: which panel is open, which option
+// box is selected, and the two summary chips. Every listener ends up here, so a
+// state restored from config and a state the user just clicked look identical.
+function renderModelPanel() {
+  const speech = speechSource();
+  const cleanup = cleanupSource();
+
+  if (offlineSpeechControls) offlineSpeechControls.hidden = speech !== "local";
+  if (sttCloudControls) sttCloudControls.hidden = speech !== "cloud";
+  if (cleanupLocalControls) cleanupLocalControls.hidden = cleanup !== "local";
+  if (cleanupCloudControls) cleanupCloudControls.hidden = cleanup !== "cloud";
+  // A custom endpoint is the only case where the URL box is worth showing.
+  if (sttUrlRow) sttUrlRow.hidden = !sttProviderSelect || sttProviderSelect.value !== "custom";
+
+  // The radio itself is 1px and transparent, so the box carries the state.
+  for (const radio of document.querySelectorAll(".source-option input[type=radio]")) {
+    radio.closest(".source-option")?.classList.toggle("is-selected", radio.checked);
+  }
+
+  if (summarySpeech) {
+    // `currentConfig` first, then the DOM: the table can still be loading when
+    // this runs, and reading a not-yet-rendered radio would fall back to "v2".
+    const sttId = (currentConfig && currentConfig.stt_version) || getSttChoice();
+    const sttName = modelSelect && modelSelect.value
+      ? modelSelect.value
+      : (modelInput ? modelInput.value.trim() : "");
+    summarySpeech.textContent = speech === "local"
+      ? `Local · ${shortModelName(catalogGroup("stt", sttId)) || "Parakeet " + sttId}`
+      : `Cloud · ${sttName || "not set"}`;
+  }
+  if (summaryCleanup) {
+    const provider = sttProviderSelect ? sttProviderSelect.value : "groq";
+    const llmId = (currentConfig && currentConfig.llm_model_size) || getLlmChoice();
+    summaryCleanup.textContent = cleanup === "off"
+      ? "Off · rules only"
+      : cleanup === "local"
+        ? `Local · ${shortModelName(catalogGroup("llm", llmId)) || "Qwen " + llmId}`
+        : `Cloud · ${cleanupCloudModel() || defaultCleanupCloudModel(provider)}`;
+  }
+
+  // Cloud cleanup borrows the Speech provider and key - it has nothing of its
+  // own to configure, so the note names the provider to make that obvious.
+  if (cleanupProviderNote) {
+    const provider = sttProviderSelect ? sttProviderSelect.value : "custom";
+    const providerName = provider === "groq" ? "Groq" : provider === "openai" ? "OpenAI" : "";
+    cleanupProviderNote.textContent = providerName
+      ? `Uses the Speech provider (${providerName}) and key.`
+      : "Uses the Speech provider and key.";
+  }
+  if (cleanupFallbackNote) {
+    const fallback = (currentConfig?.cleanup_fallback_model || "").trim();
+    cleanupFallbackNote.textContent = fallback
+      ? `If the first model fails, the next one is tried: ${fallback}.`
+      : "If the first model fails, the rules-only result is used.";
+  }
+}
+
+function afterModelChoiceChange() {
+  renderModelPanel();
+  saveConfig();
+}
+
+function afterCleanupCloudModelChange() {
+  rememberCleanupCloudModel();
+  renderModelPanel();
+  saveConfig();
+}
+
+// Provider switch: the URL and both model dropdowns follow the select. Custom
+// keeps whatever URL is already there - rewriting it would discard the value
+// the user is about to type over.
+function applyProviderChange() {
+  const provider = sttProviderSelect ? sttProviderSelect.value : "custom";
+  if (apiUrlInput && PROVIDER_URLS[provider]) apiUrlInput.value = PROVIDER_URLS[provider];
+  updateModelDropdowns(provider);
+  afterCleanupCloudModelChange();
+}
+
+if (sttProviderSelect) sttProviderSelect.addEventListener("change", applyProviderChange);
+
+// Source radios: the only thing that decides where each stage runs.
+for (const radio of document.querySelectorAll('input[name="speech-source"], input[name="cleanup-source"]')) {
+  radio.addEventListener("change", () => { renderModelPanel(); saveConfig(); });
+}
+
+// Models folder: the resolved path shown in the download dialog.
 let modelsDirResolved = "";
 let modelsDirIsCustom = false;
-
-function renderModelsDir() {
-  if (modelsDirInput) {
-    modelsDirInput.value = (currentConfig?.models_dir || "").trim() || modelsDirResolved;
-  }
-  if (modelsDirHint) {
-    modelsDirHint.textContent = modelsDirIsCustom
-      ? `Custom location — models are read from ${modelsDirResolved || "the path above"}. Clear it to go back to the default.`
-      : `By default models are stored in ${modelsDirResolved || "the app data folder"}. You can move them to another drive if C: is short on space.`;
-  }
-}
 
 async function loadModelsDir() {
   try {
     const location = await invoke("get_models_dir");
     modelsDirResolved = location?.resolved || "";
     modelsDirIsCustom = !!location?.is_custom;
-    renderModelsDir();
   } catch (err) {
-    if (modelsDirHint) modelsDirHint.textContent = `Could not read models folder: ${err}`;
     log(`Models folder error: ${err}`);
   }
 }
 
-function modelsDirFromInput() {
-  const value = (modelsDirInput?.value || "").trim();
-  if (!value) return "";
-  if (modelsDirIsCustom) return value;
-  return value === modelsDirResolved ? "" : value;
-}
-
-async function applyModelsDir() {
-  if (!currentConfig) return;
-  currentConfig.models_dir = modelsDirFromInput();
-  await saveConfig();
-  await loadModelsDir();
-  await loadOfflineModelStatus();
-}
-
 function applyCustomLlmPath() {
   if (!currentConfig) return;
-  currentConfig.custom_llm_path = (customLlmPathInput?.value || "").trim();
-  updateOfflineModelControls();
+  // BYO field removed from UI; keep any previously set value in config.
   saveConfig();
 }
 
-if (browseModelsDirBtn) {
-  browseModelsDirBtn.addEventListener("click", async () => {
-    const picked = await open({ directory: true, multiple: false, defaultPath: modelsDirInput?.value || undefined });
-    if (!picked) return;
-    if (modelsDirInput) modelsDirInput.value = picked;
-    await applyModelsDir();
-  });
-}
 
-if (modelsDirDefaultBtn) {
-  modelsDirDefaultBtn.addEventListener("click", async () => {
-    if (modelsDirInput) modelsDirInput.value = modelsDirResolved;
-    currentConfig.models_dir = "";
-    await saveConfig();
-    await loadModelsDir();
-    await loadOfflineModelStatus();
-  });
-}
-
-if (modelsDirInput) modelsDirInput.addEventListener("change", applyModelsDir);
-
-if (browseCustomLlmBtn) {
-  browseCustomLlmBtn.addEventListener("click", async () => {
-    const picked = await open({ multiple: false, filters: [{ name: "GGUF model", extensions: ["gguf"] }, { name: "All files", extensions: ["*"] }] });
-    if (!picked) return;
-    if (customLlmPathInput) customLlmPathInput.value = picked;
-    applyCustomLlmPath();
-  });
-}
-
-if (customLlmPathInput) customLlmPathInput.addEventListener("change", applyCustomLlmPath);
-
-// ── Speech model folder (bring your own Parakeet files) ──────────────
-function setCustomSttStatus(message, isError) {
-  if (!customSttStatus) return;
-  // textContent only: this can carry a path or an error string from Rust.
-  customSttStatus.textContent = message;
-  customSttStatus.style.color = isError ? "#ff6b6b" : "";
-}
-
-async function saveCustomSttDir(dir) {
-  if (!currentConfig) return;
-  const next = (dir || "").trim();
-  currentConfig.custom_stt_dir = next;
-  if (customSttDirInput) customSttDirInput.value = next;
-  await saveConfig();
-}
-
-// Validates before saving: an incomplete folder is reported and never stored.
-async function checkCustomSttDir(dir) {
-  const next = (dir || "").trim();
-  if (!next) {
-    await saveCustomSttDir("");
-    setCustomSttStatus(customSttStatusText, false);
-    return;
-  }
-  try {
-    await invoke("inspect_stt_dir", { path: next });
-    await saveCustomSttDir(next);
-    setCustomSttStatus("All 4 files found.", false);
-  } catch (err) {
-    // The app answers with the exact files it could not find.
-    setCustomSttStatus(String(err), true);
-  }
-}
-
-if (browseCustomSttBtn) {
-  browseCustomSttBtn.addEventListener("click", async () => {
-    let picked = null;
-    try {
-      picked = await open({
-        directory: true,
-        multiple: false,
-        defaultPath: (customSttDirInput?.value || "").trim() || undefined,
-      });
-    } catch (err) {
-      setCustomSttStatus(`Could not open the folder picker: ${err}`, true);
-      return;
-    }
-    if (!picked) return;
-    browseCustomSttBtn.disabled = true;
-    setCustomSttStatus("Checking the folder...", false);
-    try {
-      await checkCustomSttDir(picked);
-    } finally {
-      browseCustomSttBtn.disabled = false;
-    }
-  });
-}
-
-if (customSttDirInput) {
-  customSttDirInput.addEventListener("change", async () => {
-    if (!currentConfig) return;
-    await checkCustomSttDir(customSttDirInput.value);
-  });
-}
-
-function hideLocalModelsList() {
-  if (localModelsList) {
-    localModelsList.replaceChildren();
-    localModelsList.style.display = "none";
-  }
-  if (localModelsEmpty) localModelsEmpty.style.display = "none";
-}
-
-function pickLocalModel(model) {
-  if (!model || !model.path) return;
-  if (customLlmPathInput) customLlmPathInput.value = model.path;
-  hideLocalModelsList();
-  // Runs the same update + save path the BROWSE button uses.
-  applyCustomLlmPath();
-}
-
-function renderLocalModels(models) {
-  if (!localModelsList || !localModelsEmpty) return;
-  localModelsList.replaceChildren();
-  if (!models.length) {
-    localModelsList.style.display = "none";
-    localModelsEmpty.textContent = localModelsEmptyText;
-    localModelsEmpty.style.display = "block";
-    return;
-  }
-  for (const model of models) {
-    const item = document.createElement("li");
-    item.style.cssText = "display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 8px 10px; cursor: pointer;";
-    item.tabIndex = 0;
-    item.setAttribute("role", "button");
-    item.addEventListener("mouseenter", () => { item.style.background = "rgba(255, 255, 255, 0.06)"; });
-    item.addEventListener("mouseleave", () => { item.style.background = ""; });
-
-    const label = document.createElement("span");
-    label.textContent = model.label || model.path;
-    label.style.cssText = "font-family: var(--font-mono); font-size: 11px; color: #e8d6c8; word-break: break-all;";
-    label.title = model.path || "";
-
-    const meta = document.createElement("span");
-    const parts = [];
-    if (Number(model.size_bytes) > 0) parts.push(formatModelSize(model.size_bytes));
-    if (model.parameters) parts.push(String(model.parameters));
-    if (model.quant) parts.push(String(model.quant));
-    meta.textContent = parts.join(" · ");
-    meta.style.cssText = "color: #8a7a70; font-size: 11px; white-space: nowrap;";
-
-    item.append(label, meta);
-    item.addEventListener("click", () => pickLocalModel(model));
-    item.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        pickLocalModel(model);
-      }
-    });
-    localModelsList.appendChild(item);
-  }
-  localModelsEmpty.style.display = "none";
-  localModelsList.style.display = "block";
-}
-
-async function findLocalModels() {
-  if (!findLocalModelsBtn) return;
-  const idleLabel = findLocalModelsBtn.textContent;
-  findLocalModelsBtn.disabled = true;
-  findLocalModelsBtn.textContent = "Looking...";
-  hideLocalModelsList();
-  try {
-    const found = await invoke("list_local_models");
-    renderLocalModels(Array.isArray(found) ? found : []);
-  } catch (err) {
-    if (localModelsEmpty) {
-      localModelsEmpty.textContent = `Could not look for local models: ${err}. Browse for a .gguf file instead.`;
-      localModelsEmpty.style.display = "block";
-    }
-    console.warn("list_local_models failed:", err);
-    log(`Local models lookup failed: ${err}`);
-  } finally {
-    findLocalModelsBtn.disabled = false;
-    findLocalModelsBtn.textContent = idleLabel || "FIND MODELS";
-  }
-}
-
-if (findLocalModelsBtn) findLocalModelsBtn.addEventListener("click", findLocalModels);
 
 function offlineStatusSummary() {
-  if (!offlineModelStatusData) return "";
-  const files = offlineModelStatusData.files || [];
-  const selectedFiles = files.filter((file) =>
-    (file.category === "stt" && file.directory === offlineSttSelect?.value)
-    || (file.category === "llm" && file.directory === offlineLlmSelect?.value)
-  );
-  const selectedBytes = selectedFiles.reduce((sum, file) => sum + (Number(file.expected_size) || 0), 0);
-  return `${offlineModelStatusData.installed_files || 0} of ${files.length} files installed · ${formatModelSize(offlineModelStatusData.total_bytes)} on disk · ${formatModelSize(selectedBytes)} selected`;
+  const parts = [];
+  if (modelCatalogData) {
+    const sttGroup = catalogGroup("stt", getSttChoice());
+    const llmGroup = catalogGroup("llm", getLlmChoice());
+    if (sttGroup) parts.push(`${sttGroup.name}: ${sttGroup.installed ? "installed" : "not installed"}`);
+    if (llmGroup) parts.push(`${llmGroup.name}: ${llmGroup.installed ? "installed" : "not installed"}`);
+  }
+  if (offlineModelStatusData) parts.push(`${formatModelSize(offlineModelStatusData.total_bytes)} on disk`);
+  return parts.join(" · ");
 }
 
 function setOfflineModelError(message) {
@@ -966,56 +1194,35 @@ function setOfflineModelError(message) {
 }
 
 function renderOfflineModelStatus() {
-  if (offlineModelStatus) {
-    offlineModelStatus.textContent = modelOperationRunning
-      ? `${offlineStatusSummary()} · Model operation in progress`
-      : offlineStatusSummary() || "No local model status available.";
-    offlineModelStatus.style.color = modelOperationRunning ? "#f4d1ba" : "#cdafa0";
-  }
-  if (!offlineModelFiles) return;
-  offlineModelFiles.replaceChildren();
-  const files = offlineModelStatusData?.files || [];
-  for (const file of files) {
-    const item = document.createElement("li");
-    const size = formatModelSize(file.expected_size);
-    const progress = offlineModelProgress.get(file.id);
-    if (progress?.status === "starting") {
-      item.textContent = `${file.id} — Downloading (${size})`;
-    } else if (progress?.status === "complete") {
-      item.textContent = `${file.id} — Download complete (${size})`;
-    } else if (progress?.status === "failed") {
-      item.textContent = `${file.id} — Failed: ${progress.message || "Unknown error"}`;
-      item.style.color = "#ff6b6b";
-    } else if (file.installed) {
-      item.textContent = `${file.id} — ${file.verified ? "Installed" : "Installed, verification failed"} (${size})`;
-    } else {
-      item.textContent = `${file.id} — Missing (${size})`;
-    }
-    offlineModelFiles.appendChild(item);
-  }
+  if (!offlineModelStatus) return;
+  offlineModelStatus.textContent = modelOperationRunning
+    ? `${offlineStatusSummary()} · Model operation in progress`
+    : offlineStatusSummary() || "No local model status available.";
+  offlineModelStatus.style.color = modelOperationRunning ? "#f4d1ba" : "#cdafa0";
 }
 
 function setModelOperationRunning(running, message = "") {
   modelOperationRunning = running;
-  if (downloadModelsBtn) {
-    downloadModelsBtn.disabled = running;
-    downloadModelsBtn.textContent = running ? "WORKING..." : "DOWNLOAD";
-  }
   if (deleteModelsBtn) deleteModelsBtn.disabled = running;
   if (refreshModelsBtn) refreshModelsBtn.disabled = running;
-  if (offlineModeToggle) offlineModeToggle.disabled = running;
-  if (offlineSttSelect) offlineSttSelect.disabled = running;
-  if (offlineLlmSelect) offlineLlmSelect.disabled = running;
-  if (running && message) {
-    offlineModelStatus.textContent = message;
-    offlineModelStatus.style.color = "#f4d1ba";
+  // Switching the source mid-transfer would change what the download is for.
+  for (const radio of document.querySelectorAll('input[name="speech-source"], input[name="cleanup-source"]')) {
+    radio.disabled = running;
+  }
+  if (running) {
+    if (offlineModelStatus) {
+      offlineModelStatus.textContent = message;
+      offlineModelStatus.style.color = "#f4d1ba";
+    }
   } else {
     renderOfflineModelStatus();
   }
 }
 
 async function loadOfflineModelStatus(operationError = "") {
-  if (!offlineModelStatus || !offlineModelFiles) return;
+  loadEngineStatus();
+  loadModelCatalog();
+  if (!offlineModelStatus) return;
   offlineModelStatus.textContent = "Checking local models...";
   offlineModelStatus.style.color = "#cdafa0";
   try {
@@ -1028,7 +1235,46 @@ async function loadOfflineModelStatus(operationError = "") {
   }
 }
 
-// ── Activation shortcut: choose keys, don't type them ────────────────
+// Engine binaries (smoothflow-stt + llama-server) are required for local models
+// to run at all. They are separate from the models and downloaded on demand, so
+// this row reports on-disk reality only - get_engine_status never hits the wire.
+function enginesReady() {
+  return !!(engineStatusData && engineStatusData.stt_installed && engineStatusData.llama_installed);
+}
+
+function renderEngineStatus(status) {
+  if (!engineStatusEl) return;
+  if (status) engineStatusData = status;
+  const sttInstalled = !!engineStatusData?.stt_installed;
+  const llamaInstalled = !!engineStatusData?.llama_installed;
+  if (sttInstalled && llamaInstalled) {
+    const megabytes = Math.round((Number(engineStatusData.installed_bytes) || 0) / (1024 * 1024));
+    engineStatusEl.textContent = `Engine ready — ${megabytes} MB on this computer`;
+    engineStatusEl.style.color = "#cdafa0";
+  } else if (sttInstalled || llamaInstalled) {
+    engineStatusEl.textContent = sttInstalled
+      ? "Spoken-word engine installed — cleanup engine missing"
+      : "Cleanup engine installed — spoken-word engine missing";
+    engineStatusEl.style.color = "#f4d1ba";
+  } else {
+    engineStatusEl.textContent = "Engine not downloaded yet — required for local models";
+    engineStatusEl.style.color = "#f4d1ba";
+  }
+}
+
+async function loadEngineStatus() {
+  if (!engineStatusEl) return;
+  try {
+    engineStatusData = await invoke("get_engine_status");
+    renderEngineStatus();
+  } catch (err) {
+    engineStatusData = null;
+    engineStatusEl.textContent = `Could not check engine: ${err}`;
+    engineStatusEl.style.color = "#ff6b6b";
+  }
+}
+
+// â”€â”€ Activation shortcut: choose keys, don't type them â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Handy-style recorder. Click the chip, press the combo, done; Escape or
 // clicking away cancels. The hidden #hotkey-input keeps the saved string for
 // saveConfig, which the Rust side re-registers immediately.
@@ -1115,7 +1361,7 @@ function hotkeyCaptureKeydown(e) {
   if (!plain) {
     // Modifier alone: show a live partial so the user sees progress.
     if (hotkeyChip) {
-      hotkeyChip.textContent = mods.length ? mods.join(" + ") + " …" : "Press keys…";
+      hotkeyChip.textContent = mods.length ? mods.join(" + ") + " â€¦" : "Press keysâ€¦";
     }
     return;
   }
@@ -1145,13 +1391,13 @@ if (hotkeyCapture) {
   hotkeyCapture.addEventListener("click", () => {
     hotkeyCapturing = true;
     emitChipCapturing();
-    if (hotkeyChip) hotkeyChip.textContent = "Press keys…";
+    if (hotkeyChip) hotkeyChip.textContent = "Press keysâ€¦";
     window.addEventListener("keydown", hotkeyCaptureKeydown, true);
     document.addEventListener("click", hotkeyCancelAway, true);
   });
 }
 
-// ── Activation style: choose-only dropdown, description follows it ──
+// â”€â”€ Activation style: choose-only dropdown, description follows it â”€â”€
 function describeHotkeyMode(mode) {
   return mode === "toggle"
     ? "Press once to start, press again to stop. No holding."
@@ -1165,7 +1411,7 @@ if (hotkeyModeSelect) {
   });
 }
 
-// ── Reload: put the default Ctrl+Space back ─────────────────────────
+// â”€â”€ Reload: put the default Ctrl+Space back â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 if (hotkeyReset) {
   hotkeyReset.addEventListener("click", () => {
     if (hotkeyCapturing) endHotkeyCapture(false);
@@ -1175,8 +1421,8 @@ if (hotkeyReset) {
   });
 }
 
-// ── "!" circle: one delegated listener drops every row's context
-// open, and the same click drops it closed again. ────────────────────
+// â”€â”€ "!" circle: one delegated listener drops every row's context
+// open, and the same click drops it closed again. â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 document.addEventListener("click", (e) => {
   const btn = e.target && e.target.closest ? e.target.closest(".ctx-toggle") : null;
   if (!btn) return;
@@ -1188,69 +1434,214 @@ document.addEventListener("click", (e) => {
   panel.hidden = open;
 });
 
+// ── Model table: every row comes from get_model_catalog ─────────────────────
+// The old panel hardcoded model names, sizes and a SenseVoice card that the
+// backend could never download ("Unknown STT model variant 'sv'"). The table is
+// data-driven now: `supported: false` renders greyed as "Not available yet"
+// instead of a button that fails.
+let modelCatalogData = null;
+
+function formatCatalogBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n >= 1024 * 1024 * 1024) return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  if (n > 0) return `${Math.round(n / (1024 * 1024))} MB`;
+  return "—";
+}
+
+function modelBenchmarkLine(group) {
+  const bench = group.benchmark || {};
+  if (bench.wer_earnings22 != null && bench.realtime_factor != null) {
+    return `${(bench.wer_earnings22 * 100).toFixed(1)}% WER · ${bench.realtime_factor.toFixed(1)}× realtime (measured)`;
+  }
+  return "not benchmarked";
+}
+
+function modelRowLanguages(group) {
+  const languages = group.languages || [];
+  if (group.kind === "llm" || languages.length === 0) return "";
+  if (languages.length > 4) return `${languages.length} languages`;
+  return languages.map((code) => code.toUpperCase()).join(" · ");
+}
+
+function modelRowMatches(group, query) {
+  const needle = (query || "").trim().toLowerCase();
+  if (!needle) return true;
+  const haystack = [group.name, group.description, ...(group.languages || [])]
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(needle);
+}
+
+function createModelRow(group) {
+  const row = document.createElement("label");
+  const supported = !!group.supported;
+  // Source the selection from `currentConfig`, not the radios: config is
+  // restored at startup with `setSttChoice(...)`, which can run before the
+  // table is rendered, so reading the DOM here would fall back to "v2" and
+  // silently rewrite a v3 user's choice on the next unrelated change.
+  const selected = group.kind === "stt"
+    ? ((currentConfig && currentConfig.stt_version) || getSttChoice())
+    : ((currentConfig && currentConfig.llm_model_size) || getLlmChoice());
+  row.className = "model-row";
+  if (group.id === selected && supported) row.classList.add("is-selected");
+  if (!supported) row.classList.add("is-disabled");
+
+  const input = document.createElement("input");
+  input.type = "radio";
+  input.className = "model-radio-input";
+  input.name = group.kind === "stt" ? "offline-stt-choice" : "offline-llm-choice";
+  input.value = group.id;
+  input.disabled = !supported || !group.installed;
+  input.checked = group.id === selected && supported;
+  // Dynamic rows miss the startup-time listener loop, so the change handler is
+  // attached here.
+  input.addEventListener("change", () => updateOfflineConfig());
+
+  const main = document.createElement("div");
+  main.className = "model-row-main";
+  const name = document.createElement("span");
+  name.className = "model-row-name";
+  name.textContent = group.name;
+  const desc = document.createElement("span");
+  desc.className = "model-row-desc";
+  desc.textContent = group.description;
+  main.appendChild(name);
+  main.appendChild(desc);
+  const meta = modelRowLanguages(group);
+  if (meta) {
+    const tags = document.createElement("span");
+    tags.className = "model-row-meta";
+    tags.style.fontSize = "10px";
+    tags.style.color = "var(--color-text-secondary)";
+    tags.textContent = meta;
+    main.appendChild(tags);
+  }
+
+  const metric = document.createElement("span");
+  metric.className = "model-metric";
+  metric.textContent = modelBenchmarkLine(group);
+
+  const side = document.createElement("div");
+  side.className = "model-row-side";
+  side.appendChild(metric);
+
+  if (!supported) {
+    const note = document.createElement("span");
+    note.className = "model-metric";
+    note.textContent = "Not available yet";
+    side.appendChild(note);
+  } else if (group.installed) {
+    const state = document.createElement("span");
+    state.className = "model-metric";
+    state.textContent = "Installed";
+    side.appendChild(state);
+  } else {
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "reset-cancel-btn";
+    action.style.cssText = "padding: 8px 12px; white-space: nowrap;";
+    action.textContent = group.partial
+      ? `RESUME (${group.installed_file_count}/${group.file_count})`
+      : "DOWNLOAD";
+    action.disabled = modelOperationRunning;
+    action.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      downloadModelGroup(group, action);
+    });
+    side.appendChild(action);
+    const size = document.createElement("span");
+    if (group.size_bytes > 0) {
+      size.className = "model-metric";
+      size.textContent = formatCatalogBytes(group.size_bytes);
+      side.appendChild(size);
+    }
+  }
+
+  row.appendChild(input);
+  row.appendChild(main);
+  row.appendChild(side);
+  return row;
+}
+
+function renderModelTables() {
+  const groups = modelCatalogData || [];
+  const query = modelSearchInput ? modelSearchInput.value : "";
+  for (const kind of ["stt", "llm"]) {
+    const container = kind === "stt" ? modelTableEl : modelTableCleanupEl;
+    if (!container) continue;
+    container.replaceChildren();
+    const rows = groups.filter((g) => g.kind === kind && modelRowMatches(g, query));
+    if (rows.length === 0) {
+      const empty = document.createElement("span");
+      empty.className = "settings-hint";
+      empty.style.marginTop = "0";
+      empty.textContent = query ? "No model matches that search." : "Loading...";
+      container.appendChild(empty);
+      continue;
+    }
+    for (const group of rows) container.appendChild(createModelRow(group));
+  }
+}
+
+async function loadModelCatalog() {
+  try {
+    modelCatalogData = await invoke("get_model_catalog");
+    renderModelTables();
+    // The summary chips prefer the catalog's model names over the id fallback,
+    // so they are repainted once the real names exist.
+    renderModelPanel();
+  } catch (err) {
+    log(`Model catalog error: ${err}`);
+    if (offlineModelStatus) {
+      offlineModelStatus.textContent = `Could not load the model list: ${err}`;
+      offlineModelStatus.style.color = "#ff6b6b";
+    }
+  }
+}
+
+function downloadModelGroup(group, button) {
+  if (modelOperationRunning || group.inFlight) return;
+  group.inFlight = true;
+  group.rowButton = button;
+  button.disabled = true;
+  button.textContent = "WORKING...";
+  openDownloadDialog(group);
+}
+
+if (modelSearchInput) {
+  modelSearchInput.addEventListener("input", () => renderModelTables());
+}
+
 function updateOfflineConfig() {
   if (!currentConfig) return;
-  currentConfig.offline_mode = !!offlineModeToggle?.checked;
-  currentConfig.stt_local = !!offlineModeToggle?.checked;
-  if (offlineSttSelect) currentConfig.stt_version = offlineSttSelect.value;
-  if (offlineLlmSelect) currentConfig.llm_model_size = offlineLlmSelect.value;
-  updateOfflineModelControls();
+  // A model row only chooses which local model; whether local runs at all is the
+  // source radio's job, so repaint first and let saveConfig derive the fields.
+  currentConfig.stt_version = getSttChoice();
+  currentConfig.llm_model_size = getLlmChoice();
+  renderModelPanel();
   saveConfig();
 }
 
-if (offlineModeToggle) offlineModeToggle.addEventListener("change", updateOfflineConfig);
-if (offlineSttSelect) offlineSttSelect.addEventListener("change", updateOfflineConfig);
-if (offlineLlmSelect) offlineLlmSelect.addEventListener("change", updateOfflineConfig);
-if (refreshModelsBtn) refreshModelsBtn.addEventListener("click", () => loadOfflineModelStatus());
-
-if (downloadModelsBtn) {
-  downloadModelsBtn.addEventListener("click", async () => {
-    if (modelOperationRunning) return;
-    // Download only what the user asked for. An empty string tells the backend
-    // to skip that bundle (offline::bundle_ids), so turning AI cleanup off never
-    // hands someone a 1.3-5.7 GB Qwen download, and a custom speech folder
-    // means the Parakeet files are already on disk.
-    const wantStt = !(customSttDirInput?.value || "").trim();
-    const wantLlm = cleanupEnabledToggle ? cleanupEnabledToggle.checked : true;
-    if (!wantStt && !wantLlm) {
-      if (offlineModelStatus) {
-        offlineModelStatus.textContent =
-          "Nothing to download — you are already using your own models.";
-      }
-      return;
-    }
-    setModelOperationRunning(true, "Starting model download...");
-    try {
-      const status = await invoke("download_models", {
-        sttVersion: wantStt ? offlineSttSelect.value : "",
-        llmSize: wantLlm ? offlineLlmSelect.value : "",
-      });
-      offlineModelStatusData = status;
-      offlineModelProgress.clear();
-      setModelOperationRunning(false);
-      renderOfflineModelStatus();
-      if (offlineModelStatus) offlineModelStatus.textContent = `Download complete. ${offlineStatusSummary()}`;
-    } catch (err) {
-      setModelOperationRunning(false);
-      await loadOfflineModelStatus(`Model download failed: ${err}`);
-    }
+for (const r of document.querySelectorAll('input[name="offline-stt-choice"], input[name="offline-llm-choice"]')) {
+  r.addEventListener("change", updateOfflineConfig);
+}
+for (const btn of document.querySelectorAll(".model-card-more")) {
+  btn.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const panel = document.getElementById(btn.getAttribute("data-more"));
+    if (!panel) return;
+    panel.hidden = !panel.hidden;
+    btn.textContent = panel.hidden ? "show more" : "show less";
   });
 }
+if (refreshModelsBtn) refreshModelsBtn.addEventListener("click", () => loadOfflineModelStatus());
 
 if (deleteModelsBtn) {
   deleteModelsBtn.addEventListener("click", async () => {
-    if (modelOperationRunning || !window.confirm("Delete all downloaded SmoothFlow models?")) return;
-    setModelOperationRunning(true, "Deleting downloaded models...");
-    try {
-      offlineModelStatusData = await invoke("delete_models");
-      offlineModelProgress.clear();
-      setModelOperationRunning(false);
-      renderOfflineModelStatus();
-      if (offlineModelStatus) offlineModelStatus.textContent = `Downloaded models deleted. ${offlineStatusSummary()}`;
-    } catch (err) {
-      setModelOperationRunning(false);
-      await loadOfflineModelStatus(`Model deletion failed: ${err}`);
-    }
+    if (modelOperationRunning) return;
+    openRemoveModelsModal();
   });
 }
 
@@ -1263,6 +1654,62 @@ try {
   }).catch((err) => setOfflineModelError(`Could not listen for model download progress: ${err}`));
 } catch (err) {
   setOfflineModelError(`Could not listen for model download progress: ${err}`);
+}
+
+try {
+  listen("model-group-download-progress", ({ payload }) => {
+    if (!payload?.id) return;
+    offlineModelProgress.set(payload.id, { status: payload.status, message: payload.message });
+    renderOfflineModelStatus();
+    if (downloadModal && downloadModal.classList.contains("open")) {
+      if (payload.status === "progress" && payload.message) {
+        if (downloadModalMessage) downloadModalMessage.textContent = payload.message;
+      }
+      setDownloadDialogBarPercent(payload.percent);
+    }
+    if (payload.status === "failed") {
+      if (downloadModal && downloadModal.classList.contains("open")) {
+        if (downloadModalMessage) {
+          downloadModalMessage.textContent = `Model download failed: ${payload.message || "Unknown error"}`;
+          downloadModalMessage.className = "settings-hint download-modal-message is-error";
+        }
+      }
+      setOfflineModelError(`Model download failed: ${payload.message || "Unknown error"}`);
+    }
+  }).catch((err) => setOfflineModelError(`Could not listen for model download progress: ${err}`));
+} catch (err) {
+  setOfflineModelError(`Could not listen for model download progress: ${err}`);
+}
+
+try {
+  listen("engine-download-progress", ({ payload }) => {
+    if (!payload?.id) return;
+    const engineName = payload.id === "stt"
+      ? "spoken-word engine"
+      : payload.id === "llama" ? "cleanup engine" : payload.id;
+    if (payload.status === "failed") {
+      if (downloadModal && downloadModal.classList.contains("open") && pendingDownloadGroup) {
+        if (downloadModalMessage) {
+          downloadModalMessage.textContent = `Engine download failed: ${payload.message || "Unknown error"}`;
+          downloadModalMessage.className = "settings-hint download-modal-message is-error";
+        }
+      }
+      setOfflineModelError(`Engine download failed: ${payload.message || "Unknown error"}`);
+      return;
+    }
+    if (downloadModal && downloadModal.classList.contains("open") && pendingDownloadGroup) {
+      if (downloadModalEngine) {
+        downloadModalEngine.textContent = payload.status === "complete"
+          ? `${engineName} downloaded.`
+          : payload.status === "progress"
+            ? payload.message || `Downloading ${engineName}...`
+            : `Downloading ${engineName}...`;
+      }
+      setDownloadDialogBarPercent(payload.percent);
+    }
+  }).catch((err) => setOfflineModelError(`Could not listen for engine download progress: ${err}`));
+} catch (err) {
+  setOfflineModelError(`Could not listen for engine download progress: ${err}`);
 }
 
 // Personal Dictionary
@@ -1311,9 +1758,9 @@ function addDictionaryWord() {
 if (dictionaryAddBtn) dictionaryAddBtn.addEventListener("click", addDictionaryWord);
 if (dictionaryInput) dictionaryInput.addEventListener("keydown", (e) => { if (e.key === "Enter") addDictionaryWord(); });
 
-// ── History list ────────────────────────────────────────────────────
+// â”€â”€ History list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Handy-style reverse-chronological rows, paged 30 at a time out of SQLite.
-// Every piece of dictation text lands via textContent — never innerHTML — so a
+// Every piece of dictation text lands via textContent â€” never innerHTML â€” so a
 // transcript can never inject markup. Stats are derived from these rows on the
 // Rust side, so the UI has no counters of its own.
 const HISTORY_PAGE_SIZE = 30;
@@ -1324,7 +1771,7 @@ const historySentinel = document.getElementById("history-sentinel");
 const transcribeFileBtn = document.getElementById("transcribe-file-btn");
 const transcribeFileStatus = document.getElementById("transcribe-file-status");
 
-// Static icon markup only — no user data ever goes through innerHTML.
+// Static icon markup only â€” no user data ever goes through innerHTML.
 const ICON_COPY = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10"></path></svg>`;
 const ICON_CHECK = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>`;
 const ICON_STAR = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 17.8 6.2 20.9l1.1-6.5L2.6 9.8l6.5-.9Z"></path></svg>`;
@@ -1355,7 +1802,7 @@ let historyCursor = null;
 //
 // A row is rebuilt from scratch when Rust reports its refresh, so the button's
 // own `disabled` flag dies with the old element and the replacement starts
-// enabled — which let a second run of the same clip start while the first was
+// enabled â€” which let a second run of the same clip start while the first was
 // still being handled. This set outlives the rebuild instead.
 const redictatingIds = new Set();
 
@@ -1390,13 +1837,13 @@ function setStarSaved(btn, saved) {
 }
 
 // The fold is pure CSS (-webkit-line-clamp). Only measure once the row is
-// actually laid out — inside a hidden section clientHeight is 0 and every row
+// actually laid out â€” inside a hidden section clientHeight is 0 and every row
 // would look truncated.
 function measureHistoryRow(row) {
   const text = row.querySelector(".history-text");
   const more = row.querySelector(".history-more");
   if (!text || !more) return;
-  if (text.clientHeight === 0) return;            // section hidden — measure later
+  if (text.clientHeight === 0) return;            // section hidden â€” measure later
   if (!text.classList.contains("is-folded")) return; // expanded: height tells us nothing
   more.hidden = text.scrollHeight <= text.clientHeight + 1;
 }
@@ -1429,7 +1876,7 @@ function buildHistoryRow(entry) {
   // A failed dictation is the only row written with an empty transcript: Rust
   // keeps the WAV and stores the row with no text but a non-null audio_file so
   // the clip can be retried. A successful dictation never yields an empty
-  // transcript, and a failure with clips disabled writes no row at all — so an
+  // transcript, and a failure with clips disabled writes no row at all â€” so an
   // empty text plus a clip is unambiguously a failure.
   const failed = !text && Boolean(entry.audio_file);
 
@@ -1455,7 +1902,7 @@ function buildHistoryRow(entry) {
   const actions = document.createElement("div");
   actions.className = "history-row-actions";
 
-  // Nothing to copy on a failed row — the clipboard would get an empty string.
+  // Nothing to copy on a failed row â€” the clipboard would get an empty string.
   const copyBtn = failed ? null : historyIconButton("copy", "Copy", ICON_COPY);
   const starBtn = historyIconButton("star", "Save", ICON_STAR);
   const deleteBtn = historyIconButton("delete", "Delete", ICON_TRASH);
@@ -1535,7 +1982,7 @@ function buildHistoryRow(entry) {
       errorEl.hidden = true;
       try {
         // The row itself is rebuilt by the `history-updated` listener when
-        // Rust reports the refreshed entry — nothing to patch here.
+        // Rust reports the refreshed entry â€” nothing to patch here.
         await invoke("redictate_from_clip", { id: entry.id });
       } catch (err) {
         console.error("redictate_from_clip failed:", err);
@@ -1543,7 +1990,7 @@ function buildHistoryRow(entry) {
       } finally {
         redictatingIds.delete(entry.id);
         // `history-updated` has usually replaced this row already, so re-enable
-        // whichever button is live now — not just this (possibly detached) one.
+        // whichever button is live now â€” not just this (possibly detached) one.
         const live =
           historyList &&
           historyList.querySelector(
@@ -1613,7 +2060,7 @@ function buildHistoryRow(entry) {
   // is no transcript to clamp.
   body.className = failed ? "history-text history-text-failed" : "history-text is-folded";
   body.textContent = failed
-    ? "Transcription failed — press ↻ to retry from the saved recording"
+    ? "Transcription failed â€” press â†» to retry from the saved recording"
     : text;
 
   let moreBtn = null;
@@ -1631,7 +2078,7 @@ function buildHistoryRow(entry) {
 
   li.appendChild(head);
   li.appendChild(body);
-  // No toggle on a failed row — measureHistoryRow() already bails when either
+  // No toggle on a failed row â€” measureHistoryRow() already bails when either
   // element is missing, so it needs no extra guard.
   if (moreBtn) li.appendChild(moreBtn);
   li.appendChild(errorEl);
@@ -1687,7 +2134,7 @@ async function loadHistoryPage({ reset = false } = {}) {
       historyList.appendChild(buildHistoryRow(entry));
     }
 
-    // An empty page means the cursor cannot advance — stop paging instead of
+    // An empty page means the cursor cannot advance â€” stop paging instead of
     // hammering the same query.
     historyHasMore = Boolean(page && page.has_more) && entries.length > 0;
     historyCursor = historyEntries.length ? historyEntries[historyEntries.length - 1].id : null;
@@ -1713,7 +2160,7 @@ window.addEventListener("resize", () => {
 loadHistoryPage({ reset: true });
 
 // Live updates from Rust. `deleted` and `toggled` are already applied
-// optimistically by the row itself — handling them here would double-apply.
+// optimistically by the row itself â€” handling them here would double-apply.
 try {
   listen("history-updated", ({ payload }) => {
     if (!payload) return;
@@ -1733,7 +2180,7 @@ try {
   console.warn("history-updated listener setup failed:", err);
 }
 
-// ── Transcribe an existing WAV file into History ─────────────────────
+// â”€â”€ Transcribe an existing WAV file into History â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Rust does all the work (decode, engine, cleanup, History row) and emits
 // `history-updated` itself, so this never inserts a row or pastes text.
 let transcribeFileStatusTimer = null;
@@ -1773,7 +2220,7 @@ if (transcribeFileBtn) {
     if (!picked) return;
 
     transcribeFileBtn.disabled = true;
-    transcribeFileBtn.textContent = "Transcribing…";
+    transcribeFileBtn.textContent = "Transcribingâ€¦";
     setTranscribeFileStatus("", false);
     try {
       const entry = await invoke("transcribe_audio_file", { path: picked });
@@ -1891,7 +2338,7 @@ document.addEventListener("click", (e) => {
 function showUpdateAvailable(version) {
   if (updateBellDot) updateBellDot.classList.add("visible");
   if (updateMarquee) {
-    updateMarquee.textContent = `UPDATE v${version} AVAILABLE — CLICK THE BELL TO VIEW`;
+    updateMarquee.textContent = `UPDATE v${version} AVAILABLE â€” CLICK THE BELL TO VIEW`;
     updateMarquee.style.display = "block";
   }
   const info = document.getElementById("update-info");
@@ -1907,7 +2354,7 @@ async function checkForUpdates() {
     try {
       update = await check();
     } catch (err) {
-      console.warn("Update check failed:", err); // offline / endpoint not configured — non-fatal
+      console.warn("Update check failed:", err); // offline / endpoint not configured â€” non-fatal
       return;
     }
   }
@@ -1925,7 +2372,7 @@ async function checkForUpdates() {
       updateBtn.textContent = "UPDATING...";
       try {
         await update.downloadAndInstall();
-        log("Update installed — restarting");
+        log("Update installed â€” restarting");
         await invoke("restart_app");
       } catch (err) {
         log(`Update failed: ${err}`);
