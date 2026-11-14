@@ -6,13 +6,49 @@ use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Shared by every transfer (engines and models): set by the user's Cancel,
 /// and checked between chunks so a multi-GB download stops within about a
 /// second. The `.part` file is deliberately kept on a cancel — resuming costs
 /// one HTTP Range request and nothing already fetched is thrown away.
 pub static TRANSFER_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// The running model transfer's percent, 0..=100, and whether one is running.
+///
+/// This is the event-free twin of `model-group-download-progress`: the dialog
+/// polls it twice a second, so a missed or late event can never leave the user
+/// staring at a still bar while gigabytes move. Written by the download loop
+/// only (`download_model` owns the active flag).
+static TRANSFER_PERCENT: AtomicU32 = AtomicU32::new(0);
+static TRANSFER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// What the UI polls: `active` false means "no transfer, ignore percent".
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct TransferProgress {
+    pub active: bool,
+    pub percent: u32,
+}
+
+pub fn progress_snapshot() -> TransferProgress {
+    TransferProgress {
+        active: TRANSFER_ACTIVE.load(Ordering::Relaxed),
+        percent: TRANSFER_PERCENT.load(Ordering::Relaxed),
+    }
+}
+
+/// Mark a transfer as running (or finished) and reset the percent when it ends.
+pub fn set_running(active: bool) {
+    TRANSFER_ACTIVE.store(active, Ordering::Relaxed);
+    if !active {
+        TRANSFER_PERCENT.store(0, Ordering::Relaxed);
+    }
+}
+
+fn set_percent(percent: Option<f32>) {
+    let value = percent.unwrap_or(0.0).clamp(0.0, 100.0);
+    TRANSFER_PERCENT.store(value as u32, Ordering::Relaxed);
+}
 
 pub fn request_cancel() {
     TRANSFER_CANCELLED.store(true, Ordering::Relaxed);
@@ -173,7 +209,133 @@ const CATALOG: &[ModelSpec] = &[
         expected_size: 5_680_522_464,
         expected_sha256: Some("03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
     },
+    // ── Additional STT models ────────────────────────────────────────────────
+    // Sizes below were read from the HuggingFace API (`?blobs=true`) on
+    // 2026-11-14 and must stay exact: `status()` compares
+    // `installed_bytes == expected_size`, so an estimated number makes a good
+    // download look corrupt. SHA-256 comes from the LFS oid HuggingFace
+    // publishes per file and `download()` refuses a spec without one, so every
+    // row here must carry a real hash — spot-verified against a downloaded file
+    // (unified joiner, 1_735_860 bytes) before being written down.
+    ModelSpec {
+        id: "parakeet-unified-encoder",
+        category: "stt",
+        directory: "parakeet-unified-en",
+        repository: "csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming",
+        filename: "encoder.int8.onnx",
+        url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming/resolve/main/encoder.int8.onnx",
+        expected_size: 654_040_552,
+        expected_sha256: Some("6716910b7a0833997fec7a410494c995d70124001a0e9b66d6370d6aced577e0"),
+    },
+    ModelSpec {
+        id: "parakeet-unified-decoder",
+        category: "stt",
+        directory: "parakeet-unified-en",
+        repository: "csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming",
+        filename: "decoder.int8.onnx",
+        url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming/resolve/main/decoder.int8.onnx",
+        expected_size: 7_257_753,
+        expected_sha256: Some("a5e223392c90e75f8144cdb5eb95af7625db389e39edef2bd1a9c872b3298fe6"),
+    },
+    ModelSpec {
+        id: "parakeet-unified-joiner",
+        category: "stt",
+        directory: "parakeet-unified-en",
+        repository: "csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming",
+        filename: "joiner.int8.onnx",
+        url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming/resolve/main/joiner.int8.onnx",
+        expected_size: 1_735_860,
+        expected_sha256: Some("869f43f7d24595c55581ad3bf249a935fb8a71389fbdaa7504b9f46f93140f8a"),
+    },
+    ModelSpec {
+        id: "parakeet-unified-tokens",
+        category: "stt",
+        directory: "parakeet-unified-en",
+        repository: "csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming",
+        filename: "tokens.txt",
+        url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming/resolve/main/tokens.txt",
+        expected_size: 8_952,
+        expected_sha256: Some("dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff"),
+    },
+    ModelSpec {
+        id: "canary-180m-encoder",
+        category: "stt",
+        directory: "canary-180m-flash",
+        repository: "csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8",
+        filename: "encoder.int8.onnx",
+        url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8/resolve/main/encoder.int8.onnx",
+        expected_size: 132_678_643,
+        expected_sha256: Some("7a75b4e2a5857a6dcc0819503bbe3fad66943db4a3ccf21d3f27c633667d303f"),
+    },
+    ModelSpec {
+        id: "canary-180m-decoder",
+        category: "stt",
+        directory: "canary-180m-flash",
+        repository: "csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8",
+        filename: "decoder.int8.onnx",
+        url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8/resolve/main/decoder.int8.onnx",
+        expected_size: 74_437_848,
+        expected_sha256: Some("e41a2ab9c0c2fe81a1e8ade5a45fb02a74bc4db7d1f91b89a54a25e2cf79cba2"),
+    },
+    ModelSpec {
+        id: "canary-180m-tokens",
+        category: "stt",
+        directory: "canary-180m-flash",
+        repository: "csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8",
+        filename: "tokens.txt",
+        url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8/resolve/main/tokens.txt",
+        expected_size: 53_555,
+        expected_sha256: Some("2dae6fc7815f9640645e0c765522b278ee0cef49b482d91f6913e334628d3e77"),
+    },
+    ModelSpec {
+        id: "whisper-medium-encoder",
+        category: "stt",
+        directory: "whisper-medium",
+        repository: "csukuangfj/sherpa-onnx-whisper-medium",
+        // Upstream name differs: `medium-encoder.int8.onnx`. It is saved locally
+        // as `encoder.int8.onnx` because `local_models::pick` matches by prefix
+        // (`name.starts_with("encoder")`).
+        filename: "encoder.int8.onnx",
+        url: "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium/resolve/main/medium-encoder.int8.onnx",
+        expected_size: 374_196_283,
+        expected_sha256: Some("1c54582b4d829de0089f6cb63bbbdb3bf7555398bacaf855fbecf1a84dfd193e"),
+    },
+    ModelSpec {
+        id: "whisper-medium-decoder",
+        category: "stt",
+        directory: "whisper-medium",
+        repository: "csukuangfj/sherpa-onnx-whisper-medium",
+        filename: "decoder.int8.onnx",
+        url: "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium/resolve/main/medium-decoder.int8.onnx",
+        expected_size: 571_059_257,
+        expected_sha256: Some("595d00a338a365a7bfa0ca7f296cabc639583bef770ab6130df90f49a6412747"),
+    },
+    ModelSpec {
+        id: "whisper-medium-tokens",
+        category: "stt",
+        directory: "whisper-medium",
+        repository: "csukuangfj/sherpa-onnx-whisper-medium",
+        filename: "tokens.txt",
+        url: "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium/resolve/main/medium-tokens.txt",
+        expected_size: 816_730,
+        expected_sha256: Some("b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126"),
+    },
 ];
+
+/// The sherpa-onnx family a catalog model id must load as.
+///
+/// Shape matching alone cannot separate Canary from Whisper: both are
+/// encoder + decoder + tokens, and `FAMILIES` checks Whisper first. A catalog
+/// folder therefore pins its family by id; an unrecognised id falls back to
+/// shape matching (a user's own bundle).
+pub fn family_for_model(id: &str) -> Option<&'static str> {
+    match id {
+        "parakeet-unified-en" => Some("transducer"),
+        "canary-180m-flash" => Some("canary"),
+        "whisper-medium" => Some("whisper"),
+        _ => None,
+    }
+}
 
 pub fn catalog() -> &'static [ModelSpec] {
     CATALOG
@@ -287,6 +449,237 @@ const GROUPS: &[ModelGroup] = &[
         streaming: false,
         // SenseVoice ships a language-ID head; unwired until phase 3.
         language_detection: true,
+        benchmark: UNBENCHMARKED,
+    },
+    // ---------------------------------------------------------------------
+    // STT placeholder rows.
+    //
+    // A placeholder row here is a promise about the *menu*, not about download
+    // support: it tells the user these models exist and are being considered, so
+    // the picker is not silently three rows long. Nothing below has a `CATALOG`
+    // entry, so `file_ids` stays empty, `supported: false` greys the row in
+    // Settings as "Not available yet", `bundle_ids` rejects the id, and
+    // `download_group` fails loudly without emitting a single progress event
+    // (see `sensevoice_is_unsupported_with_no_files` and
+    // `every_unsupported_stt_group_is_empty_and_never_downloads`).
+    //
+    // `languages` is deliberately empty on all of them: no verified ONNX/sherpa
+    // code set exists in this repo for these models, and inventing codes would be
+    // a lie in the UI (same reasoning as `SENSEVOICE_LANGUAGES`). Fill a code set
+    // in only when a download spec and a real engine path land together.
+    ModelGroup {
+        id: "parakeet-unified-en",
+        kind: "stt",
+        name: "Parakeet Unified EN 0.6B",
+        // Downloaded from csukuangfj2's sherpa-onnx int8 export and resolved by
+        // the same four-file transducer layout as v2 (encoder/decoder/joiner/
+        // tokens), so the helper needs no family change.
+        description: "Newer unified English Parakeet tier. Same four-file layout as v2.",
+        file_ids: &[
+            "parakeet-unified-encoder",
+            "parakeet-unified-decoder",
+            "parakeet-unified-joiner",
+            "parakeet-unified-tokens",
+        ],
+        supported: true,
+        languages: &["en"],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "parakeet-rnnt-06b",
+        kind: "stt",
+        name: "Parakeet RNN-T 0.6B",
+        description: "Transducer variant of Parakeet at 0.6B. Not available in this build yet.",
+        file_ids: &[],
+        supported: false,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "parakeet-rnnt-11b",
+        kind: "stt",
+        name: "Parakeet RNN-T 1.1B",
+        description: "Larger transducer Parakeet, heavier on CPU. Not available in this build yet.",
+        file_ids: &[],
+        supported: false,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "canary-180m-flash",
+        kind: "stt",
+        name: "Canary 180M Flash",
+        // Canary's file set is encoder + decoder + tokens, which is *shape*
+        // identical to Whisper. `stt_local::family_for_model` pins this id to the
+        // canary family so it is never loaded with whisper flags.
+        description: "Smallest Canary tier (English, Spanish, German, French), aimed at weak devices.",
+        file_ids: &[
+            "canary-180m-encoder",
+            "canary-180m-decoder",
+            "canary-180m-tokens",
+        ],
+        supported: true,
+        languages: &["en", "es", "de", "fr"],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "canary-1b-flash",
+        kind: "stt",
+        name: "Canary 1B Flash",
+        description: "Faster Canary 1B. Not available in this build yet.",
+        file_ids: &[],
+        supported: false,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "canary-1b",
+        kind: "stt",
+        name: "Canary 1B",
+        description: "Multilingual Canary transcriber. Not available in this build yet.",
+        file_ids: &[],
+        supported: false,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "canary-qwen-25b",
+        kind: "stt",
+        name: "Canary-Qwen 2.5B",
+        description: "Large Canary/Qwen hybrid. Not available in this build yet.",
+        file_ids: &[],
+        supported: false,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "whisper-medium",
+        kind: "stt",
+        name: "Whisper Medium",
+        // The upstream repo ships `medium-encoder.int8.onnx` etc.; the catalog
+        // saves them under the plain names the whisper family looks for.
+        description: "Widely used multilingual Whisper tier. Slower than Parakeet on CPU.",
+        file_ids: &[
+            "whisper-medium-encoder",
+            "whisper-medium-decoder",
+            "whisper-medium-tokens",
+        ],
+        supported: true,
+        // Whisper's 99-language set is not enumerable from anything verified in
+        // this repo, so the codes stay empty rather than invented.
+        languages: &[],
+        streaming: false,
+        language_detection: true,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "nemotron-stream-35",
+        kind: "stt",
+        name: "Nemotron Streaming 3.5",
+        description: "Streaming model for low-latency partial text. Not available in this build yet.",
+        file_ids: &[],
+        supported: false,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "qwen3-asr-06b",
+        kind: "stt",
+        name: "Qwen3-ASR 0.6B",
+        description: "Compact Qwen speech model. Not available in this build yet.",
+        file_ids: &[],
+        supported: false,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "qwen3-asr-17b",
+        kind: "stt",
+        name: "Qwen3-ASR 1.7B",
+        description: "Larger Qwen speech model. Not available in this build yet.",
+        file_ids: &[],
+        supported: false,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "fun-asr-nano",
+        kind: "stt",
+        name: "Fun-ASR Nano (Multilingual)",
+        description: "Compact multilingual nano model. Not available in this build yet.",
+        file_ids: &[],
+        supported: false,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "granite-4-1-2b",
+        kind: "stt",
+        name: "Granite Speech 4.1 2B",
+        description: "IBM Granite speech tier. Not available in this build yet.",
+        file_ids: &[],
+        supported: false,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "granite-4-0-1b",
+        kind: "stt",
+        name: "Granite Speech 4.0 1B",
+        description: "Smaller Granite speech tier. Not available in this build yet.",
+        file_ids: &[],
+        supported: false,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "voxtrak-mini-4b",
+        kind: "stt",
+        name: "VoxTrak Mini 4B (Realtime)",
+        description: "4B realtime model; needs about 16 GB RAM. Not available in this build yet.",
+        file_ids: &[],
+        supported: false,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
+        benchmark: UNBENCHMARKED,
+    },
+    ModelGroup {
+        id: "cohere-transcribe",
+        kind: "stt",
+        name: "Cohere Transcribe",
+        description: "Cloud-only service; never usable in offline mode.",
+        file_ids: &[],
+        supported: false,
+        languages: &[],
+        streaming: false,
+        language_detection: false,
         benchmark: UNBENCHMARKED,
     },
     ModelGroup {
@@ -540,6 +933,14 @@ fn bundle_ids(stt_version: &str, llm_size: &str) -> Result<Vec<&'static str>, St
     let stt_ids: &[&str] = match stt_version {
         "v2" => &["parakeet-v2-encoder", "parakeet-v2-decoder", "parakeet-v2-joiner", "parakeet-v2-tokens"],
         "v3" => &["parakeet-v3-encoder", "parakeet-v3-decoder", "parakeet-v3-joiner", "parakeet-v3-tokens"],
+        "parakeet-unified-en" => &[
+            "parakeet-unified-encoder",
+            "parakeet-unified-decoder",
+            "parakeet-unified-joiner",
+            "parakeet-unified-tokens",
+        ],
+        "canary-180m-flash" => &["canary-180m-encoder", "canary-180m-decoder", "canary-180m-tokens"],
+        "whisper-medium" => &["whisper-medium-encoder", "whisper-medium-decoder", "whisper-medium-tokens"],
         "" => &[],
         _ => return Err(format!("Unknown STT model variant '{}'.", stt_version)),
     };
@@ -703,6 +1104,9 @@ pub fn download_group(
                 &format!("{} — {:.0}%.", file_id, percent),
                 Some(percent),
             );
+            // Also publish it for the poller: events can be missed, the atomic
+            // cannot, and this is the only thing the dialog bar needs.
+            set_percent(Some(percent));
         });
         // The inner progress closure is a temporary dropped with the `let`
         // above, so its borrow of `progress` has ended here.
@@ -714,11 +1118,13 @@ pub fn download_group(
                     .map(|spec| spec.expected_size)
                     .unwrap_or(0);
                 done += spec;
+                let percent = done_percent(done, total);
+                set_percent(Some(percent));
                 progress(
                     group.id,
                     "complete",
                     "Download complete.",
-                    Some(done_percent(done, total)),
+                    Some(percent),
                 );
             }
             Err(error) => {
@@ -779,6 +1185,54 @@ pub fn delete(config_dir: &Path, custom_dir: &str) -> Result<(), String> {
     }
 }
 
+/// Remove exactly one logical model's files, leaving every other downloaded
+/// model untouched. The model's own folder is removed only when it is empty, so
+/// a file the user dropped in there is never deleted. Returns the refreshed
+/// table (same shape as `get_model_catalog`) so Settings needs no second call.
+pub fn delete_group(
+    id: &str,
+    config_dir: &Path,
+    custom_dir: &str,
+) -> Result<Vec<ModelGroupStatus>, String> {
+    let group = GROUPS
+        .iter()
+        .find(|group| group.id == id)
+        .ok_or_else(|| format!("[DL-010] Unknown model '{}'.", id))?;
+    validate_group(group)?;
+    let root = models_dir(config_dir, custom_dir);
+    let mut directories = BTreeSet::new();
+    for file_id in group.file_ids {
+        let spec = CATALOG
+            .iter()
+            .find(|spec| spec.id == *file_id)
+            .ok_or_else(|| {
+                format!("Model '{}' references unknown file '{}'.", id, file_id)
+            })?;
+        validate_spec(spec)?;
+        let target = target_path(&root, spec)?;
+        for path in [target.clone(), part_path(&target)] {
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                    return Err(format!("Refusing to delete non-file model path '{}'.", path.display()));
+                }
+                Ok(_) => fs::remove_file(&path)
+                    .map_err(|error| format!("Could not delete model file '{}': {}", path.display(), error))?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("Could not inspect model file '{}': {}", path.display(), error)),
+            }
+        }
+        if let Some(parent) = target.parent() {
+            directories.insert(parent.to_path_buf());
+        }
+    }
+    for directory in directories {
+        // `remove_dir` refuses a non-empty folder, which is exactly the wanted
+        // behaviour: never delete something this command did not create.
+        let _ = fs::remove_dir(&directory);
+    }
+    group_catalog(config_dir, custom_dir)
+}
+
 fn target_path(root: &Path, spec: &ModelSpec) -> Result<PathBuf, String> {
     validate_filename(spec.filename)?;
     Ok(root.join(spec.category).join(spec.directory).join(spec.filename))
@@ -810,10 +1264,17 @@ fn validate_spec(spec: &ModelSpec) -> Result<(), String> {
     if spec.expected_size == 0 {
         return Err(format!("Model '{}' has an invalid expected size.", spec.id));
     }
-    if let Some(expected_sha256) = spec.expected_sha256 {
-        if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(format!("Model '{}' has an invalid SHA-256 manifest entry.", spec.id));
-        }
+    // A spec with no hash is not downloadable: `download()` refuses it before
+    // its first byte, which reaches the user as "I clicked DOWNLOAD and nothing
+    // happened". Fail here instead, where CI and every catalog load see it.
+    let expected_sha256 = spec.expected_sha256.ok_or_else(|| {
+        format!(
+            "Model '{}' has no SHA-256 manifest entry, so it cannot be downloaded. This is a bug in SmoothFlow, not something you did.",
+            spec.id
+        )
+    })?;
+    if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("Model '{}' has an invalid SHA-256 manifest entry.", spec.id));
     }
     Ok(())
 }
@@ -1014,7 +1475,30 @@ mod tests {
         // value, which must be taught to `bundle_ids` in the same change.
         let stt_ids: Vec<&str> = GROUPS.iter().filter(|g| g.kind == "stt").map(|g| g.id).collect();
         let llm_ids: Vec<&str> = GROUPS.iter().filter(|g| g.kind == "llm").map(|g| g.id).collect();
-        assert_eq!(stt_ids, vec!["v2", "v3", "sv"]);
+        assert_eq!(
+            stt_ids,
+            vec![
+                "v2",
+                "v3",
+                "sv",
+                "parakeet-unified-en",
+                "parakeet-rnnt-06b",
+                "parakeet-rnnt-11b",
+                "canary-180m-flash",
+                "canary-1b-flash",
+                "canary-1b",
+                "canary-qwen-25b",
+                "whisper-medium",
+                "nemotron-stream-35",
+                "qwen3-asr-06b",
+                "qwen3-asr-17b",
+                "fun-asr-nano",
+                "granite-4-1-2b",
+                "granite-4-0-1b",
+                "voxtrak-mini-4b",
+                "cohere-transcribe",
+            ]
+        );
         assert_eq!(llm_ids, vec!["2b", "4b", "9b"]);
         for group in GROUPS {
             if group.kind == "stt" {
@@ -1045,6 +1529,86 @@ mod tests {
         let error = download_group("sv", &root, &custom, |_, _, _, _| events += 1).unwrap_err();
         assert!(error.contains("not available"), "unexpected error: {error}");
         assert_eq!(events, 0, "an unsupported group must not emit progress as if it downloaded");
+    }
+
+    #[test]
+    fn every_supported_group_is_actually_downloadable() {
+        // A row only appears in Settings when `supported` is true, and clicking
+        // DOWNLOAD can only work when every file it pulls has a verified size and
+        // SHA-256. A spec missing its hash used to fail at the first byte with no
+        // visible error, so the whole feature looked dead.
+        for group in GROUPS.iter().filter(|group| group.supported) {
+            assert!(!group.file_ids.is_empty(), "{} has no files", group.id);
+            for file_id in group.file_ids {
+                let spec = CATALOG
+                    .iter()
+                    .find(|spec| spec.id == *file_id)
+                    .unwrap_or_else(|| panic!("{} references unknown file {}", group.id, file_id));
+                assert!(
+                    validate_spec(spec).is_ok(),
+                    "{} / {} is not downloadable: {:?}",
+                    group.id,
+                    file_id,
+                    validate_spec(spec),
+                );
+                assert!(spec.expected_sha256.is_some(), "{} has no SHA-256", file_id);
+                assert!(spec.expected_size > 0, "{} has no size", file_id);
+            }
+        }
+    }
+
+    #[test]
+    fn delete_group_removes_only_that_models_files() {
+        let (root, custom) = missing_models_root();
+        let _ = std::fs::remove_dir_all(&root);
+        // Stand-in files: sizes do not matter here, only which paths survive.
+        for spec in CATALOG.iter().filter(|spec| {
+            spec.directory == "v2" || spec.directory == "whisper-medium"
+        }) {
+            let path = target_path(&root, spec).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"x").unwrap();
+        }
+        let whisper_encoder = CATALOG
+            .iter()
+            .find(|spec| spec.id == "whisper-medium-encoder")
+            .unwrap();
+        let v2_encoder = CATALOG
+            .iter()
+            .find(|spec| spec.id == "parakeet-v2-encoder")
+            .unwrap();
+
+        let catalog = delete_group("v2", &root, &custom).unwrap();
+
+        // The removed model is gone, folder included, and the other model keeps
+        // every byte it had.
+        assert!(!target_path(&root, v2_encoder).unwrap().exists());
+        assert!(!root.join("stt").join("v2").exists(), "empty v2 folder must be removed");
+        assert!(target_path(&root, whisper_encoder).unwrap().exists());
+        assert_eq!(catalog.len(), GROUPS.len());
+        assert!(delete_group("not-a-model", &root, &custom).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The placeholder rows exist so the picker shows the whole menu. That is only
+    /// safe while every one of them stays a *menu* row: no files, no claimed
+    /// languages, no progress events. A row that silently starts "downloading"
+    /// nothing would read as success, which is the failure this guards.
+    #[test]
+    fn every_unsupported_stt_group_is_empty_and_never_downloads() {
+        let (root, custom) = missing_models_root();
+        for group in GROUPS.iter().filter(|g| g.kind == "stt" && !g.supported) {
+            assert!(group.file_ids.is_empty(), "'{}' must list no files", group.id);
+            assert!(group.languages.is_empty(), "'{}' must not claim unverified languages", group.id);
+            assert!(validate_group(group).is_ok(), "'{}' is a catalogued placeholder, not broken", group.id);
+            let mut events = 0;
+            let error = download_group(group.id, &root, &custom, |_, _, _, _| events += 1)
+                .unwrap_err();
+            assert!(error.contains("not available"), "'{}' error: {error}", group.id);
+            assert_eq!(events, 0, "'{}' must not emit progress", group.id);
+        }
+        // The one STT group that is supported stays downloadable.
+        assert!(GROUPS.iter().any(|g| g.kind == "stt" && g.supported));
     }
 
     #[test]

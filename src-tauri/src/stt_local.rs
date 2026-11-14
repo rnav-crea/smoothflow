@@ -439,7 +439,16 @@ fn model_files(config: &Config) -> Result<ModelFiles, String> {
     } else {
         PathBuf::from(custom)
     };
-    if let Some(files) = resolve_in(&dir) {
+    // A catalog folder knows which model it holds, so its family is pinned by
+    // id: Canary and Whisper are shape-identical (encoder + decoder + tokens)
+    // and shape matching would load Canary with whisper flags. A user's own
+    // folder has no id to pin, so it keeps shape matching.
+    let preferred = if custom.is_empty() {
+        offline::family_for_model(&config.stt_version)
+    } else {
+        None
+    };
+    if let Some(files) = resolve_in(&dir, preferred) {
         return Ok(files);
     }
     let err = if custom.is_empty() {
@@ -465,33 +474,40 @@ fn model_files(config: &Config) -> Result<ModelFiles, String> {
 /// agree with what `inspect_stt_dir` accepts in Settings — otherwise a folder
 /// the UI reports as complete would fail at spawn instead (Settings' inspector
 /// is still Parakeet-only; that widens with the catalog in phase 3).
-fn resolve_in(dir: &Path) -> Option<ModelFiles> {
+fn resolve_in(dir: &Path, preferred: Option<&str>) -> Option<ModelFiles> {
     let files = match std::fs::read_dir(dir) {
         Ok(entries) => crate::local_models::collect_files(entries),
         Err(_) => Vec::new(),
     };
+    // Pinned family wins outright: when a catalog model names its family and the
+    // folder is missing one of that family's files, the spawn must fail loudly
+    // rather than silently load the files with the wrong flags.
+    if let Some(family) = preferred.and_then(|id| FAMILIES.iter().find(|f| f.id == id)) {
+        return files_for_family(family, &files);
+    }
     for family in FAMILIES {
-        let mut args = Vec::with_capacity(family.parts.len());
-        let mut complete = true;
-        for part in family.parts {
-            match crate::local_models::pick(&files, part.prefix, part.extension) {
-                Some(path) => args.push((part.flag, PathBuf::from(path))),
-                // A family never lists the same part twice, so `args` holds a
-                // strict prefix; a break cannot leave a wrong-looking list.
-                None => {
-                    complete = false;
-                    break;
-                }
-            }
-        }
-        if complete {
-            return Some(ModelFiles {
-                family: family.id,
-                args,
-            });
+        if let Some(model) = files_for_family(family, &files) {
+            return Some(model);
         }
     }
     None
+}
+
+/// Collect one family's flags, or `None` when any of its parts is missing.
+fn files_for_family(family: &Family, files: &[(String, String)]) -> Option<ModelFiles> {
+    let mut args = Vec::with_capacity(family.parts.len());
+    for part in family.parts {
+        match crate::local_models::pick(files, part.prefix, part.extension) {
+            Some(path) => args.push((part.flag, PathBuf::from(path))),
+            // A family never lists the same part twice, so `args` holds a
+            // strict prefix; returning early cannot leave a wrong-looking list.
+            None => return None,
+        }
+    }
+    Some(ModelFiles {
+        family: family.id,
+        args,
+    })
 }
 
 /// LE `u32` sample count followed by LE `f32` samples. `to_le_bytes` keeps this
@@ -649,7 +665,7 @@ mod tests {
         for name in ["encoder.int8.onnx", TOKENS] {
             std::fs::write(dir.join(name), b"x").unwrap();
         }
-        let files = resolve_in(&dir).unwrap();
+        let files = resolve_in(&dir, None).unwrap();
         assert_eq!(files.family, "nemo_ctc");
         assert_eq!(arg_path(&files, "--nemo-ctc"), dir.join("encoder.int8.onnx"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -663,7 +679,7 @@ mod tests {
         for name in ["model.int8.onnx", TOKENS] {
             std::fs::write(dir.join(name), b"x").unwrap();
         }
-        let files = resolve_in(&dir).unwrap();
+        let files = resolve_in(&dir, None).unwrap();
         assert_eq!(files.family, "sense_voice");
         assert_eq!(arg_path(&files, "--sensevoice"), dir.join("model.int8.onnx"));
         let _ = std::fs::remove_dir_all(&dir);

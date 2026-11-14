@@ -102,6 +102,7 @@ const cleanupLocalControls = document.getElementById("cleanup-local-controls");
 const cleanupCloudControls = document.getElementById("cleanup-cloud-controls");
 const summarySpeech = document.getElementById("summary-speech");
 const summaryCleanup = document.getElementById("summary-cleanup");
+const modelsRecommendation = document.getElementById("models-recommendation");
 const cleanupProviderNote = document.getElementById("cleanup-provider-note");
 const cleanupFallbackNote = document.getElementById("cleanup-fallback-note");
 const deleteModelsBtn = document.getElementById("delete-models-btn");
@@ -115,7 +116,6 @@ const downloadModalTitle = document.getElementById("download-modal-title");
 const downloadModalClose = document.getElementById("download-modal-close");
 const downloadModalSize = document.getElementById("download-modal-size");
 const downloadModalDest = document.getElementById("download-modal-dest");
-const downloadModalChangeBtn = document.getElementById("download-modal-change-btn");
 const downloadModalEngine = document.getElementById("download-modal-engine");
 const downloadModalProgress = document.getElementById("download-modal-progress");
 const downloadModalPercent = document.getElementById("download-modal-percent");
@@ -585,10 +585,15 @@ async function loadConfig() {
     setCleanupSource(cleanupEngine);
     currentConfig.stt_local = !!config.stt_local;
     currentConfig.offline_mode = !!config.offline_mode;
-    setSttChoice(["v2", "v3", "sv"].includes(config.stt_version) ? config.stt_version : "v2");
-    currentConfig.stt_version = getSttChoice();
-    setLlmChoice(["2b", "4b", "9b"].includes(config.llm_model_size) ? config.llm_model_size : "4b");
-    currentConfig.llm_model_size = getLlmChoice();
+    // Any catalog id is preserved, not just the first three: the model rows are
+    // rendered asynchronously from get_model_catalog, so reading the radios here
+    // would fall back to "v2" and silently rewrite a Whisper/Canary choice.
+    const savedStt = (config.stt_version || "").trim();
+    setSttChoice(savedStt || "v2");
+    currentConfig.stt_version = savedStt || getSttChoice();
+    const savedLlm = (config.llm_model_size || "").trim();
+    setLlmChoice(savedLlm || "4b");
+    currentConfig.llm_model_size = savedLlm || getLlmChoice();
     currentConfig.models_dir = config.models_dir || "";
     currentConfig.custom_llm_path = config.custom_llm_path || "";
     currentConfig.custom_stt_dir = config.custom_stt_dir || "";
@@ -736,20 +741,57 @@ function formatModelSize(bytes) {
 }
 
 // Fill the transfer bar with the real percent the Rust loop reports per event.
-// No percent (starting/failed events) leaves the indeterminate slide running.
+// `null`/`undefined` puts the bar back to its indeterminate slide, for the start
+// of a transfer and for any event that carries no percentage.
 function setDownloadDialogBarPercent(percent) {
   if (!downloadModalProgress) return;
   const bar = downloadModalProgress.querySelector(".model-card-bar");
   if (!bar) return;
-  if (typeof percent !== "number" || Number.isNaN(percent)) return;
+  const fill = bar.querySelector("i");
+  if (typeof percent !== "number" || Number.isNaN(percent)) {
+    bar.classList.remove("is-determinate");
+    if (fill) fill.style.removeProperty("width");
+    if (downloadModalPercent) downloadModalPercent.textContent = "";
+    return;
+  }
   const clamped = Math.max(0, Math.min(100, percent));
   bar.classList.add("is-determinate");
-  const fill = bar.querySelector("i");
   if (fill) fill.style.setProperty("width", `${clamped.toFixed(0)}%`);
   if (downloadModalPercent) downloadModalPercent.textContent = `${clamped.toFixed(0)}%`;
 }
 
 let pendingDownloadGroup = null;
+
+// The dialog bar has two drivers: the `model-group-download-progress` events
+// (fast, one per 256 KiB chunk) and this poll of the Rust transfer percent
+// (slow, but cannot be dropped). Belt and braces on purpose — the event-only
+// path left the user with no progress at all and no idea when it would finish.
+let downloadPollTimer = null;
+
+function startDownloadPoll() {
+  stopDownloadPoll();
+  downloadPollTimer = setInterval(async () => {
+    try {
+      const snapshot = await invoke("get_download_progress");
+      if (!snapshot || !snapshot.active) return;
+      setDownloadDialogBarPercent(snapshot.percent);
+      // Also the text, so "is it really downloading?" is answerable even when no
+      // progress event ever arrives: a moving number cannot be mistaken for a
+      // frozen dialog.
+      if (downloadModalMessage && pendingDownloadGroup) {
+        downloadModalMessage.textContent = `Downloading ${pendingDownloadGroup.name}… ${snapshot.percent}%`;
+        downloadModalMessage.className = "settings-hint";
+      }
+    } catch (err) {
+      // Events are still running; polling is the fallback, not the source.
+    }
+  }, 500);
+}
+
+function stopDownloadPoll() {
+  if (downloadPollTimer) clearInterval(downloadPollTimer);
+  downloadPollTimer = null;
+}
 
 function engineDialogText() {
   if (!engineStatusData) return "Checking…";
@@ -767,17 +809,23 @@ function openDownloadDialog(group) {
   pendingDownloadGroup = group;
   if (downloadModalTitle) downloadModalTitle.textContent = `Download ${group.name}`;
   if (downloadModalSize) downloadModalSize.textContent = formatCatalogBytes(group.size_bytes);
-  if (downloadModalDest) downloadModalDest.textContent = modelsDirResolved
-    ? `${modelsDirResolved}${modelsDirIsCustom ? " (custom)" : ""}`
-    : "Not chosen yet — you'll pick a folder";
+  if (downloadModalDest) {
+    // Say the exact folder, not just the root: models live one level below it
+    // (`<models root>/stt/<id>`), which is what "where did it go?" was asking.
+    const subfolder = `${group.kind}/${group.id}`;
+    downloadModalDest.textContent = modelsDirResolved
+      ? `${modelsDirResolved}${modelsDirIsCustom ? " (custom)" : ""} › ${subfolder}`
+      : "Not chosen yet — you'll pick a folder";
+  }
   if (downloadModalEngine) downloadModalEngine.textContent = engineDialogText();
   if (downloadModalMessage) {
     downloadModalMessage.textContent = "Press CONTINUE to start.";
     downloadModalMessage.className = "settings-hint";
   }
   if (downloadModalProgress) downloadModalProgress.hidden = true;
-  if (downloadModalPercent) downloadModalPercent.textContent = "0%";
-  if (downloadModalChangeBtn) downloadModalChangeBtn.disabled = false;
+  // A previous transfer left the bar filled at 100%: reset it, or the next
+  // download opens already looking finished.
+  setDownloadDialogBarPercent(null);
   if (downloadModalCancel) {
     downloadModalCancel.textContent = "CANCEL";
     downloadModalCancel.disabled = false;
@@ -804,17 +852,37 @@ function closeDownloadDialog() {
 }
 
 function pickDownloadFolder() {
-  return open({ directory: true, multiple: false, defaultPath: modelsDirResolved || undefined }).then((picked) => {
-    if (!picked) return false;
-    if (currentConfig) currentConfig.models_dir = picked;
-    return Promise.resolve().then(async () => { await saveConfig(); await loadModelsDir(); }).then(() => true);
-  }).catch(() => false);
+  return open({ directory: true, multiple: false, defaultPath: modelsDirResolved || undefined })
+    .then(async (picked) => {
+      if (!picked) return false;
+      if (currentConfig) currentConfig.models_dir = picked;
+      await saveConfig();
+      await loadModelsDir();
+      return true;
+    })
+    .catch((err) => {
+      // A failing picker used to be indistinguishable from "user cancelled", so
+      // DOWNLOAD silently did nothing. Say what actually happened.
+      log(`Models folder error: ${err}`);
+      setOfflineModelError(`Could not use the models folder: ${err}`);
+      return false;
+    });
 }
 
 async function startPendingDownload() {
   const group = pendingDownloadGroup;
   if (!group || !downloadModal) return;
-  let engineMissing = !engineStatusData
+  // The bar is revealed before anything can fail. It used to appear only after
+  // the engine step, so an engine failure left a dialog that looked like it did
+  // nothing at all.
+  if (downloadModalProgress) {
+    downloadModalProgress.hidden = false;
+    setDownloadDialogBarPercent(null);
+  }
+  // The engine goes first, but it is never a gate: engines and models are
+  // separate downloads, and a broken engine supply must not block the model the
+  // user actually asked for.
+  const engineMissing = !engineStatusData
     || !(engineStatusData.stt_installed && engineStatusData.llama_installed);
   if (engineMissing) {
     if (downloadModalEngine) downloadModalEngine.textContent = "Downloading engine…";
@@ -828,25 +896,32 @@ async function startPendingDownload() {
       renderEngineStatus();
       if (downloadModalEngine) downloadModalEngine.textContent = engineDialogText();
       setModelOperationRunning(false);
-      engineMissing = false;
     } catch (err) {
+      // Never return here. The model download is what the user asked for and it
+      // does not depend on the engine, so a failed engine fetch stays a visible
+      // warning instead of silently cancelling the whole operation.
+      if (downloadModalEngine) downloadModalEngine.textContent = "Engine missing — download failed";
       if (downloadModalMessage) {
-        downloadModalMessage.textContent = `Engine download failed: ${err}`;
+        downloadModalMessage.textContent = `The engine could not be downloaded (${err}). Continuing with the model — local dictation will not run until the engine is available.`;
         downloadModalMessage.className = "settings-hint download-modal-message is-error";
       }
-      setModelOperationRunning(false);
-      return;
+      log(`Engine download failed: ${err}`);
     }
   }
-  if (downloadModalProgress) downloadModalProgress.hidden = false;
   if (downloadModalCancel) {
     downloadModalCancel.textContent = "CANCEL";
     downloadModalCancel.disabled = false;
   }
   if (downloadModalContinue) downloadModalContinue.disabled = true;
-  if (downloadModalChangeBtn) downloadModalChangeBtn.disabled = true;
   setModelOperationRunning(true, `Downloading ${group.name}…`);
+  // Replace the engine warning now that bytes are actually moving; the poll and
+  // the event stream both rewrite this line from here on.
+  if (downloadModalMessage) {
+    downloadModalMessage.textContent = `Downloading ${group.name}…`;
+    downloadModalMessage.className = "settings-hint";
+  }
   setDownloadDialogBarPercent(0);
+  startDownloadPoll();
   try {
     modelCatalogData = await invoke("download_model", { id: group.id });
     renderModelTables();
@@ -877,6 +952,7 @@ async function startPendingDownload() {
     }
     if (downloadModalContinue) downloadModalContinue.disabled = false;
   } finally {
+    stopDownloadPoll();
     setModelOperationRunning(false);
   }
 }
@@ -928,35 +1004,50 @@ function setupDownloadModal() {
       await startPendingDownload();
     });
   }
-  if (downloadModalChangeBtn) {
-    downloadModalChangeBtn.addEventListener("click", async () => {
-      const picked = await pickDownloadFolder();
-      if (picked && downloadModalDest) {
-        downloadModalDest.textContent = modelsDirResolved
-          ? `${modelsDirResolved}${modelsDirIsCustom ? " (custom)" : ""}`
-          : "Not chosen yet — you'll pick a folder";
-      }
-      if (downloadModalEngine) downloadModalEngine.textContent = engineDialogText();
-    });
-  }
 }
 
-function openRemoveModelsModal() {
+// One destructive-confirm dialog serves both "remove all models" and
+// "uninstall this one model": `confirmAction` is whatever the opener registered.
+let confirmAction = null;
+
+function openConfirmModal({ title, message, confirmLabel, onConfirm }) {
   if (!confirmModal || !confirmModalMessage) return;
-  if (offlineModelStatusData) {
-    confirmModalMessage.textContent = `Remove all downloaded SmoothFlow models? This frees ${formatModelSize(offlineModelStatusData.total_bytes)} from ${modelsDirResolved || "the default models folder"}. The engine files are kept.`;
-  } else {
-    confirmModalMessage.textContent = "Remove all downloaded SmoothFlow models?";
+  confirmAction = onConfirm || null;
+  confirmModalMessage.textContent = message;
+  if (confirmModalTitle) confirmModalTitle.textContent = title;
+  if (confirmModalConfirm) {
+    confirmModalConfirm.textContent = confirmLabel || "REMOVE";
+    confirmModalConfirm.disabled = false;
   }
-  if (confirmModalTitle) confirmModalTitle.textContent = "Remove models";
-  if (confirmModalConfirm) confirmModalConfirm.disabled = false;
   if (confirmModalCancel) confirmModalCancel.disabled = false;
   confirmModal.classList.remove("closing");
   confirmModal.classList.add("open");
 }
 
+function openRemoveModelsModal() {
+  const freed = offlineModelStatusData
+    ? formatModelSize(offlineModelStatusData.total_bytes) + " from "
+    : "";
+  openConfirmModal({
+    title: "Remove models",
+    message: `Remove all downloaded SmoothFlow models? This frees ${freed}${modelsDirResolved || "the default models folder"}. The engine files are kept.`,
+    confirmLabel: "REMOVE",
+    onConfirm: confirmRemoveModels,
+  });
+}
+
+function openUninstallModelModal(group) {
+  openConfirmModal({
+    title: `Uninstall ${group.name}`,
+    message: `Delete ${group.name} from ${modelsDirResolved || "the models folder"}? This frees ${formatCatalogBytes(group.size_bytes)}. Every other downloaded model is kept.`,
+    confirmLabel: "UNINSTALL",
+    onConfirm: () => uninstallModel(group),
+  });
+}
+
 function closeRemoveModelsModal() {
   if (!confirmModal) return;
+  confirmAction = null;
   confirmModal.classList.remove("open");
   confirmModal.classList.add("closing");
   setTimeout(() => {
@@ -978,12 +1069,57 @@ async function confirmRemoveModels() {
   closeRemoveModelsModal();
 }
 
+// Removing the model the user is currently dictating through would leave the
+// app pointing at deleted files, so the selection moves to another installed
+// model of the same kind first.
+function reselectAfterUninstall(kind, removedId) {
+  if (!currentConfig) return;
+  const key = kind === "stt" ? "stt_version" : "llm_model_size";
+  if (currentConfig[key] !== removedId) return;
+  const candidates = (modelCatalogData || []).filter(
+    (group) => group.kind === kind && group.supported && group.installed,
+  );
+  if (candidates.length === 0) return;
+  const rec = currentModelRecommendation();
+  const preferred = kind === "stt" ? rec.stt : rec.llm;
+  const next = candidates.find((group) => group.id === preferred) || candidates[0];
+  if (kind === "stt") {
+    setSttChoice(next.id);
+    currentConfig.stt_version = next.id;
+  } else {
+    setLlmChoice(next.id);
+    currentConfig.llm_model_size = next.id;
+  }
+  saveConfig();
+}
+
+async function uninstallModel(group) {
+  if (confirmModalConfirm) confirmModalConfirm.disabled = true;
+  setModelOperationRunning(true, `Removing ${group.name}…`);
+  try {
+    modelCatalogData = await invoke("delete_model", { id: group.id });
+    renderModelTables();
+    reselectAfterUninstall(group.kind, group.id);
+    setModelOperationRunning(false);
+    if (offlineModelStatus) {
+      offlineModelStatus.textContent = `${group.name} removed — ${formatCatalogBytes(group.size_bytes)} freed.`;
+      offlineModelStatus.style.color = "#cdafa0";
+    }
+  } catch (err) {
+    setModelOperationRunning(false);
+    setOfflineModelError(`Could not remove ${group.name}: ${err}`);
+  }
+  closeRemoveModelsModal();
+}
+
 setupDownloadModal();
 if (confirmModalClose) confirmModalClose.addEventListener("click", closeRemoveModelsModal);
 if (confirmModalCancel) confirmModalCancel.addEventListener("click", closeRemoveModelsModal);
 if (confirmModalConfirm) confirmModalConfirm.addEventListener("click", async () => {
   if (modelOperationRunning) return;
-  await confirmRemoveModels();
+  const action = confirmAction;
+  if (!action) return;
+  await action();
 });
 document.addEventListener("click", (e) => {
   const target = e.target && e.target.closest ? e.target.closest("#confirm-modal") : null;
@@ -1057,6 +1193,147 @@ function shortModelName(group) {
 
 function catalogGroup(kind, id) {
   return (modelCatalogData || []).find((group) => group.kind === kind && group.id === id) || null;
+}
+
+// ── "Recommended for this PC" ─────────────────────────────────────────────
+// A deterministic mapping from the detected machine + the loaded catalog. It is
+// deliberately a pure function of its arguments (no DOM, no globals) so the
+// rules can be reasoned about without rendering: the badge, the summary line
+// and the first-run auto-select all read the same result.
+const MODELS_CHOICE_TOUCHED_KEY = "smoothflow.modelsChoiceTouched";
+
+function detectHardwareProfile() {
+  // `deviceMemory` is capped at 8 by browsers, so anything at or below 8 is
+  // treated as the unmeasured/low tier rather than a real 8 GB reading.
+  return {
+    ramGb: Number(navigator.deviceMemory) || 8,
+    cores: Number(navigator.hardwareConcurrency) || 4,
+  };
+}
+
+function recommendModels(catalog, savedSttVersion, profile) {
+  const groups = Array.isArray(catalog) ? catalog : [];
+  // Nothing loaded yet: recommend nothing rather than guess at a model.
+  if (groups.length === 0) return { stt: null, llm: null, reason: "" };
+  const usable = (kind, id) =>
+    groups.some((group) => group.kind === kind && group.id === id && group.supported === true);
+
+  // Parakeet v2 is the only top-tier English model with measured numbers, so it
+  // is the English default. v3 is recommended only to someone already running
+  // v3 (respecting an existing multilingual choice) - an English user is never
+  // flipped to the multilingual model by a hardware heuristic.
+  const stt = usable("stt", "v3") && savedSttVersion === "v3"
+    ? "v3"
+    : usable("stt", "v2") ? "v2" : null;
+
+  const constrained = profile.ramGb <= 8 && profile.cores <= 4;
+  const llm = constrained
+    ? (usable("llm", "2b") ? "2b" : usable("llm", "4b") ? "4b" : null)
+    : (usable("llm", "4b") ? "4b" : usable("llm", "2b") ? "2b" : null);
+
+  if (!stt && !llm) return { stt: null, llm: null, reason: "" };
+
+  const picks = [stt ? `Parakeet ${stt}` : "", llm ? `Qwen ${llm.toUpperCase()}` : ""]
+    .filter(Boolean)
+    .join(" + ");
+  // Only detected values and the ids above: no invented WER/size claims.
+  const fit = constrained ? "is the safe pick." : "fits comfortably.";
+  return { stt, llm, reason: `${profile.ramGb} GB RAM · ${profile.cores} cores — ${picks} ${fit}` };
+}
+
+function currentModelRecommendation() {
+  const savedStt = (currentConfig && currentConfig.stt_version) || "";
+  return recommendModels(modelCatalogData, savedStt, detectHardwareProfile());
+}
+
+// The recommended id for one kind, read fresh so a caller never has to thread
+// the recommendation object around.
+function modelRecommendedId(kind) {
+  const rec = currentModelRecommendation();
+  return kind === "stt" ? rec.stt : rec.llm;
+}
+
+function createModelBadge() {
+  const badge = document.createElement("span");
+  badge.className = "model-badge";
+  badge.textContent = "RECOMMENDED";
+  return badge;
+}
+
+// Repaint an already-rendered table: the selected border follows the saved
+// choice and the badge follows the recommendation. Cheaper and less disruptive
+// than `renderModelTables()`, which would recreate the focused radio.
+function refreshModelRows(rec = currentModelRecommendation()) {
+  const sttSelected = (currentConfig && currentConfig.stt_version) || getSttChoice();
+  const llmSelected = (currentConfig && currentConfig.llm_model_size) || getLlmChoice();
+  for (const row of document.querySelectorAll(".model-row")) {
+    const kind = row.dataset.modelKind;
+    const id = row.dataset.modelId;
+    if (!kind || !id) continue;
+    // `.is-disabled` is already the row's own answer to "supported".
+    const supported = !row.classList.contains("is-disabled");
+    row.classList.toggle("is-selected", supported && id === (kind === "stt" ? sttSelected : llmSelected));
+    const existing = row.querySelector(".model-badge");
+    const wanted = supported && id === (kind === "stt" ? rec.stt : rec.llm);
+    if (wanted && !existing) {
+      row.querySelector(".model-row-name")?.after(createModelBadge());
+    } else if (!wanted && existing) {
+      existing.remove();
+    }
+  }
+}
+
+function modelsChoiceTouched() {
+  try {
+    return localStorage.getItem(MODELS_CHOICE_TOUCHED_KEY) === "1";
+  } catch (err) {
+    // Storage blocked: assume the user has chosen, so nothing is overwritten.
+    return true;
+  }
+}
+
+function markModelsChoiceTouched() {
+  try {
+    localStorage.setItem(MODELS_CHOICE_TOUCHED_KEY, "1");
+  } catch (err) { /* storage blocked: no auto-select on the next launch either */ }
+}
+
+// Repaint the summary line, optionally apply the first-run picks, then
+// re-render the rows so the RECOMMENDED badge follows the current state.
+// `autoSelect` is true only for the first successful catalog load.
+function applyModelRecommendation(autoSelect = false) {
+  const rec = currentModelRecommendation();
+  if (modelsRecommendation) {
+    modelsRecommendation.textContent = rec.reason || "";
+    modelsRecommendation.hidden = !rec.reason;
+  }
+  let changed = false;
+  if (autoSelect && currentConfig && !modelsChoiceTouched()) {
+    if (rec.stt && rec.stt !== currentConfig.stt_version) {
+      setSttChoice(rec.stt);
+      currentConfig.stt_version = rec.stt;
+      changed = true;
+    }
+    if (rec.llm && rec.llm !== currentConfig.llm_model_size) {
+      setLlmChoice(rec.llm);
+      currentConfig.llm_model_size = rec.llm;
+      changed = true;
+    }
+  }
+  // Rows either get rebuilt (the picks above changed what is checked, and a
+  // fresh row reads `currentConfig` directly) or repainted in place, which keeps
+  // the focused radio alive.
+  if (changed) {
+    renderModelTables();
+    renderModelPanel();
+    saveConfig();
+  } else if (autoSelect) {
+    // First catalog load: there are no rows on screen yet.
+    renderModelTables();
+  } else {
+    refreshModelRows(rec);
+  }
+  return rec;
 }
 
 // The dialog is the only consumer of the resolved folder now: the destination
@@ -1450,10 +1727,12 @@ function formatCatalogBytes(bytes) {
 
 function modelBenchmarkLine(group) {
   const bench = group.benchmark || {};
+  // Only measured numbers are ever shown. A model with no published benchmark
+  // renders nothing at all, rather than a "not benchmarked" placeholder.
   if (bench.wer_earnings22 != null && bench.realtime_factor != null) {
     return `${(bench.wer_earnings22 * 100).toFixed(1)}% WER · ${bench.realtime_factor.toFixed(1)}× realtime (measured)`;
   }
-  return "not benchmarked";
+  return "";
 }
 
 function modelRowLanguages(group) {
@@ -1483,6 +1762,11 @@ function createModelRow(group) {
     ? ((currentConfig && currentConfig.stt_version) || getSttChoice())
     : ((currentConfig && currentConfig.llm_model_size) || getLlmChoice());
   row.className = "model-row";
+  // The kind/id are mirrored on the row so the recommender can repaint the
+  // badge and the selected border in place instead of rebuilding the table
+  // (a rebuild would drop keyboard focus mid-arrow-key navigation).
+  row.dataset.modelKind = group.kind;
+  row.dataset.modelId = group.id;
   if (group.id === selected && supported) row.classList.add("is-selected");
   if (!supported) row.classList.add("is-disabled");
 
@@ -1491,7 +1775,10 @@ function createModelRow(group) {
   input.className = "model-radio-input";
   input.name = group.kind === "stt" ? "offline-stt-choice" : "offline-llm-choice";
   input.value = group.id;
-  input.disabled = !supported || !group.installed;
+  // Every listed model is selectable, not only the downloaded ones. Requiring an
+  // install first made every row but the installed one read-only, which looked
+  // like a radio group that only worked on the first model.
+  input.disabled = !supported;
   input.checked = group.id === selected && supported;
   // Dynamic rows miss the startup-time listener loop, so the change handler is
   // attached here.
@@ -1506,6 +1793,11 @@ function createModelRow(group) {
   desc.className = "model-row-desc";
   desc.textContent = group.description;
   main.appendChild(name);
+  // Hardware-aware pick for this kind (null when the catalog has no usable
+  // option, and never on an unsupported group).
+  if (supported && group.id === modelRecommendedId(group.kind)) {
+    main.appendChild(createModelBadge());
+  }
   main.appendChild(desc);
   const meta = modelRowLanguages(group);
   if (meta) {
@@ -1517,13 +1809,15 @@ function createModelRow(group) {
     main.appendChild(tags);
   }
 
-  const metric = document.createElement("span");
-  metric.className = "model-metric";
-  metric.textContent = modelBenchmarkLine(group);
-
   const side = document.createElement("div");
   side.className = "model-row-side";
-  side.appendChild(metric);
+  const benchmark = modelBenchmarkLine(group);
+  if (benchmark) {
+    const metric = document.createElement("span");
+    metric.className = "model-metric";
+    metric.textContent = benchmark;
+    side.appendChild(metric);
+  }
 
   if (!supported) {
     const note = document.createElement("span");
@@ -1531,10 +1825,25 @@ function createModelRow(group) {
     note.textContent = "Not available yet";
     side.appendChild(note);
   } else if (group.installed) {
-    const state = document.createElement("span");
-    state.className = "model-metric";
-    state.textContent = "Installed";
-    side.appendChild(state);
+    // Same slot as DOWNLOAD: once the model is on disk the action flips to
+    // UNINSTALL, so removing one model never requires hunting for another menu.
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "reset-cancel-btn";
+    remove.style.cssText = "padding: 8px 12px; white-space: nowrap;";
+    remove.textContent = "UNINSTALL";
+    remove.disabled = modelOperationRunning;
+    remove.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (modelOperationRunning) return;
+      openUninstallModelModal(group);
+    });
+    side.appendChild(remove);
+    const installedNote = document.createElement("span");
+    installedNote.className = "model-metric";
+    installedNote.textContent = "Installed";
+    side.appendChild(installedNote);
   } else {
     const action = document.createElement("button");
     action.type = "button";
@@ -1564,6 +1873,13 @@ function createModelRow(group) {
   return row;
 }
 
+function modelSectionHeading(label) {
+  const heading = document.createElement("span");
+  heading.className = "model-table-heading";
+  heading.textContent = label;
+  return heading;
+}
+
 function renderModelTables() {
   const groups = modelCatalogData || [];
   const query = modelSearchInput ? modelSearchInput.value : "";
@@ -1571,7 +1887,10 @@ function renderModelTables() {
     const container = kind === "stt" ? modelTableEl : modelTableCleanupEl;
     if (!container) continue;
     container.replaceChildren();
-    const rows = groups.filter((g) => g.kind === kind && modelRowMatches(g, query));
+    // Rows with no download option are not listed at all: the panel is a
+    // "choose what to download" list, not a catalogue of what might exist one
+    // day. The backend still carries the placeholders (see offline::GROUPS).
+    const rows = groups.filter((g) => g.kind === kind && g.supported && modelRowMatches(g, query));
     if (rows.length === 0) {
       const empty = document.createElement("span");
       empty.className = "settings-hint";
@@ -1580,17 +1899,32 @@ function renderModelTables() {
       container.appendChild(empty);
       continue;
     }
-    for (const group of rows) container.appendChild(createModelRow(group));
+    // Downloaded models sit in their own block at the top: what you already have
+    // is a different list from what you can add, and it is the one you keep
+    // coming back to. Re-rendering after a download moves the row up by itself.
+    const installed = rows.filter((group) => group.installed);
+    const available = rows.filter((group) => !group.installed);
+    if (installed.length > 0) {
+      container.appendChild(modelSectionHeading("Installed"));
+      for (const group of installed) container.appendChild(createModelRow(group));
+    }
+    if (available.length > 0) {
+      if (installed.length > 0) container.appendChild(modelSectionHeading("Available to download"));
+      for (const group of available) container.appendChild(createModelRow(group));
+    }
   }
 }
 
 async function loadModelCatalog() {
   try {
     modelCatalogData = await invoke("get_model_catalog");
-    renderModelTables();
     // The summary chips prefer the catalog's model names over the id fallback,
-    // so they are repainted once the real names exist.
+    // so they are repainted once the real names exist. `applyModelRecommendation`
+    // also renders the rows (they need the recommendation for their badge) and,
+    // on the first load only, fills in the recommended picks for a user who has
+    // never clicked a model row.
     renderModelPanel();
+    applyModelRecommendation(true);
   } catch (err) {
     log(`Model catalog error: ${err}`);
     if (offlineModelStatus) {
@@ -1600,12 +1934,27 @@ async function loadModelCatalog() {
   }
 }
 
-function downloadModelGroup(group, button) {
+// DOWNLOAD starts with the OS folder picker: the byte destination is the
+// user's decision, and asking for it up front means the confirm dialog only
+// has to report it. Cancelling the picker leaves nothing behind.
+async function downloadModelGroup(group, button) {
   if (modelOperationRunning || group.inFlight) return;
   group.inFlight = true;
   group.rowButton = button;
   button.disabled = true;
-  button.textContent = "WORKING...";
+  button.textContent = "CHOOSE FOLDER...";
+  let picked = false;
+  try {
+    picked = await pickDownloadFolder();
+  } catch (err) {
+    log(`Models folder error: ${err}`);
+  }
+  if (!picked) {
+    group.inFlight = false;
+    button.disabled = false;
+    button.textContent = "DOWNLOAD";
+    return;
+  }
   openDownloadDialog(group);
 }
 
@@ -1615,11 +1964,17 @@ if (modelSearchInput) {
 
 function updateOfflineConfig() {
   if (!currentConfig) return;
+  // Clicking a model row is an explicit choice: from here on the recommender
+  // may show a badge, but it never auto-selects again on this machine.
+  markModelsChoiceTouched();
   // A model row only chooses which local model; whether local runs at all is the
   // source radio's job, so repaint first and let saveConfig derive the fields.
   currentConfig.stt_version = getSttChoice();
   currentConfig.llm_model_size = getLlmChoice();
   renderModelPanel();
+  // A v3 pick changes the STT recommendation, so the badge and the summary line
+  // are recomputed here too (auto-select stays off: the user just chose).
+  applyModelRecommendation(false);
   saveConfig();
 }
 

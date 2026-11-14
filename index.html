@@ -163,7 +163,28 @@
       .model-card-details[hidden] { display: none; }
 
       /* ── Model table rows (rendered from get_model_catalog) ───────────── ── */
-      .model-table { display: flex; flex-direction: column; gap: 8px; }
+      /* The catalog has more rows than fit a settings card, and the card does
+         not scroll on its own: without this the list ran past the card and the
+         rows below the fold could not be reached at all. */
+      .model-table {
+        display: flex; flex-direction: column; gap: 8px;
+        max-height: 320px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding-right: 4px; /* room for the scrollbar so rows keep their border */
+        scrollbar-width: thin;
+        scrollbar-color: var(--color-border) transparent;
+      }
+      .model-table::-webkit-scrollbar { width: 8px; }
+      .model-table::-webkit-scrollbar-track { background: transparent; }
+      .model-table::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
+      /* Section label inside the model list ("Installed" / "Available to
+         download"), so downloaded models are a separate block at the top. */
+      .model-table-heading {
+        font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em;
+        text-transform: uppercase; color: var(--color-text-secondary);
+        opacity: 0.85; padding-top: 2px;
+      }
       .model-row {
         display: flex; align-items: center; gap: 12px;
         border: 1px solid var(--color-border);
@@ -175,6 +196,23 @@
       .model-row.is-disabled:hover { border-color: var(--color-border); }
       .model-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
       .model-row-name { font-family: var(--font-mono); font-size: 12px; font-weight: 600; color: var(--color-text-primary); }
+      /* "Recommended for this PC" chip. align-self keeps it chip-width inside
+         the column flex (§.model-row-main) instead of stretching full width. */
+      .model-badge {
+        align-self: flex-start;
+        display: inline-block;
+        vertical-align: middle;
+        padding: 1px 6px;
+        border: 1px solid var(--color-border-muted, #3e3d3b);
+        border-radius: 999px;
+        background: var(--color-surface-muted, #47203d);
+        font-family: var(--font-mono);
+        font-size: 9px;
+        line-height: 1.7;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--color-accent-hover, #d478ac);
+      }
       .model-row-desc { font-size: 11.5px; color: var(--color-text-secondary); margin: 0; line-height: 1.5; }
       .model-row-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
       .model-row-side { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
@@ -217,6 +255,11 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      /* Its own full-width line under the two summary items. No `display` is
+         set here, so the UA [hidden] rule still hides it before the catalog
+         (and therefore the recommendation) exists. */
+      #models-recommendation { flex: 1 0 100%; margin: 2px 0 0; }
+      #models-recommendation[hidden] { display: none; }
       .models-card {
         display: flex;
         flex-direction: column;
@@ -563,6 +606,7 @@
                 <span class="models-summary-label">Cleanup</span>
                 <span class="models-summary-value" id="summary-cleanup">Checking…</span>
               </div>
+              <p class="settings-hint" id="models-recommendation" hidden></p>
             </div>
 
             <!-- 1 ── Speech to text -->
@@ -855,7 +899,6 @@
             <div class="download-modal-row">
               <span class="download-modal-label">Save to</span>
               <span id="download-modal-dest" class="download-modal-value">Not chosen yet</span>
-              <button id="download-modal-change-btn" class="reset-cancel-btn" type="button">CHANGE</button>
             </div>
             <div class="download-modal-row">
               <span class="download-modal-label">Engine</span>

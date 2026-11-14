@@ -396,8 +396,11 @@ fn is_catalog_llm_id(id: &str) -> bool {
 /// name.
 fn stt_label(id: &str) -> String {
     match id.trim().to_ascii_lowercase().as_str() {
-        "v2" => "Parakeet v2 — English".to_string(),
-        "v3" => "Parakeet v3 — 25 languages".to_string(),
+        "v2" => "Parakeet v2 - English".to_string(),
+        "v3" => "Parakeet v3 - 25 languages".to_string(),
+        "parakeet-unified-en" => "Parakeet Unified EN".to_string(),
+        "canary-180m-flash" => "Canary 180M Flash".to_string(),
+        "whisper-medium" => "Whisper Medium".to_string(),
         _ => id.to_string(),
     }
 }

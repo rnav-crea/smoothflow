@@ -1186,6 +1186,27 @@ fn get_model_catalog(
     offline::group_catalog(&config_dir, &custom_dir)
 }
 
+/// Remove ONE downloaded model by its config id (`v2`/`whisper-medium`/`4b`…),
+/// keeping every other model on disk. Returns the refreshed table.
+#[tauri::command]
+async fn delete_model(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Vec<offline::ModelGroupStatus>, String> {
+    let custom_dir = state.config.lock().unwrap().models_dir.clone();
+    let config_dir = Config::path()
+        .parent()
+        .ok_or_else(|| "Could not determine the SmoothFlow config directory.".to_string())?
+        .to_path_buf();
+    // Deleting GBs from disk is blocking work; see the spawn_blocking note on
+    // `download_model` — a sync command would run on the main thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        offline::delete_group(&id, &config_dir, &custom_dir)
+    })
+    .await
+    .map_err(|e| format!("[DL-002] The model delete task failed: {e}"))?
+}
+
 /// Download one logical model by its config id (`v2`/`v3`/`2b`/`4b`/`9b`).
 /// Returns the refreshed table so the caller does not need a second round trip.
 #[tauri::command]
@@ -1204,24 +1225,39 @@ async fn download_model(
     // worker starves every other async task; the blocking pool won't.
     // A fresh transfer clears a stale cancel flag from a previous one first.
     offline::reset_cancel();
+    // `get_download_progress` reports this to the dialog poller, so the bar keeps
+    // moving even if a progress event is dropped. Cleared before the catalog read
+    // so polling stops the moment the last byte lands, whichever way it ended.
+    offline::set_running(true);
     tauri::async_runtime::spawn_blocking(move || {
-        offline::download_group(&id, &config_dir, &custom_dir, |id, status, message, percent| {
-            // Same payload shape as `model-download-progress`; the event name is
-            // what tells the two apart. `&str` fields, like the model one.
-            let _ = app.emit(
-                "model-group-download-progress",
-                ModelDownloadProgress {
-                    id,
-                    status,
-                    message,
-                    percent,
-                },
-            );
-        })?;
+        let outcome =
+            offline::download_group(&id, &config_dir, &custom_dir, |id, status, message, percent| {
+                // Same payload shape as `model-download-progress`; the event name is
+                // what tells the two apart. `&str` fields, like the model one.
+                let _ = app.emit(
+                    "model-group-download-progress",
+                    ModelDownloadProgress {
+                        id,
+                        status,
+                        message,
+                        percent,
+                    },
+                );
+            });
+        offline::set_running(false);
+        outcome?;
         offline::group_catalog(&config_dir, &custom_dir)
     })
     .await
     .map_err(|e| format!("[DL-003] The model download task failed: {e}"))?
+}
+
+/// Percent of the model transfer running right now, for the download dialog's
+/// bar. Polled instead of pushed: the event stream is the fast path, this is the
+/// guaranteed one (a dropped event used to leave the bar frozen at 0%).
+#[tauri::command]
+fn get_download_progress() -> offline::TransferProgress {
+    offline::progress_snapshot()
 }
 
 /// The engines are two native child processes (~46 MB) downloaded on demand
@@ -1871,6 +1907,8 @@ pub fn run() {
             delete_models,
             get_model_catalog,
             download_model,
+            get_download_progress,
+            delete_model,
             get_engine_status,
             download_engines,
             cancel_downloads,
