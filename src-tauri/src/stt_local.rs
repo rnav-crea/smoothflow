@@ -358,15 +358,40 @@ fn spawn(config: &Config) -> Result<Session, String> {
         .stdout
         .take()
         .ok_or_else(|| "[STT-004] The local speech helper gave us no output pipe.".to_string())?;
+    // Wait for the model to finish loading (~4 s) before the first request.
+    // The read runs on a detached helper thread so a wedged helper cannot block
+    // the first local dictation forever: on timeout the child is killed and the
+    // caller gets an error instead of a hung UI (NB-14).
+    const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+    let reader = BufReader::new(stdout);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut line = String::new();
+        let result = reader.read_line(&mut line);
+        let _ = tx.send((result, line, reader));
+    });
+
+    let (result, line, reader) = match rx.recv_timeout(READY_TIMEOUT) {
+        Ok(received) => received,
+        Err(_) => {
+            // Killing the child closes the pipe, so the blocked reader exits on
+            // its own; there is no point joining it here.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(
+                "[STT-005] The local speech engine did not finish loading within 60 seconds. Try again, or enable cloud mode in Settings."
+                    .into(),
+            );
+        }
+    };
+
     let mut session = Session {
         child,
         stdin,
-        stdout: BufReader::new(stdout),
+        stdout: reader,
     };
-
-    // Wait for the model to finish loading (~4 s) before the first request.
-    let mut line = String::new();
-    match session.stdout.read_line(&mut line) {
+    match result {
         Ok(0) => {
             session.shutdown();
             return Err("[STT-004] The local speech helper exited while loading the model. Check that the model files are valid.".into());
@@ -410,7 +435,13 @@ fn helper_path() -> Result<PathBuf, String> {
     let dir = exe
         .parent()
         .ok_or_else(|| "[STT-001] Could not locate the SmoothFlow installation directory.".to_string())?;
-    Ok(dir.join(format!("{HELPER_NAME}{}", std::env::consts::EXE_SUFFIX)))
+    // NB-18: the config-dir branch rejects symlinks; the exe-dir fallback must
+    // apply the same no-follow check, or a planted link next to the app would be
+    // spawned without ever being verified.
+    let fallback = dir.join(format!("{HELPER_NAME}{}", std::env::consts::EXE_SUFFIX));
+    crate::engines::installed_at(fallback).ok_or_else(|| {
+        "[STT-001] The local speech helper beside the app is missing, is a link, or is empty. Reinstall SmoothFlow or download the engines in Settings.".to_string()
+    })
 }
 
 /// `<models root>/stt/<stt_version>` — the same layout `offline::download`

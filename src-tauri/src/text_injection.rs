@@ -1,5 +1,6 @@
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
 
@@ -17,6 +18,51 @@ fn paste_combo() -> (Key, Key) {
 /// Hard timeout for any clipboard operation. Windows clipboard IPC can block
 /// indefinitely if another app (clipboard manager, password manager) holds it open.
 const CLIPBOARD_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Bumped by every clipboard write this app makes (paste, streamed append, and
+/// the UI's Copy button). A paste path restores the user's old clipboard only
+/// if the epoch is still the one it wrote at — so a Copy clicked while
+/// auto-paste is still running is never overwritten by the restore (NB-05).
+static CLIPBOARD_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+fn bump_epoch() -> u64 {
+    CLIPBOARD_EPOCH.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// Put `text` back only when nothing has written the clipboard since `epoch`.
+fn restore_if_unchanged(text: String, epoch: u64) {
+    if CLIPBOARD_EPOCH.load(Ordering::SeqCst) != epoch {
+        return;
+    }
+    // Bump before writing, so a session restoring at the same moment also
+    // backs off instead of overwriting this write.
+    let _ = bump_epoch();
+    let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(text));
+}
+
+/// Write `text` to the clipboard for the UI's Copy button. Same epoch as the
+/// paste paths, so an in-flight restore leaves it alone (NB-05).
+pub fn copy_text(text: &str) -> Result<(), String> {
+    let text = text.to_owned();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result: Result<(), String> = (|| {
+            // Claim the clipboard before writing; a restore that already passed
+            // its check still loses because this write lands last.
+            let _ = bump_epoch();
+            let mut clipboard = arboard::Clipboard::new()
+                .map_err(|e| format!("[PST-001] Could not open clipboard. ({e})"))?;
+            clipboard
+                .set_text(text)
+                .map_err(|e| format!("[PST-001] Could not write to clipboard. ({e})"))
+        })();
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(CLIPBOARD_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => Err("[PST-001] Clipboard operation timed out (500ms).".into()),
+    }
+}
 
 /// Paste `text` into the currently focused application.
 ///
@@ -57,23 +103,26 @@ fn clipboard_paste(text: &str) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
-        let result: Result<Option<String>, String> = (|| {
+        let result: Result<(Option<String>, u64), String> = (|| {
             let mut clipboard =
                 arboard::Clipboard::new().map_err(|e| format!("[PST-001] Could not open clipboard. ({e})"))?;
 
             let old = clipboard.get_text().ok();
 
+            // Claim the clipboard before writing so a concurrent restore backs
+            // off instead of clobbering this paste (NB-05).
+            let epoch = bump_epoch();
             clipboard
                 .set_text(text)
                 .map_err(|e| format!("[PST-001] Could not write to clipboard. ({e})"))?;
 
-            Ok(old)
+            Ok((old, epoch))
         })();
         let _ = tx.send(result);
     });
 
-    let old = match rx.recv_timeout(CLIPBOARD_TIMEOUT) {
-        Ok(Ok(old)) => old,
+    let (old, epoch) = match rx.recv_timeout(CLIPBOARD_TIMEOUT) {
+        Ok(Ok(pair)) => pair,
         Ok(Err(e)) => return Err(e),
         Err(_) => return Err("[PST-001] Clipboard operation timed out (500ms). Falling back to direct typing.".into()),
     };
@@ -100,7 +149,7 @@ fn clipboard_paste(text: &str) -> Result<(), String> {
     thread::sleep(Duration::from_millis(50));
 
     if let Some(old_text) = old {
-        let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(old_text));
+        restore_if_unchanged(old_text, epoch);
     }
 
     Ok(())
@@ -120,6 +169,9 @@ fn enigo_text(text: &str) -> Result<(), String> {
 // allow(dead_code) markers come off with the lib.rs wiring.
 pub struct PasteSession {
     saved: Option<String>,
+    /// Clipboard epoch of this session's last write. The restore is skipped if
+    /// anything else wrote the clipboard after it (NB-05).
+    epoch: u64,
 }
 
 #[allow(dead_code)]
@@ -137,6 +189,7 @@ impl PasteSession {
             .join()
             .ok()
             .flatten(),
+            epoch: CLIPBOARD_EPOCH.load(Ordering::SeqCst),
         }
     }
 
@@ -145,6 +198,9 @@ impl PasteSession {
         if text.is_empty() {
             return Ok(());
         }
+        // Claim the clipboard before this write; an older session's restore
+        // then leaves it alone (NB-05).
+        self.epoch = bump_epoch();
         let text = text.to_owned();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
@@ -188,12 +244,12 @@ impl PasteSession {
 
     /// Put the user's clipboard back.
     pub fn finish(mut self) {
-        Self::restore(&mut self.saved);
+        Self::restore(&mut self.saved, self.epoch);
     }
 
-    fn restore(saved: &mut Option<String>) {
+    fn restore(saved: &mut Option<String>, epoch: u64) {
         if let Some(old) = saved.take() {
-            let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(old));
+            restore_if_unchanged(old, epoch);
         }
     }
 }
@@ -202,7 +258,7 @@ impl Drop for PasteSession {
     /// Restores on drop too, so a caller that forgets `finish()` on an error
     /// path still leaves the clipboard alone. `take()` makes it run at most once.
     fn drop(&mut self) {
-        Self::restore(&mut self.saved);
+        Self::restore(&mut self.saved, self.epoch);
     }
 }
 

@@ -905,9 +905,14 @@ fn server_path() -> Result<PathBuf, String> {
     let dir = exe.parent().ok_or_else(|| {
         "[LLM-001] Could not locate the SmoothFlow installation directory.".to_string()
     })?;
-    Ok(dir
+    // NB-18: same no-follow check as the config-dir lookup — a link beside the
+    // executable must not be spawned just because it points at a real file.
+    let fallback = dir
         .join("llama")
-        .join(format!("llama-server{}", std::env::consts::EXE_SUFFIX)))
+        .join(format!("llama-server{}", std::env::consts::EXE_SUFFIX));
+    crate::engines::installed_at(fallback).ok_or_else(|| {
+        "[LLM-001] The local cleanup server beside the app is missing, is a link, or is empty. Reinstall SmoothFlow or download the engines in Settings.".to_string()
+    })
 }
 
 /// OpenAI-compatible body. `cache_prompt` keeps the system prompt resident

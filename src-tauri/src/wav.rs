@@ -17,9 +17,21 @@ const HEADER_LEN: u32 = 44;
 /// Out-of-range samples are clamped rather than wrapped, so a hot microphone
 /// cannot turn a loud word into noise.
 pub fn write_wav_16bit_mono(path: &Path, samples: &[f32], sample_rate: u32) -> std::io::Result<()> {
+    let mut file = File::create(path)?;
+    write_wav_16bit_mono_to(&mut file, samples, sample_rate)
+}
+
+/// Same writer into an already-open handle. `history::save_audio` opens with
+/// `create_new` so two dictations ending in the same second cannot collide
+/// (NB-31).
+pub fn write_wav_16bit_mono_to<W: Write>(
+    out: &mut W,
+    samples: &[f32],
+    sample_rate: u32,
+) -> std::io::Result<()> {
     let data_len = (samples.len() as u32).saturating_mul(2);
     let byte_rate = sample_rate.saturating_mul(2);
-    let mut out = BufWriter::new(File::create(path)?);
+    let mut out = BufWriter::new(out);
 
     // RIFF container: "RIFF" <riff_size> "WAVE". riff_size counts everything
     // after the first 8 bytes, i.e. the 36-byte remainder of the header plus
@@ -103,7 +115,16 @@ pub fn read_wav_16bit_mono(path: &Path) -> Result<(Vec<f32>, u32), String> {
             _ => {}
         }
         // Chunks are word-aligned: an odd `size` is followed by a pad byte.
-        pos = body_start + size + (size & 1);
+        // `size` comes straight from the file, so the arithmetic is checked —
+        // on a 32-bit target a wrapped offset would re-read an earlier chunk.
+        pos = match body_start
+            .checked_add(size)
+            .and_then(|end| end.checked_add(size & 1))
+        {
+            Some(next) if next > pos => next,
+            // Overflow or a chunk that does not advance — malformed, stop here.
+            _ => break,
+        };
     }
 
     let fmt = fmt.ok_or_else(|| bad_clip("no fmt chunk"))?;
@@ -186,59 +207,55 @@ pub fn read_wav_mono(path: &Path) -> Result<(Vec<f32>, u32), String> {
     }
 
     // 30 minutes at the file's own rate — the limit is duration, not bytes, so
-    // a 96 kHz file is not treated as 3× longer than a 32 kHz one. Checked
-    // from the header *before* decoding: the point of the cap is to never
-    // allocate the gigabytes a stray 3-hour recording would need.
-    let max_samples = sample_rate as u64 * 1800;
-    if reader.duration() as u64 > max_samples {
-        return Err(bad_file(&format!(
+    // a 96 kHz file is not treated as 3× longer than a 32 kHz one. hound's
+    // `duration()` is the declared *frame* count (it divides by channels), so
+    // an honest long file is rejected before a single sample is decoded.
+    let max_frames = sample_rate as u64 * 1800;
+    let too_long = || {
+        bad_file(&format!(
             "{} is longer than the 30-minute limit for transcription",
             path.display()
-        )));
+        ))
+    };
+    if reader.duration() as u64 > max_frames {
+        return Err(too_long());
     }
 
-    // Interleaved, still one value per channel.
-    let interleaved: Vec<f32> = match spec.sample_format {
+    // Decode straight into mono frames with the cap enforced *during* the walk.
+    // The header can understate its rate or lie about its length, and the old
+    // code materialised the whole interleaved buffer before checking — that is
+    // gigabytes of `f32` for a file that slips past the header check.
+    let scale = 2f32.powi(bits as i32 - 1);
+    let raw: Box<dyn Iterator<Item = Result<f32, hound::Error>>> = match spec.sample_format {
+        // 32768 for 16-bit, not 32767: the symmetric denominator keeps a
+        // full-scale negative sample at exactly -1.0 instead of drifting
+        // below the range every other sample is measured against.
         hound::SampleFormat::Int => {
-            // 32768 for 16-bit, not 32767: the symmetric denominator keeps a
-            // full-scale negative sample at exactly -1.0 instead of drifting
-            // below the range every other sample is measured against.
-            let scale = 2f32.powi(bits as i32 - 1);
-            let mut out = Vec::new();
-            for sample in reader.into_samples::<i32>() {
-                let v = sample
-                    .map_err(|e| bad_file(&format!("could not decode {}: {e}", path.display())))?;
-                out.push(v as f32 / scale);
-            }
-            out
+            Box::new(reader.into_samples::<i32>().map(move |s| s.map(|v| v as f32 / scale)))
         }
-        hound::SampleFormat::Float => {
-            let mut out = Vec::new();
-            for sample in reader.into_samples::<f32>() {
-                let v = sample
-                    .map_err(|e| bad_file(&format!("could not decode {}: {e}", path.display())))?;
-                out.push(v);
-            }
-            out
-        }
+        hound::SampleFormat::Float => Box::new(reader.into_samples::<f32>()),
     };
 
-    let mut samples = Vec::with_capacity(interleaved.len() / channels);
-    for frame in interleaved.chunks(channels) {
-        let sum: f32 = frame.iter().sum();
-        samples.push(sum / frame.len() as f32);
+    let mut samples: Vec<f32> = Vec::new();
+    let mut sum = 0f32;
+    let mut in_frame = 0usize;
+    for sample in raw {
+        let v = sample
+            .map_err(|e| bad_file(&format!("could not decode {}: {e}", path.display())))?;
+        sum += v;
+        in_frame += 1;
+        if in_frame == channels {
+            if samples.len() as u64 >= max_frames {
+                return Err(too_long());
+            }
+            samples.push(sum / channels as f32);
+            sum = 0.0;
+            in_frame = 0;
+        }
     }
 
     if samples.is_empty() {
         return Err(bad_file(&format!("{} contains no audio", path.display())));
-    }
-    // Belt and braces: a header that understated its own length cannot get past
-    // this one either.
-    if samples.len() as u64 > max_samples {
-        return Err(bad_file(&format!(
-            "{} is longer than the 30-minute limit for transcription",
-            path.display()
-        )));
     }
 
     Ok((samples, sample_rate))

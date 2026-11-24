@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -12,11 +13,21 @@
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
+#include <windows.h>
+#else
+#include <poll.h>
+#include <unistd.h>
 #endif
 
 namespace {
 
 constexpr std::int32_t kSampleRate = 16000;
+// Match the Rust side's 30-minute file limit: 30 * 60 * 16 kHz samples. An
+// INT32_MAX cap still allowed an 8.6 GB resize before a single payload byte was
+// read (NB-15).
+constexpr std::uint32_t kMaxSampleCount = 30U * 60U * static_cast<std::uint32_t>(kSampleRate);
+// Per-read deadline. A client that stops sending must not pin a helper forever.
+constexpr int kReadTimeoutMs = 30000;
 
 struct Options {
   // Shared: every family needs tokens.txt, and the process policy.
@@ -143,6 +154,55 @@ std::vector<FamilyDef> BuildFamilies(const Options& options) {
   };
 }
 
+/// A flag may only be used with its own model family. sherpa-onnx silently
+/// ignores config fields from a different family, so a typo used to produce a
+/// recognizer that loaded but ignored what the caller asked for (NB-30).
+struct FlagOwner {
+  const char* flag;
+  const char* family;
+  const char* also;  // a second family that legitimately shares this flag
+};
+
+const std::vector<FlagOwner>& FlagOwners() {
+  static const std::vector<FlagOwner> owners = {
+      {"--encoder", "transducer", nullptr},
+      {"--decoder", "transducer", nullptr},
+      {"--joiner", "transducer", nullptr},
+      {"--hotwords", "transducer", nullptr},
+      {"--hotwords-score", "transducer", nullptr},
+      {"--decoding-method", "transducer", nullptr},
+      {"--whisper-encoder", "whisper", nullptr},
+      {"--whisper-decoder", "whisper", nullptr},
+      {"--whisper-language", "whisper", nullptr},
+      {"--moonshine-preprocessor", "moonshine", "moonshine-v2"},
+      {"--moonshine-encoder", "moonshine", "moonshine-v2"},
+      {"--moonshine-uncached-decoder", "moonshine", nullptr},
+      {"--moonshine-cached-decoder", "moonshine", nullptr},
+      {"--moonshine-merged-decoder", "moonshine-v2", nullptr},
+      {"--canary-encoder", "canary", nullptr},
+      {"--canary-decoder", "canary", nullptr},
+      {"--canary-src-lang", "canary", nullptr},
+      {"--canary-tgt-lang", "canary", nullptr},
+      {"--firered-encoder", "fire_red_asr", nullptr},
+      {"--firered-decoder", "fire_red_asr", nullptr},
+      {"--firered-ctc", "fire_red_asr_ctc", nullptr},
+      {"--sensevoice", "sense_voice", nullptr},
+      {"--paraformer", "paraformer", nullptr},
+      {"--nemo-ctc", "nemo_ctc", nullptr},
+      {"--zipformer-ctc", "zipformer2_ctc", nullptr},
+      {"--dolphin", "dolphin", nullptr},
+  };
+  return owners;
+}
+
+bool FlagWasSet(const std::string& flag, const Options& options) {
+  if (flag == "--hotwords-score") {
+    return options.hotwords_score_set;
+  }
+  const std::string* value = DestinationFor(flag, options);
+  return value != nullptr && !value->empty();
+}
+
 std::string ParseOptions(int argc, char** argv, Options& options) {
   for (int i = 1; i < argc; ++i) {
     const std::string name = argv[i];
@@ -175,7 +235,16 @@ std::string ParseOptions(int argc, char** argv, Options& options) {
         return "duplicate argument: " + name;
       }
       try {
-        options.hotwords_score = std::stof(argv[++i]);
+        std::size_t parsed = 0;
+        const float score = std::stof(argv[++i], &parsed);
+        // std::stof happily returns nan/inf, and trailing garbage is accepted
+        // unless the whole token is consumed. A non-finite boost makes the
+        // decoder config nonsense (NB-16).
+        if (parsed != std::string(argv[i]).size() || !std::isfinite(score) ||
+            score < 0.0F || score > 100.0F) {
+          return "invalid value for " + name + " (expected a finite number from 0 to 100)";
+        }
+        options.hotwords_score = score;
         options.hotwords_score_set = true;
       } catch (const std::exception&) {
         return "invalid value for " + name;
@@ -239,14 +308,21 @@ std::string ValidateFamilies(const std::vector<FamilyDef>& families,
   if (configured.empty()) {
     return "exactly one model family must be configured; see usage below";
   }
-  // Hotwords and the decoding method only act on transducer decoders; passing
-  // them with another family would silently do nothing (sherpa top-level
-  // config applies them to no other impl), so reject instead.
-  if (configured != "transducer" &&
-      (!options.hotwords.empty() || options.hotwords_score_set ||
-       !options.decoding_method.empty())) {
-    return "--hotwords, --hotwords-score and --decoding-method are only "
-           "valid with the transducer family";
+  // Every flag that was supplied must belong to the selected family. This
+  // subsumes the old transducer-only hotwords/decoding-method check: a
+  // --whisper-language passed to a transducer (or its reverse) is now rejected
+  // instead of being silently ignored (NB-30).
+  for (const FlagOwner& owner : FlagOwners()) {
+    const std::string flag(owner.flag);
+    if (!FlagWasSet(flag, options)) {
+      continue;
+    }
+    if (configured == owner.family ||
+        (owner.also != nullptr && configured == owner.also)) {
+      continue;
+    }
+    return flag + " is not valid with the " + std::string(configured) +
+           " family (it belongs to " + owner.family + ")";
   }
   family = configured;
   return {};
@@ -296,25 +372,137 @@ void EnterBinaryStdin() {
   std::ios::sync_with_stdio(false);
 }
 
-bool ReadExact(std::size_t count, std::vector<std::uint8_t>& out) {
+/// Wait for stdin to have data. A client that sends a header and then stops
+/// must not pin the helper process forever (NB-15).
+bool WaitForStdin() {
+#ifdef _WIN32
+  const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+  if (input == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+  return WaitForSingleObject(input, static_cast<DWORD>(kReadTimeoutMs)) ==
+         WAIT_OBJECT_0;
+#else
+  pollfd descriptor{};
+  descriptor.fd = STDIN_FILENO;
+  descriptor.events = POLLIN;
+  const int ready = poll(&descriptor, 1, kReadTimeoutMs);
+  return ready > 0;
+#endif
+}
+
+/// One bounded read from stdin, bypassing std::cin's buffer so the readiness
+/// check above and the actual read see the same bytes.
+bool ReadSomeStdin(std::uint8_t* destination, std::size_t length,
+                   std::size_t& got) {
+#ifdef _WIN32
+  DWORD bytes = 0;
+  if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), destination,
+                static_cast<DWORD>(length), &bytes, nullptr)) {
+    return false;
+  }
+  got = static_cast<std::size_t>(bytes);
+#else
+  const ssize_t bytes = read(STDIN_FILENO, destination, length);
+  if (bytes < 0) {
+    return false;
+  }
+  got = static_cast<std::size_t>(bytes);
+#endif
+  return true;
+}
+
+enum class ReadResult { kOk, kEof, kTimeout, kError };
+
+ReadResult ReadExact(std::size_t count, std::vector<std::uint8_t>& out) {
   out.resize(count);
   std::size_t done = 0;
   while (done < count) {
-    std::cin.read(reinterpret_cast<char*>(out.data() + done),
-                  static_cast<std::streamsize>(count - done));
-    const auto got = static_cast<std::size_t>(std::cin.gcount());
-    done += got;
+    if (!WaitForStdin()) {
+      out.clear();
+      return ReadResult::kTimeout;
+    }
+    std::size_t got = 0;
+    if (!ReadSomeStdin(out.data() + done, count - done, got)) {
+      out.clear();
+      return ReadResult::kError;
+    }
     if (got == 0) {
-      return false;
+      out.clear();
+      return ReadResult::kEof;
+    }
+    done += got;
+  }
+  return ReadResult::kOk;
+}
+
+/// Length of the well-formed UTF-8 sequence at `text[offset]`, or 0 when the
+/// bytes are invalid. Rust's `read_line` rejects invalid UTF-8 and tears the
+/// session down, so a bad recogniser output must never reach the JSON line
+/// (NB-17).
+std::size_t Utf8SequenceLength(const std::string& text, std::size_t offset) {
+  const auto lead = static_cast<unsigned char>(text[offset]);
+  if (lead < 0x80U) {
+    return 1;
+  }
+  std::size_t continuation = 0;
+  unsigned char low = 0x80U;
+  unsigned char high = 0xbfU;
+  if (lead >= 0xc2U && lead <= 0xdfU) {
+    continuation = 1;
+  } else if (lead == 0xe0U) {
+    continuation = 2;
+    low = 0xa0U;  // no overlong encodings
+  } else if (lead >= 0xe1U && lead <= 0xecU) {
+    continuation = 2;
+  } else if (lead == 0xedU) {
+    continuation = 2;
+    high = 0x9fU;  // no UTF-16 surrogates
+  } else if (lead >= 0xeeU && lead <= 0xefU) {
+    continuation = 2;
+  } else if (lead == 0xf0U) {
+    continuation = 3;
+    low = 0x90U;
+  } else if (lead >= 0xf1U && lead <= 0xf3U) {
+    continuation = 3;
+  } else if (lead == 0xf4U) {
+    continuation = 3;
+    high = 0x8fU;
+  } else {
+    return 0;
+  }
+  if (text.size() - offset <= continuation) {
+    return 0;
+  }
+  for (std::size_t i = 1; i <= continuation; ++i) {
+    const auto byte = static_cast<unsigned char>(text[offset + i]);
+    const unsigned char minimum = i == 1 ? low : 0x80U;
+    const unsigned char maximum = i == 1 ? high : 0xbfU;
+    if (byte < minimum || byte > maximum) {
+      return 0;
     }
   }
-  return true;
+  return continuation + 1;
 }
 
 std::string EscapeJson(const std::string& text) {
   std::string out;
   out.reserve(text.size() + 2);
-  for (const unsigned char character : text) {
+  for (std::size_t i = 0; i < text.size();) {
+    const std::size_t length = Utf8SequenceLength(text, i);
+    if (length == 0) {
+      // Replace just the offending byte and keep scanning: one bad sequence
+      // must not cost the user the rest of their transcript.
+      out += "\xef\xbf\xbd";  // U+FFFD
+      ++i;
+      continue;
+    }
+    if (length > 1) {
+      out.append(text, i, length);
+      i += length;
+      continue;
+    }
+    const auto character = static_cast<unsigned char>(text[i++]);
     switch (character) {
       case '"':  out += "\\\""; break;
       case '\\': out += "\\\\"; break;
@@ -487,8 +675,12 @@ int main(int argc, char** argv) {
   std::vector<float> samples;
   for (;;) {
     std::uint8_t header[sizeof(std::uint32_t)];
-    if (!ReadExact(sizeof(header), raw)) {
-      break;  // clean shutdown on stdin EOF
+    const ReadResult header_read = ReadExact(sizeof(header), raw);
+    if (header_read != ReadResult::kOk) {
+      if (header_read == ReadResult::kTimeout) {
+        WriteError("timed out waiting for audio");
+      }
+      break;  // EOF, timeout or I/O error: no further request can be trusted
     }
     std::memcpy(header, raw.data(), sizeof(header));
 
@@ -496,13 +688,18 @@ int main(int argc, char** argv) {
                                 (static_cast<std::uint32_t>(header[1]) << 8U) |
                                 (static_cast<std::uint32_t>(header[2]) << 16U) |
                                 (static_cast<std::uint32_t>(header[3]) << 24U);
-    if (count > static_cast<std::uint32_t>(
-                     std::numeric_limits<std::int32_t>::max())) {
-      WriteError("sample count exceeds the supported maximum");
+    if (count > kMaxSampleCount) {
+      WriteError("sample count exceeds the 30-minute audio limit");
       continue;
     }
-    if (!ReadExact(static_cast<std::size_t>(count) * sizeof(float), raw)) {
-      WriteError("truncated audio payload");
+    const ReadResult body_read =
+        ReadExact(static_cast<std::size_t>(count) * sizeof(float), raw);
+    if (body_read != ReadResult::kOk) {
+      if (body_read == ReadResult::kTimeout) {
+        WriteError("timed out waiting for audio");
+      } else {
+        WriteError("truncated audio payload");
+      }
       break;
     }
 

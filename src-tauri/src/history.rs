@@ -162,17 +162,34 @@ pub fn recordings_dir() -> PathBuf {
 pub fn save_audio(samples: &[f32], sample_rate: u32) -> Option<String> {
     let dir = recordings_dir();
     let stem = format!("sf-{}", now_secs());
-    let mut name = format!("{stem}.wav");
     let mut suffix = 0u32;
-    while dir.join(&name).exists() {
-        suffix += 1;
-        name = format!("{stem}-{suffix}.wav");
-    }
-    match crate::wav::write_wav_16bit_mono(&dir.join(&name), samples, sample_rate) {
-        Ok(_) => Some(name),
-        Err(e) => {
-            crate::sf_log!("HISTORY: could not write the audio clip {name}: {e}");
-            None
+    // `create_new` is the existence check and the create in one step: two
+    // dictations ending in the same second used to pass `exists()` together and
+    // the second write truncated the first clip (NB-31).
+    loop {
+        let name = if suffix == 0 {
+            format!("{stem}.wav")
+        } else {
+            format!("{stem}-{suffix}.wav")
+        };
+        let path = dir.join(&name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                return match crate::wav::write_wav_16bit_mono_to(&mut file, samples, sample_rate) {
+                    Ok(_) => Some(name),
+                    Err(e) => {
+                        crate::sf_log!("HISTORY: could not write the audio clip {name}: {e}");
+                        None
+                    }
+                };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && suffix < 1000 => {
+                suffix += 1;
+            }
+            Err(e) => {
+                crate::sf_log!("HISTORY: could not create the audio clip {name}: {e}");
+                return None;
+            }
         }
     }
 }
@@ -593,13 +610,27 @@ fn delete_all() -> Result<(), String> {
 pub fn clear() -> Result<(), String> {
     delete_all()?;
     remove_all_recordings();
+    remove_legacy_backup();
     Ok(())
 }
 
 pub fn reset() -> Result<(), String> {
     delete_all()?;
     remove_all_recordings();
+    remove_legacy_backup();
     Ok(())
+}
+
+/// The legacy importer renames `history.json` to `history.json.bak` and keeps
+/// it. Clearing history must not leave a readable copy of every transcript on
+/// disk (NB-32).
+fn remove_legacy_backup() {
+    let backup = legacy_json_path().with_extension("json.bak");
+    match std::fs::remove_file(&backup) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => crate::sf_log!("HISTORY: could not delete the legacy backup: {e}"),
+    }
 }
 
 #[derive(Deserialize)]

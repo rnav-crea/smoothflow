@@ -45,6 +45,36 @@ pub fn set_running(active: bool) {
     }
 }
 
+/// One transfer at a time, enforced natively (NB-07). The frontend serialises
+/// transfers too, but the IPC commands can be invoked twice; the second caller
+/// is rejected instead of interleaving percent writes with the first.
+static TRANSFER_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// Holds the single transfer slot until dropped, so a failed or panicking
+/// download still clears the state.
+pub struct TransferGuard {
+    /// Private, so only `begin_transfer` can hand one out.
+    _slot: (),
+}
+
+impl Drop for TransferGuard {
+    fn drop(&mut self) {
+        TRANSFER_BUSY.store(false, Ordering::SeqCst);
+        set_running(false);
+    }
+}
+
+pub fn begin_transfer() -> Result<TransferGuard, String> {
+    if TRANSFER_BUSY.swap(true, Ordering::SeqCst) {
+        return Err(
+            "[OFF-003] Another download is already running. Wait for it to finish or cancel it first."
+                .into(),
+        );
+    }
+    set_running(true);
+    Ok(TransferGuard { _slot: () })
+}
+
 fn set_percent(percent: Option<f32>) {
     let value = percent.unwrap_or(0.0).clamp(0.0, 100.0);
     TRANSFER_PERCENT.store(value as u32, Ordering::Relaxed);
@@ -87,6 +117,9 @@ pub struct FileStatus {
     pub installed: bool,
     pub verified: bool,
     pub installed_bytes: u64,
+    /// Bytes of this file's `.part` file, when a cancelled transfer left one.
+    /// Excluded from `installed_bytes`: a half file is not an installed file.
+    pub partial_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,8 +139,8 @@ const CATALOG: &[ModelSpec] = &[
         repository: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
         filename: "encoder.int8.onnx",
         url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main/encoder.int8.onnx",
-        expected_size: 652_184_296,
-        expected_sha256: Some("a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab"),
+        expected_size: 652_282_309,
+        expected_sha256: Some("92a10bd9c23936ea0566c29f963bc57c2a5df4261b6a8921c39abea66557ca8b"),
     },
     ModelSpec {
         id: "parakeet-v2-decoder",
@@ -117,7 +150,7 @@ const CATALOG: &[ModelSpec] = &[
         filename: "decoder.int8.onnx",
         url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main/decoder.int8.onnx",
         expected_size: 7_257_753,
-        expected_sha256: Some("b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e"),
+        expected_sha256: Some("4d097bae3bac5c96018d5293ba39f1b657296102b142affda40378f38b020f41"),
     },
     ModelSpec {
         id: "parakeet-v2-joiner",
@@ -127,7 +160,7 @@ const CATALOG: &[ModelSpec] = &[
         filename: "joiner.int8.onnx",
         url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main/joiner.int8.onnx",
         expected_size: 1_739_080,
-        expected_sha256: Some("7946164367946e7f9f29a122407c3252b680dbae9a51343eb2488d057c3c43d2"),
+        expected_sha256: Some("77a29f3e5ac7d37074e0af465391b80f314015d5b97f0f90c6c7767f1d56f428"),
     },
     ModelSpec {
         id: "parakeet-v2-tokens",
@@ -146,8 +179,8 @@ const CATALOG: &[ModelSpec] = &[
         repository: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
         filename: "encoder.int8.onnx",
         url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/encoder.int8.onnx",
-        expected_size: 652_184_281,
-        expected_sha256: Some("acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247"),
+        expected_size: 652_282_294,
+        expected_sha256: Some("1afbe69c1ffdabee94755f42e4daf1d93549131a3da11356bda84fcef0f2c479"),
     },
     ModelSpec {
         id: "parakeet-v3-decoder",
@@ -156,8 +189,8 @@ const CATALOG: &[ModelSpec] = &[
         repository: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
         filename: "decoder.int8.onnx",
         url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/decoder.int8.onnx",
-        expected_size: 11_845_275,
-        expected_sha256: Some("179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e"),
+        expected_size: 11_845_274,
+        expected_sha256: Some("0222a86147299d4dee90edf95b6d13827edb42ad8b7c9cf0b2582f030937c0b5"),
     },
     ModelSpec {
         id: "parakeet-v3-joiner",
@@ -167,7 +200,7 @@ const CATALOG: &[ModelSpec] = &[
         filename: "joiner.int8.onnx",
         url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/joiner.int8.onnx",
         expected_size: 6_355_277,
-        expected_sha256: Some("3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3"),
+        expected_sha256: Some("cbd02f3696e9944970111fb439d9c3fd365a80374565f13f2b9c7007d253fc98"),
     },
     ModelSpec {
         id: "parakeet-v3-tokens",
@@ -396,7 +429,7 @@ const GROUPS: &[ModelGroup] = &[
         id: "v2",
         kind: "stt",
         name: "Parakeet TDT 0.6B v2",
-        description: "Best for clear spoken English, dictation into any field. Needs a 4-core CPU and 8 GB RAM; no GPU.",
+        description: "Best English accuracy for everyday dictation on any 4-core PC.",
         file_ids: &[
             "parakeet-v2-encoder",
             "parakeet-v2-decoder",
@@ -420,7 +453,7 @@ const GROUPS: &[ModelGroup] = &[
         id: "v3",
         kind: "stt",
         name: "Parakeet TDT 0.6B v3",
-        description: "Automatic language detection across 25 European languages. Good if you dictate in more than one language.",
+        description: "25 languages with automatic detection. Best if you mix languages.",
         file_ids: &[
             "parakeet-v3-encoder",
             "parakeet-v3-decoder",
@@ -474,7 +507,7 @@ const GROUPS: &[ModelGroup] = &[
         // Downloaded from csukuangfj2's sherpa-onnx int8 export and resolved by
         // the same four-file transducer layout as v2 (encoder/decoder/joiner/
         // tokens), so the helper needs no family change.
-        description: "Newer unified English Parakeet tier. Same four-file layout as v2.",
+        description: "Newer English Parakeet export, same four files as v2.",
         file_ids: &[
             "parakeet-unified-encoder",
             "parakeet-unified-decoder",
@@ -518,7 +551,7 @@ const GROUPS: &[ModelGroup] = &[
         // Canary's file set is encoder + decoder + tokens, which is *shape*
         // identical to Whisper. `stt_local::family_for_model` pins this id to the
         // canary family so it is never loaded with whisper flags.
-        description: "Smallest Canary tier (English, Spanish, German, French), aimed at weak devices.",
+        description: "Smallest and fastest. English, Spanish, German, French on weak PCs.",
         file_ids: &[
             "canary-180m-encoder",
             "canary-180m-decoder",
@@ -572,7 +605,7 @@ const GROUPS: &[ModelGroup] = &[
         name: "Whisper Medium",
         // The upstream repo ships `medium-encoder.int8.onnx` etc.; the catalog
         // saves them under the plain names the whisper family looks for.
-        description: "Widely used multilingual Whisper tier. Slower than Parakeet on CPU.",
+        description: "Widely used multilingual Whisper. Slower than Parakeet on CPU.",
         file_ids: &[
             "whisper-medium-encoder",
             "whisper-medium-decoder",
@@ -686,7 +719,7 @@ const GROUPS: &[ModelGroup] = &[
         id: "2b",
         kind: "llm",
         name: "Qwen 3.5 2B",
-        description: "Lighter cleanup model for 8 GB machines. Fastest of the three.",
+        description: "Lightest cleanup. Fastest option for PCs with 8 GB RAM.",
         file_ids: &["qwen-2b"],
         supported: true,
         // Text cleanup models do not care about the spoken language strings.
@@ -700,7 +733,7 @@ const GROUPS: &[ModelGroup] = &[
         id: "4b",
         kind: "llm",
         name: "Qwen 3.5 4B",
-        description: "Best balance of cleanup quality and memory. Needs 8 GB RAM.",
+        description: "Best cleanup balance for most PCs with 8 GB RAM.",
         file_ids: &["qwen-4b"],
         supported: true,
         languages: &[],
@@ -712,7 +745,7 @@ const GROUPS: &[ModelGroup] = &[
         id: "9b",
         kind: "llm",
         name: "Qwen 3.5 9B",
-        description: "Highest quality rewriting. Needs 16 GB RAM.",
+        description: "Highest quality rewriting. Wants a PC with 16 GB RAM.",
         file_ids: &["qwen-9b"],
         supported: true,
         languages: &[],
@@ -738,6 +771,8 @@ pub struct ModelGroupStatus {
     /// Expected total for the whole group.
     pub size_bytes: u64,
     pub installed_bytes: u64,
+    /// Sum of `.part` bytes already on disk for this group. Report-only.
+    pub partial_bytes: u64,
     /// Every file present and size-valid.
     pub installed: bool,
     /// Some files on disk but the group is incomplete (`installed == false`).
@@ -783,6 +818,14 @@ pub fn status(config_dir: &Path, custom_dir: &str) -> Result<ModelStatus, String
             installed_files += 1;
             total_bytes += installed_bytes;
         }
+        // A cancelled transfer keeps its `.part` file for resume. This is a
+        // report-only number: it never counts as installed and never verifies.
+        let partial_bytes = match fs::symlink_metadata(part_path(&path)) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata.len(),
+            // Missing, a directory, or unreadable: not a resumable partial as far
+            // as the UI is concerned. Never fail the whole status over it.
+            _ => 0,
+        };
         expected_total_bytes += spec.expected_size;
         files.push(FileStatus {
             id: spec.id,
@@ -793,6 +836,7 @@ pub fn status(config_dir: &Path, custom_dir: &str) -> Result<ModelStatus, String
             installed,
             verified,
             installed_bytes,
+            partial_bytes,
         });
     }
     Ok(ModelStatus {
@@ -843,7 +887,7 @@ pub fn download(
     fs::create_dir_all(parent)
         .map_err(|error| format!("Could not create model directory '{}': {}", parent.display(), error))?;
     let part = part_path(&target);
-    let part_size = match fs::symlink_metadata(&part) {
+    let mut part_size = match fs::symlink_metadata(&part) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             return Err(format!("Partial model path '{}' is not a regular file.", part.display()));
         }
@@ -852,7 +896,27 @@ pub fn download(
         Err(error) => return Err(format!("Could not inspect partial model '{}': {}", spec.id, error)),
     };
     if part_size > spec.expected_size {
-        return Err(format!("Partial model '{}' is larger than its expected size.", spec.id));
+        // Bigger than the manifest means a resume across a model re-export:
+        // those bytes can never match the new hash. Discard it and keep going
+        // in this press instead of failing and demanding a second click.
+        let _ = fs::remove_file(&part); // report-only: the truncate below overwrites it even if this fails
+        part_size = 0;
+        progress(0, spec.expected_size);
+    } else if part_size == spec.expected_size {
+        // A cancel at the end can leave a complete .part. Verify locally, with
+        // no HTTP request, so a good file is finalized instead of refetched.
+        let actual_sha256 = sha256_file(&part)
+            .map_err(|error| format!("Could not verify partial model '{}': {}", spec.id, error))?;
+        if actual_sha256.eq_ignore_ascii_case(expected_sha256) {
+            fs::rename(&part, &target)
+                .map_err(|error| format!("Could not finalize model '{}': {}", spec.id, error))?;
+            return Ok(target);
+        }
+        let _ = fs::remove_file(&part); // report-only: the real error below wins
+        return Err(format!(
+            "Partial model '{}' was corrupt and removed. Press DOWNLOAD to fetch a fresh copy. If the file still exists, remove it manually and try again.",
+            spec.id
+        ));
     }
     let client = Client::builder()
         .build()
@@ -909,16 +973,26 @@ pub fn download(
     }
     file.flush()
         .map_err(|error| format!("Could not flush model '{}': {}", spec.id, error))?;
+    // Windows refuses to remove/rename an open file; nothing below needs it.
+    drop(file);
     let actual_size = fs::metadata(&part)
         .map_err(|error| format!("Could not inspect downloaded model '{}': {}", spec.id, error))?
         .len();
     if actual_size != spec.expected_size {
-        return Err(format!("Model '{}' has size {} bytes; expected {}.", spec.id, actual_size, spec.expected_size));
+        let _ = fs::remove_file(&part); // report-only: keep the size error as the real failure
+        return Err(format!(
+            "Model '{}' has size {} bytes; expected {}. The corrupt partial file was removed; press DOWNLOAD to start again (if it still exists, remove it manually).",
+            spec.id, actual_size, spec.expected_size
+        ));
     }
     let actual_sha256 = sha256_file(&part)
         .map_err(|error| format!("Could not verify model '{}': {}", spec.id, error))?;
     if !actual_sha256.eq_ignore_ascii_case(expected_sha256) {
-        return Err(format!("Model '{}' failed SHA-256 verification.", spec.id));
+        let _ = fs::remove_file(&part); // report-only: keep the hash error as the real failure
+        return Err(format!(
+            "Model '{}' failed SHA-256 verification. The corrupt partial file was removed; press DOWNLOAD to fetch a fresh copy (if it still exists, remove it manually).",
+            spec.id
+        ));
     }
     fs::rename(&part, &target)
         .map_err(|error| format!("Could not finalize model '{}': {}", spec.id, error))?;
@@ -1000,6 +1074,7 @@ pub fn group_catalog(
         validate_group(group)?;
         let mut size_bytes = 0_u64;
         let mut installed_bytes = 0_u64;
+        let mut partial_bytes = 0_u64;
         let mut file_count = 0_usize;
         let mut installed_file_count = 0_usize;
         let mut every_file_valid = true;
@@ -1013,6 +1088,8 @@ pub fn group_catalog(
                 })?;
             file_count += 1;
             size_bytes += file.expected_size;
+            // Report-only: never affects `installed` or `partial`.
+            partial_bytes += file.partial_bytes;
             if file.installed {
                 installed_file_count += 1;
                 installed_bytes += file.installed_bytes;
@@ -1038,6 +1115,7 @@ pub fn group_catalog(
             language_detection: group.language_detection,
             size_bytes,
             installed_bytes,
+            partial_bytes,
             installed,
             partial,
             file_count,

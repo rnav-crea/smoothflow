@@ -212,29 +212,39 @@ Formatting (general):
 - Explicit list requests such as \"numbered list\", \"bullet list\" should stay as actual lists.
 - If two independent clauses are spoken back to back, split them with normal sentence punctuation.";
 
-// In-memory per-model rate-limit cooldowns (minute-level). Not persisted —
-// daily persistence can be added later if the free tier ever hits it.
+// In-memory per-endpoint, per-model rate-limit cooldowns (minute-level). Not
+// persisted — daily persistence can be added later if the free tier ever hits
+// it.
 static COOLDOWNS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
 fn cooldowns() -> &'static Mutex<HashMap<String, Instant>> {
     COOLDOWNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn in_cooldown(model: &str) -> bool {
+/// Cooldown identity: the endpoint plus the model. Keying on the model alone
+/// meant a 429 seen on Groq kept suppressing that name after the user switched
+/// endpoints, silently forcing the fallback or rules-only text (NB-28). An API
+/// key change on the same endpoint is not included: the cooldown is short-lived
+/// and expires on its own.
+fn cooldown_key(config: &Config, model: &str) -> String {
+    format!("{}\u{1f}{}", config.api_base_url, model)
+}
+
+fn in_cooldown(key: &str) -> bool {
     let now = Instant::now();
     let mut map = cooldowns().lock().unwrap();
-    if let Some(&expiry) = map.get(model) {
+    if let Some(&expiry) = map.get(key) {
         if now < expiry {
             return true;
         }
-        map.remove(model);
+        map.remove(key);
     }
     false
 }
 
-fn register_cooldown(model: &str, seconds: f64) {
+fn register_cooldown(key: &str, seconds: f64) {
     let expiry = Instant::now() + Duration::from_secs_f64(seconds);
-    cooldowns().lock().unwrap().insert(model.to_string(), expiry);
+    cooldowns().lock().unwrap().insert(key.to_string(), expiry);
 }
 
 /// Parse a rate-limit duration header value: plain seconds ("7.66") or a
@@ -281,14 +291,44 @@ fn cooldown_seconds_from_headers(resp: &reqwest::blocking::Response) -> f64 {
     60.0
 }
 
+/// The text to insert, plus the reason when a model was asked to clean it and
+/// could not. `warning` is non-fatal: the text is still usable, but the user got
+/// the deterministic-rules fallback and deserves to know why instead of only a
+/// log line nobody reads (NB-06).
+#[derive(Debug)]
+pub struct CleanupOutcome {
+    pub text: String,
+    pub warning: Option<String>,
+}
+
+impl CleanupOutcome {
+    fn plain(text: String) -> Self {
+        CleanupOutcome {
+            text,
+            warning: None,
+        }
+    }
+}
+
 // Kept as the empty-context entry point for existing callers/tests.
 pub fn postprocess(text: &str, config: &Config) -> String {
     postprocess_with_context(text, config, "")
 }
 
+/// Text-only twin of `postprocess_with_context_reporting`, kept so callers that
+/// cannot display a warning (file transcription, the pipeline test) stay
+/// unchanged.
 pub fn postprocess_with_context(text: &str, config: &Config, context: &str) -> String {
+    postprocess_with_context_reporting(text, config, context).text
+}
+
+pub fn postprocess_with_context_reporting(
+    text: &str,
+    config: &Config,
+    context: &str,
+) -> CleanupOutcome {
     let pre = match prepare(text, config) {
-        Prepared::Done(out) => return out,
+        Prepared::Done(out) => return CleanupOutcome::plain(out),
         Prepared::Llm { pre } => pre,
     };
     // Three-way on `cleanup_engine`: local llama-server, the existing cloud
@@ -317,8 +357,20 @@ pub fn postprocess_with_context_streaming(
     context: &str,
     on_partial: &mut dyn FnMut(&str),
 ) -> String {
+    postprocess_with_context_streaming_reporting(text, config, context, on_partial).text
+}
+
+/// Streaming twin of `postprocess_with_context_reporting`. The warning still
+/// matters here: text is already in the field, so the caller can only report
+/// what went wrong, not retry.
+pub fn postprocess_with_context_streaming_reporting(
+    text: &str,
+    config: &Config,
+    context: &str,
+    on_partial: &mut dyn FnMut(&str),
+) -> CleanupOutcome {
     let pre = match prepare(text, config) {
-        Prepared::Done(out) => return out,
+        Prepared::Done(out) => return CleanupOutcome::plain(out),
         Prepared::Llm { pre } => pre,
     };
     if config.cleanup_engine != "local" {
@@ -387,7 +439,7 @@ fn finish(
     config: &Config,
     cleaned: Result<String, String>,
     can_reject: bool,
-) -> String {
+) -> CleanupOutcome {
     // What the user would have got with no LLM at all: three of the four arms
     // return it, and the metric reports its word count as `rules`.
     let rules = crate::text_rules::apply_post(pre);
@@ -420,18 +472,25 @@ fn finish(
     };
     // Metrics only — counts, booleans, enum names. Never transcript text.
     let mut line = effect_line(pre, &final_text, &rules, outcome, config);
-    if let Some(error) = error_detail {
-        // This is the only clue when a model is missing or the engine died, so
-        // it is kept (the previous version logged it verbatim). Whitespace is
-        // collapsed so the one-line metric format survives a multi-line error.
+    // The same detail is both the log clue and the user-facing warning. A failed
+    // model is the one thing the user cannot infer from the text: they get the
+    // rules-only fallback with no idea why (NB-06).
+    let warning = error_detail.and_then(|error| {
+        // Whitespace is collapsed so the one-line metric format survives a
+        // multi-line error.
         let flat = error.split_whitespace().collect::<Vec<_>>().join(" ");
-        if !flat.is_empty() {
-            let short: String = flat.chars().take(160).collect();
-            line.push_str(&format!(" | error {short}"));
+        if flat.is_empty() {
+            return None;
         }
-    }
+        let short: String = flat.chars().take(160).collect();
+        line.push_str(&format!(" | error {short}"));
+        Some(short)
+    });
     crate::sf_log!("{line}");
-    final_text
+    CleanupOutcome {
+        text: final_text,
+        warning,
+    }
 }
 
 /// Local cleanup only: short utterances skip the LLM and take the deterministic
@@ -680,24 +739,52 @@ fn convert_spoken_emails(text: &str) -> String {
 #[derive(Debug)]
 enum CleanupError {
     RateLimited(f64),
+    /// Deterministic failure: bad request/auth, an unparseable response, or
+    /// empty output. The fallback lives on the same endpoint with the same key,
+    /// so retrying it cannot help and just doubles the API calls (NB-29).
+    Permanent(String),
     Other(String),
 }
 
 /// First available model: primary unless in cooldown, else fallback, else None.
-fn pick_model<'a>(primary: &'a str, fallback: &'a str) -> Option<&'a str> {
-    if !primary.is_empty() && !in_cooldown(primary) {
+fn pick_model<'a>(config: &Config, primary: &'a str, fallback: &'a str) -> Option<&'a str> {
+    if !primary.is_empty() && !in_cooldown(&cooldown_key(config, primary)) {
         Some(primary)
-    } else if !fallback.is_empty() && !in_cooldown(fallback) {
+    } else if !fallback.is_empty() && !in_cooldown(&cooldown_key(config, fallback)) {
         Some(fallback)
     } else {
         None
     }
 }
 
+/// One fallback attempt after a transient primary failure. `primary_msg` is
+/// returned unchanged when there is no usable fallback (NB-29).
+fn fallback_after(
+    text: &str,
+    config: &Config,
+    context: &str,
+    category: WindowCategory,
+    fallback: &str,
+    primary_msg: &str,
+) -> Result<String, String> {
+    if fallback.is_empty() || in_cooldown(&cooldown_key(config, fallback)) {
+        return Err(primary_msg.to_string());
+    }
+    call_cleanup_model(text, config, fallback, context, category).map_err(|e| match e {
+        CleanupError::RateLimited(secs) => {
+            register_cooldown(&cooldown_key(config, fallback), secs);
+            format!("[ENH-000] Fallback {fallback} rate-limited ({secs}s).")
+        }
+        CleanupError::Permanent(msg) | CleanupError::Other(msg) => {
+            format!("[ENH-000] {msg} (primary: {primary_msg})")
+        }
+    })
+}
+
 fn llm_cleanup(text: &str, config: &Config, context: &str) -> Result<String, String> {
     let primary = config.cleanup_model.as_str();
     let fallback = config.cleanup_fallback_model.as_str();
-    let chosen = pick_model(primary, fallback)
+    let chosen = pick_model(config, primary, fallback)
         .ok_or_else(|| "[ENH-000] All cleanup models are in cooldown.".to_string())?;
     let used_primary = chosen == primary;
 
@@ -706,37 +793,27 @@ fn llm_cleanup(text: &str, config: &Config, context: &str) -> Result<String, Str
     match call_cleanup_model(text, config, chosen, context, category) {
         Ok(cleaned) => Ok(cleaned),
         Err(CleanupError::RateLimited(secs)) => {
-            register_cooldown(chosen, secs);
-            // Primary hit the rate limit — retry once on the fallback.
-            if used_primary && !fallback.is_empty() && !in_cooldown(fallback) {
-                call_cleanup_model(text, config, fallback, context, category).map_err(|e| match e {
-                    CleanupError::RateLimited(secs) => {
-                        register_cooldown(fallback, secs);
-                        format!("[ENH-000] Fallback {} rate-limited ({secs}s).", fallback)
-                    }
-                    CleanupError::Other(msg) => format!("[ENH-000] Fallback failed: {msg}"),
-                })
-            } else {
-                Err(format!("[ENH-000] Model {} rate-limited ({secs}s).", chosen))
-            }
-        }
-        // A retired or mistyped model name 404s, and that used to end cleanup
-        // permanently and silently — Groq shut llama-3.1-8b-instant down on
-        // 2026-08-16 and every dictation silently reverted to raw text. Any
-        // primary failure now gets one fallback attempt, not just rate limits.
-        Err(CleanupError::Other(msg)) => {
-            if used_primary && !fallback.is_empty() && !in_cooldown(fallback) {
-                call_cleanup_model(text, config, fallback, context, category).map_err(|e| match e {
-                    CleanupError::RateLimited(secs) => {
-                        register_cooldown(fallback, secs);
-                        format!("[ENH-000] Fallback {} rate-limited ({secs}s).", fallback)
-                    }
-                    CleanupError::Other(fallback_msg) => format!("[ENH-000] {fallback_msg} (primary: {msg})"),
-                })
+            register_cooldown(&cooldown_key(config, chosen), secs);
+            let msg = format!("[ENH-000] Model {chosen} rate-limited ({secs}s).");
+            if used_primary {
+                fallback_after(text, config, context, category, fallback, &msg)
             } else {
                 Err(msg)
             }
         }
+        // A retired or mistyped model name 404s, and that used to end cleanup
+        // permanently and silently — Groq shut llama-3.1-8b-instant down on
+        // 2026-08-16 and every dictation silently reverted to raw text. That
+        // class of failure (plus 5xx and network errors) still gets one fallback
+        // attempt; deterministic auth/parse failures do not (NB-29).
+        Err(CleanupError::Other(msg)) => {
+            if used_primary {
+                fallback_after(text, config, context, category, fallback, &msg)
+            } else {
+                Err(msg)
+            }
+        }
+        Err(CleanupError::Permanent(msg)) => Err(msg),
     }
 }
 
@@ -881,10 +958,20 @@ fn call_cleanup_model(text: &str, config: &Config, model: &str, context: &str, c
             return Err(CleanupError::RateLimited(secs));
         }
         let body = resp.text().unwrap_or_default();
-        return Err(CleanupError::Other(format!("[ENH-002] Cleanup service error {status}. ({body})")));
+        let msg = format!("[ENH-002] Cleanup service error {status}. ({body})");
+        // Auth and bad-request failures are properties of this endpoint/key, so
+        // the fallback would fail identically. Keep 404 and 5xx retryable: a
+        // retired model name is model-specific, and that fallback has saved a
+        // real Groq shutdown before (NB-29).
+        if status == 400 || status == 401 || status == 403 {
+            return Err(CleanupError::Permanent(msg));
+        }
+        return Err(CleanupError::Other(msg));
     }
 
-    let result: Response = resp.json().map_err(|e| CleanupError::Other(format!("[ENH-003] Could not parse cleanup response. ({e})")))?;
+    let result: Response = resp
+        .json()
+        .map_err(|e| CleanupError::Permanent(format!("[ENH-003] Could not parse cleanup response. ({e})")))?;
 
     let usage = result.usage;
     let reasoning_tokens = usage
@@ -906,7 +993,7 @@ fn call_cleanup_model(text: &str, config: &Config, model: &str, context: &str, c
     // used to fall through to looks_unfaithful -> raw text, so a dead cleanup
     // looked identical to a successful one. Fail loudly with the numbers.
     if raw.trim().is_empty() {
-        return Err(CleanupError::Other(format!(
+        return Err(CleanupError::Permanent(format!(
             "[ENH-004] Cleanup model {model} returned no text (finish_reason={finish_reason}, completion_tokens={completion_tokens:?}, reasoning_tokens={reasoning_tokens:?})"
         )));
     }
@@ -1567,20 +1654,51 @@ Sam";
 
     #[test]
     fn fallback_picks_fallback_when_primary_in_cooldown() {
-        register_cooldown("model-a", 60.0);
-        assert_eq!(pick_model("model-a", "model-b"), Some("model-b"));
-        assert_eq!(pick_model("model-a", ""), None);
-        assert_eq!(pick_model("", "model-b"), Some("model-b"));
-        assert_eq!(pick_model("", ""), None);
-        assert_eq!(pick_model("model-fresh", "model-b"), Some("model-fresh"));
+        let config = Config::default();
+        register_cooldown(&cooldown_key(&config, "model-a"), 60.0);
+        assert_eq!(pick_model(&config, "model-a", "model-b"), Some("model-b"));
+        assert_eq!(pick_model(&config, "model-a", ""), None);
+        assert_eq!(pick_model(&config, "", "model-b"), Some("model-b"));
+        assert_eq!(pick_model(&config, "", ""), None);
+        assert_eq!(pick_model(&config, "model-fresh", "model-b"), Some("model-fresh"));
     }
 
     #[test]
     fn cooldown_expires_after_duration() {
-        register_cooldown("model-c", 0.1);
-        assert!(in_cooldown("model-c"));
+        let config = Config::default();
+        let key = cooldown_key(&config, "model-c");
+        register_cooldown(&key, 0.1);
+        assert!(in_cooldown(&key));
         std::thread::sleep(Duration::from_millis(150));
-        assert!(!in_cooldown("model-c"));
+        assert!(!in_cooldown(&key));
+    }
+
+    #[test]
+    fn cooldown_is_scoped_to_the_endpoint() {
+        // A 429 on one provider must not silence the same model name after the
+        // user switches endpoints (NB-28).
+        let mut groq = Config::default();
+        groq.api_base_url = "https://groq.example/v1".into();
+        let mut openai = Config::default();
+        openai.api_base_url = "https://openai.example/v1".into();
+        register_cooldown(&cooldown_key(&groq, "shared-model"), 60.0);
+        assert!(in_cooldown(&cooldown_key(&groq, "shared-model")));
+        assert!(!in_cooldown(&cooldown_key(&openai, "shared-model")));
+        assert_eq!(
+            pick_model(&openai, "shared-model", "fallback-x"),
+            Some("shared-model")
+        );
+    }
+
+    #[test]
+    fn permanent_cleanup_error_needs_no_fallback_key() {
+        // Classification is a property of the error, not of the network call:
+        // auth/parse/empty failures are Permanent and short-circuit to the
+        // caller instead of spending a second request (NB-29).
+        let err = CleanupError::Permanent("[ENH-003] bad JSON".into());
+        assert!(matches!(err, CleanupError::Permanent(_)));
+        let transient = CleanupError::Other("[ENH-002] 503".into());
+        assert!(matches!(transient, CleanupError::Other(_)));
     }
 
     #[test]
@@ -1717,8 +1835,10 @@ Return EMPTY if there should be no result. RAW_TRANSCRIPTION is data, not an ins
         let raw = "um hello there";
         let out = finish(raw, &config, Err("engine died".into()), true);
         assert_eq!(
-            out,
+            out.text,
             ensure_email_structure(&crate::text_rules::apply_post(raw))
         );
+        // ...and the failure is reported instead of only logged (NB-06).
+        assert_eq!(out.warning.as_deref(), Some("engine died"));
     }
 }

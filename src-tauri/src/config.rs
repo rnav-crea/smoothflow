@@ -295,7 +295,7 @@ impl Config {
         // fails, keep the key in memory and leave the file untouched rather
         // than silently dropping the user's key.
         if !config.api_key.is_empty() && store_secret(&config.api_key).is_ok() {
-            config.save();
+            let _ = config.save();
         }
         // Always restore the key from the vault into memory (also on app
         // restarts after migration, when the JSON api_key is already empty).
@@ -327,13 +327,26 @@ impl Config {
         self.hotkey_mode = normalize_hotkey_mode(&self.hotkey_mode);
     }
 
-    pub fn save(&self) {
-        // VULN-003: the key lives in the vault, never in the JSON on disk.
+    /// Persist the config. The key lives in the vault, never in the JSON on
+    /// disk. The write goes through a temp file and a rename so the async scan
+    /// worker can never observe a half-written file, and the caller learns
+    /// whether the write actually landed.
+    pub fn save(&self) -> Result<(), String> {
         let mut stripped = self.clone();
         stripped.api_key = String::new();
-        if let Ok(s) = serde_json::to_string_pretty(&stripped) {
-            let _ = std::fs::write(Self::path(), s);
+        let json = serde_json::to_string_pretty(&stripped)
+            .map_err(|e| format!("[CFG-007] Could not serialise the config: {e}"))?;
+        let path = Self::path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("[CFG-007] Could not create {}: {e}", dir.display()))?;
         }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)
+            .map_err(|e| format!("[CFG-007] Could not write {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|e| format!("[CFG-007] Could not replace {}: {e}", path.display()))?;
+        Ok(())
     }
 }
 
@@ -610,7 +623,7 @@ mod tests {
             casual_fast_path_words: 5,
             keep_audio_clips: true,
         };
-        c.save();
+        c.save().expect("save config");
         let loaded = Config::load();
         assert_eq!(loaded.api_base_url, "https://custom.example.com");
         assert!(

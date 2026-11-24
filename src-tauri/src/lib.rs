@@ -43,9 +43,17 @@ macro_rules! sf_log {
 
 /// Frontmost app at the moment the hotkey started recording (macOS only).
 /// Captured before the overlay steals focus so we can reactivate the target
-/// document right before auto-paste fires Cmd+V.
+/// document right before auto-paste fires Cmd+V. The bundle ID is preferred for
+/// activation: an app's display name is user-editable and ambiguous (NB-34).
 #[cfg(target_os = "macos")]
-static LAST_FRONT_APP: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+#[derive(Clone)]
+struct FrontApp {
+    name: String,
+    bundle_id: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+static LAST_FRONT_APP: std::sync::Mutex<Option<FrontApp>> = std::sync::Mutex::new(None);
 
 struct AppState {
     recorder: Mutex<AudioRecorder>,
@@ -62,6 +70,10 @@ struct AppState {
     /// hotkey so a press during transcription cancels instead of starting a
     /// second recording.
     transcribing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The hotkey mode in force when the current recording started. Release
+    /// behaviour must read this, not the live config: flipping the mode
+    /// mid-recording would otherwise leave no matching release path (NB-26).
+    toggle_at_start: std::sync::atomic::AtomicBool,
 }
 
 /// Clears `transcribing` however the run ends — normal return, early return,
@@ -121,15 +133,29 @@ fn start_offline_engines(app: &tauri::AppHandle) {
         return;
     }
     sf_log!("ENGINES: pre-warming local engines (stt={stt}, llm={llm})");
-    std::thread::spawn(move || {
-        let _warm = WarmingGuard;
-        if stt {
-            stt_local::prewarm(&config);
-        }
-        if llm {
-            llm_local::prewarm(&config);
-        }
-    });
+    // The guard is built *before* the thread and moved into it, so a failed
+    // spawn drops the closure (and the guard with it) instead of leaving the
+    // flag stuck for the rest of the session.
+    let warm = WarmingGuard;
+    let app = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("sf-engines-warm".into())
+        .spawn(move || {
+            let _warm = warm;
+            // Re-read the live config instead of warming the snapshot taken
+            // above: an `update_config` that disabled a leg while this thread
+            // was starting must win over the stale copy.
+            let config = app.state::<AppState>().config.lock().unwrap().clone();
+            if should_warm_stt(&config) {
+                stt_local::prewarm(&config);
+            }
+            if should_warm_llm(&config) {
+                llm_local::prewarm(&config);
+            }
+        });
+    if let Err(e) = spawned {
+        sf_log!("ENGINES: pre-warm thread could not start: {e}");
+    }
 }
 
 /// Streaming flush pacing. `on_partial` can fire per token (~6/s here) and
@@ -145,22 +171,42 @@ fn should_flush(pending: &str) -> bool {
         )
 }
 
+/// macOS: a focus failure is invisible in release builds (`sf_log!` is a
+/// no-op there), and the user is left pasting into the overlay. Emit an event
+/// the main window surfaces in its diagnostics panel (NB-33).
+#[cfg(target_os = "macos")]
+fn report_focus_error(app: &tauri::AppHandle, message: String) {
+    sf_log!("{message}");
+    let _ = app.emit("focus-error", message);
+}
+
 /// macOS: the overlay made SmoothFlow active, so hand focus back to the app
 /// that was frontmost when recording started and let it settle before a paste.
 #[cfg(target_os = "macos")]
-fn reactivate_target_app() {
+fn reactivate_target_app(app: &tauri::AppHandle) {
     let front = LAST_FRONT_APP.lock().unwrap().clone();
-    if let Some(name) = front {
-        if !name.is_empty() && name != "SmoothFlow" {
-            sf_log!("HOTKEY: reactivating frontmost app: {}", name);
-            let _ = std::process::Command::new("open").arg("-a").arg(&name).spawn();
-            std::thread::sleep(std::time::Duration::from_millis(250));
+    if let Some(front) = front {
+        if !front.name.is_empty() && front.name != "SmoothFlow" {
+            sf_log!("HOTKEY: reactivating frontmost app: {}", front.name);
+            // `open -b` uses the stable bundle ID when the app declares one;
+            // fall back to the display name otherwise (NB-34).
+            let (flag, target) = match front.bundle_id {
+                Some(bundle) => ("-b", bundle),
+                None => ("-a", front.name.clone()),
+            };
+            match std::process::Command::new("open").arg(flag).arg(&target).spawn() {
+                Ok(_) => std::thread::sleep(std::time::Duration::from_millis(250)),
+                Err(e) => report_focus_error(
+                    app,
+                    format!("Could not reactivate {target} before pasting: {e}"),
+                ),
+            }
         }
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn reactivate_target_app() {}
+fn reactivate_target_app(_app: &tauri::AppHandle) {}
 
 fn type_text_timed(app: &tauri::AppHandle, tag: &str, text: &str) -> Result<(), String> {
     let t_inj = std::time::Instant::now();
@@ -183,34 +229,38 @@ fn cleanup_and_paste(
     tag: &str,
     on_ready: &mut dyn FnMut(&str),
     cancelled: &dyn Fn() -> bool,
-) -> Result<String, String> {
+) -> Result<(String, Option<String>), String> {
     let context = transcription::active_window_title();
     let streamed = config.cleanup_engine == "local" && config.auto_paste;
     if streamed {
-        reactivate_target_app();
+        reactivate_target_app(app);
     }
     let t_pp = std::time::Instant::now();
 
     if !streamed {
-        let text = postprocess::postprocess_with_context(raw, config, &context);
+        // Reporting variant: a cleanup model that failed must reach the user,
+        // not just the log (NB-06). The text is still usable, so it is a
+        // warning, never an `Err`.
+        let outcome = postprocess::postprocess_with_context_reporting(raw, config, &context);
+        let text = outcome.text;
         sf_log!("{tag}: postprocess took {:?}", t_pp.elapsed());
         // Cancelled while the text was being cleaned: no history row, no paste.
         if cancelled() {
-            return Ok(String::new());
+            return Ok((String::new(), None));
         }
         on_ready(&text);
         if config.auto_paste && !text.is_empty() {
-            reactivate_target_app();
+            reactivate_target_app(app);
             type_text_timed(app, tag, &text)?;
         }
-        return Ok(text);
+        return Ok((text, outcome.warning));
     }
 
     let mut session = text_injection::PasteSession::begin();
     let mut pending = String::new();
     let mut pasted_any = false;
     let mut flushes = 0usize;
-    let text = postprocess::postprocess_with_context_streaming(
+    let outcome = postprocess::postprocess_with_context_streaming_reporting(
         raw,
         config,
         &context,
@@ -223,6 +273,7 @@ fn cleanup_and_paste(
             }
         },
     );
+    let text = outcome.text;
     // Cancelled mid-stream: stop appending. Text already in the field stays —
     // it cannot be un-typed, and deleting it would clobber whatever the user
     // has typed since.
@@ -235,7 +286,7 @@ fn cleanup_and_paste(
     sf_log!("{tag}: postprocess took {:?}", t_pp.elapsed());
 
     if cancelled_now {
-        return Ok(String::new());
+        return Ok((String::new(), None));
     }
 
     if pasted_any {
@@ -243,7 +294,7 @@ fn cleanup_and_paste(
         // duplicate the whole dictation.
         sf_log!("{tag}: streamed cleanup into the field in {flushes} flushes");
         on_ready(&text);
-        return Ok(text);
+        return Ok((text, outcome.warning));
     }
 
     // `on_partial` never fired: casual fast path, empty transcript, or the LLM
@@ -252,7 +303,7 @@ fn cleanup_and_paste(
     if !text.is_empty() {
         type_text_timed(app, tag, &text)?;
     }
-    Ok(text)
+    Ok((text, outcome.warning))
 }
 
 fn spawn_vu_meter(
@@ -342,7 +393,7 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
     let parts: Vec<&str> = s.split('+').collect();
     if parts.is_empty() {
         return Err(format!(
-            "[CFG-005] Invalid hotkey '{}'. Use format like 'Ctrl+Space' or a bare key like 'Fn'.",
+            "[CFG-005] Invalid hotkey '{}'. Use a modifier plus a key, like 'Ctrl+Space'.",
             s
         ));
     }
@@ -480,6 +531,16 @@ fn parse_hotkey_str(s: &str) -> Result<(Modifiers, Code), String> {
             ))
         }
     };
+    // NB-25: a chord with no modifier (Space, Enter, A, ...) would be
+    // registered as an OS-wide hotkey and fire on every keystroke in every app.
+    // Require one modifier. macOS's bare Fn is the single intentional
+    // exception: it goes through the dedicated CGEventTap in hotkey.rs.
+    if mods.is_empty() && !(cfg!(target_os = "macos") && matches!(&code, Code::Fn)) {
+        return Err(format!(
+            "[CFG-005] Hotkey '{}' has no modifier. Add Ctrl, Alt, Shift, or Win (for example 'Ctrl+{}').",
+            s, key_raw
+        ));
+    }
     Ok((mods, code))
 }
 
@@ -666,8 +727,15 @@ async fn stop_recording(
             finish_cancelled(&app, clip);
             return Ok(String::new());
         }
+        // A non-fatal cleanup warning keeps the bubble up: it has just been
+        // shown, and `overlay_idle(.., true)` would hide it instantly (NB-06).
+        let mut keep_bubble = false;
         let outcome = match result {
-            Ok(text) => {
+            Ok((text, warning)) => {
+                if let Some(warning) = warning {
+                    show_error(&app, "transcription-error", warning);
+                    keep_bubble = true;
+                }
                 // A silent dictation never reaches history (the `!text.is_empty()`
                 // guard in `on_ready`), so its clip has no owner — drop it rather
                 // than leave a file nothing points at.
@@ -707,7 +775,7 @@ async fn stop_recording(
         };
         // Success returns the overlay to idle; the error path keeps the bubble
         // up (it hides itself) but stops swallowing clicks.
-        overlay_idle(&app, outcome.is_ok());
+        overlay_idle(&app, outcome.is_ok() && !keep_bubble);
         outcome
     })
     .await
@@ -755,11 +823,9 @@ fn update_config(
                 .into(),
         );
     }
-    // VULN-003: the key goes into the OS vault before anything is saved;
-    // Config::save() strips api_key from the JSON written to disk.
-    if !new_config.api_key.is_empty() {
-        config::store_secret(&new_config.api_key)?;
-    }
+    // VULN-003: the key goes into the OS vault only after every fallible step
+    // below has succeeded (NB-11) — a failed hotkey registration or config
+    // write must not replace a key that still works.
     let new_hotkey = new_config.hotkey.clone();
     let launch_on_startup = new_config.launch_on_startup;
     let old_hotkey = {
@@ -803,20 +869,57 @@ fn update_config(
         sf_log!("HOTKEY: re-registered to {}", new_hotkey);
     }
 
-    {
+    let previous = state.config.lock().unwrap().clone();
+    let old_launch = previous.launch_on_startup;
+
+    // NB-21: apply the autostart change *before* persisting it, so a failure
+    // leaves the saved flag matching the OS instead of silently disagreeing.
+    if launch_on_startup != old_launch {
+        let result = if launch_on_startup {
+            app.autolaunch().enable()
+        } else {
+            app.autolaunch().disable()
+        };
+        if let Err(e) = result {
+            return Err(format!(
+                "[CFG-006] Could not {} launch on startup: {e}",
+                if launch_on_startup { "enable" } else { "disable" }
+            ));
+        }
+    }
+
+    // NB-10: the write result is propagated now, so memory and disk cannot
+    // diverge silently.
+    let saved = {
         let mut config = state.config.lock().unwrap();
         *config = new_config;
-        config.save();
+        config.save()
+    };
+    if let Err(e) = saved {
+        *state.config.lock().unwrap() = previous;
+        // Put the OS back in line with the config we just restored.
+        let _ = if old_launch {
+            app.autolaunch().enable()
+        } else {
+            app.autolaunch().disable()
+        };
+        return Err(e);
+    }
+
+    // NB-11: the vault is written last. Everything that can fail has already
+    // succeeded, so a vault failure leaves the previous key in place.
+    let new_key = state.config.lock().unwrap().api_key.clone();
+    if !new_key.is_empty() {
+        if let Err(e) = config::store_secret(&new_key) {
+            if let Some(old) = config::load_secret() {
+                state.config.lock().unwrap().api_key = old;
+            }
+            return Err(e);
+        }
     }
 
     // Reads the just-saved config, so each leg warms only if it is enabled.
     start_offline_engines(&app);
-
-    if launch_on_startup {
-        let _ = app.autolaunch().enable();
-    } else {
-        let _ = app.autolaunch().disable();
-    }
 
     Ok(())
 }
@@ -1058,6 +1161,16 @@ async fn inject_text(app: tauri::AppHandle, text: String) -> Result<(), String> 
         .map_err(|e| format!("[INJ-001] The text injection task failed: {e}"))?
 }
 
+/// Write text to the clipboard for the history Copy button. Routed through the
+/// backend so it shares the paste paths' clipboard epoch and cannot be undone by
+/// a restore that is still in flight (NB-05).
+#[tauri::command]
+async fn copy_to_clipboard(text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || text_injection::copy_text(&text))
+        .await
+        .map_err(|e| format!("[PST-005] The clipboard task failed: {e}"))?
+}
+
 #[tauri::command]
 async fn test_api_connection(base_url: String, api_key: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || transcription::verify_api(&base_url, &api_key))
@@ -1225,11 +1338,11 @@ async fn download_model(
     // worker starves every other async task; the blocking pool won't.
     // A fresh transfer clears a stale cancel flag from a previous one first.
     offline::reset_cancel();
-    // `get_download_progress` reports this to the dialog poller, so the bar keeps
-    // moving even if a progress event is dropped. Cleared before the catalog read
-    // so polling stops the moment the last byte lands, whichever way it ended.
-    offline::set_running(true);
+    // NB-07: claim the one transfer slot natively. The guard is moved into the
+    // blocking task, so a failed or panicking download still clears the state.
+    let transfer = offline::begin_transfer()?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _transfer = transfer;
         let outcome =
             offline::download_group(&id, &config_dir, &custom_dir, |id, status, message, percent| {
                 // Same payload shape as `model-download-progress`; the event name is
@@ -1244,8 +1357,10 @@ async fn download_model(
                     },
                 );
             });
-        offline::set_running(false);
         outcome?;
+        // Release the slot before the catalog read, so the dialog's poller stops
+        // the moment the last byte lands.
+        drop(_transfer);
         offline::group_catalog(&config_dir, &custom_dir)
     })
     .await
@@ -1351,6 +1466,9 @@ async fn test_local_pipeline(
 
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) {
+    // NB-22: the relaunched process waits for this marker before taking the
+    // single-instance lock (see main.rs).
+    std::env::set_var("SMOOTHFLOW_RESTART", "1");
     app.restart();
 }
 
@@ -1390,6 +1508,12 @@ pub(crate) fn hotkey_start(app: &tauri::AppHandle) -> bool {
         }
     };
     if started {
+        // NB-26: freeze the mode this recording is governed by. The release
+        // handler reads this snapshot, not the live config.
+        state.toggle_at_start.store(
+            state.config.lock().unwrap().hotkey_mode == "toggle",
+            std::sync::atomic::Ordering::SeqCst,
+        );
         // Read the cleanup model's instruction sheet for THIS window while the
         // user is still speaking: prefill costs ~14-27 s and the title must be
         // read before the overlay can steal focus. Best-effort, never blocks
@@ -1410,22 +1534,58 @@ pub(crate) fn hotkey_start(app: &tauri::AppHandle) -> bool {
                 config.auto_paste
             };
             if auto_paste {
-                let handle = std::thread::spawn(|| {
+                let capture_app = app.clone();
+                let handle = std::thread::spawn(move || {
+                    // Ask for both the display name and the stable bundle ID in
+                    // one call: `open -a` on a renamed app can hit the wrong
+                    // process (NB-34).
+                    let script = r#"tell application "System Events"
+  set p to first application process whose frontmost is true
+  set n to name of p
+  set b to ""
+  try
+    set b to bundle identifier of p
+  end try
+  return n & "\t" & b
+end tell"#;
                     let out = std::process::Command::new("osascript")
-                        .args(["-e", r#"tell application "System Events" to get name of first application process whose frontmost is true"#])
+                        .args(["-e", script])
                         .output();
                     match out {
                         Ok(o) if o.status.success() => {
-                            let name = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            let output = String::from_utf8_lossy(&o.stdout);
+                            // Keep the tab separator: trimming the whole line
+                            // would swallow an empty bundle ID and shift the
+                            // fields (NB-34).
+                            let line = output.trim_end_matches(['\r', '\n']);
+                            let mut fields = line.splitn(2, '\t');
+                            let name = fields.next().unwrap_or("").trim().to_string();
+                            let bundle_id = fields
+                                .next()
+                                .map(str::trim)
+                                .filter(|b| !b.is_empty() && *b != "missing value")
+                                .map(str::to_string);
                             if !name.is_empty() {
-                                *LAST_FRONT_APP.lock().unwrap() = Some(name.clone());
-                                sf_log!("HOTKEY: captured frontmost app: {}", name);
+                                *LAST_FRONT_APP.lock().unwrap() = Some(FrontApp {
+                                    name: name.clone(),
+                                    bundle_id,
+                                });
+                                sf_log!("HOTKEY: captured frontmost app: {name}");
                             } else {
-                                sf_log!("HOTKEY: osascript returned empty frontmost app name");
+                                report_focus_error(
+                                    &capture_app,
+                                    "Could not read the frontmost app name; auto-paste may target the wrong window.".into(),
+                                );
                             }
                         }
-                        Ok(o) => sf_log!("HOTKEY: osascript exited with status {}", o.status),
-                        Err(e) => sf_log!("HOTKEY: osascript failed: {e}"),
+                        Ok(o) => report_focus_error(
+                            &capture_app,
+                            format!("Could not read the frontmost app: osascript exited with {}", o.status),
+                        ),
+                        Err(e) => report_focus_error(
+                            &capture_app,
+                            format!("Could not read the frontmost app: {e}"),
+                        ),
                     }
                 });
                 let _ = handle.join();
@@ -1490,7 +1650,7 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
             // (a) cancelled while this thread was being scheduled.
             if cancelled() {
                 finish_cancelled(&app_clone, audio_file.as_deref());
-                return Ok(());
+                return Ok(false);
             }
             let t_encode = std::time::Instant::now();
             let raw = match transcription::transcribe_any(&samples, sample_rate, &config) {
@@ -1499,7 +1659,7 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
                     // A cancel during STT is not a failure: no "failed" row.
                     if cancelled() {
                         finish_cancelled(&app_clone, audio_file.as_deref());
-                        return Ok(());
+                        return Ok(false);
                     }
                     // Same as the command path: keep the clip by giving it a
                     // text-less row the user can re-transcribe from History.
@@ -1526,7 +1686,7 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
             // (b) the transcript arrived, but the user cancelled meanwhile.
             if cancelled() {
                 finish_cancelled(&app_clone, audio_file.as_deref());
-                return Ok(());
+                return Ok(false);
             }
             sf_log!("PERF: STT (total) took {:?}", t_encode.elapsed());
             let _ = app_clone.emit("raw-transcript", raw.clone());
@@ -1581,19 +1741,27 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
                     audio_file.as_deref()
                 };
                 finish_cancelled(&app_clone, clip);
-                return Ok(());
+                return Ok(false);
             }
+            // A cleanup warning is non-fatal but must stay visible, so the
+            // caller keeps the bubble up instead of hiding the overlay (NB-06).
+            let mut keep_bubble = false;
             match result {
-                Ok(text) if text.is_empty() => {
-                    if config.auto_paste {
-                        sf_log!("HOTKEY: auto-paste enabled but text is empty, skipping");
+                Ok((text, warning)) => {
+                    if let Some(warning) = warning {
+                        show_error(&app_clone, "transcription-error", warning);
+                        keep_bubble = true;
                     }
-                    // Silent dictation: no history row, so the clip has no owner.
-                    if let Some(name) = audio_file.as_deref() {
-                        history::remove_audio(name);
+                    if text.is_empty() {
+                        if config.auto_paste {
+                            sf_log!("HOTKEY: auto-paste enabled but text is empty, skipping");
+                        }
+                        // Silent dictation: no history row, so the clip has no owner.
+                        if let Some(name) = audio_file.as_deref() {
+                            history::remove_audio(name);
+                        }
                     }
                 }
-                Ok(_) => {}
                 Err(e) => {
                     sf_log!("HOTKEY: type_text error: {e}");
                     // Cleanup/paste failed before a row was written: keep the
@@ -1617,15 +1785,19 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
                             }
                         }
                     }
-                    show_error(&app_clone, "transcription-error", e);
+                    // NB-01: return the error instead of showing it here. The
+                    // outer match shows it once and derives `success` from the
+                    // result, so the overlay keeps the bubble up instead of
+                    // hiding it the moment it appeared.
+                    return Err(e);
                 }
             }
-            Ok::<_, String>(())
+            Ok::<_, String>(keep_bubble)
         }));
-        // Success hides the pill; an error keeps the bubble up (it hides
-        // itself) but stops swallowing clicks. A cancelled run already went
-        // idle in `finish_cancelled`.
-        let success = matches!(&result, Ok(Ok(())));
+        // Success hides the pill; an error — or a cleanup warning that was just
+        // shown — keeps the bubble up (it hides itself) but stops swallowing
+        // clicks. A cancelled run already went idle in `finish_cancelled`.
+        let success = matches!(&result, Ok(Ok(false)));
         match result {
             Err(panic) => {
                 let msg = match panic.downcast::<String>() {
@@ -1639,7 +1811,7 @@ pub(crate) fn hotkey_finalize(app: &tauri::AppHandle) {
                 sf_log!("TRANSCRIPTION ERROR: {e}");
                 show_error(&app_clone, "transcription-error", e);
             }
-            Ok(Ok(())) => {}
+            Ok(Ok(_)) => {}
         }
         if !cancelled() {
             overlay_idle(&app_clone, success);
@@ -1673,16 +1845,22 @@ pub fn run() {
                                 cancel_transcription(app.clone());
                                 return;
                             }
-                            if toggle_mode {
+                            // NB-26: a recording that started in toggle mode
+                            // must stop on the next press even if the user
+                            // flipped the mode while speaking.
+                            let recording = state.recorder.lock().unwrap().is_recording();
+                            let toggle = if recording {
+                                state
+                                    .toggle_at_start
+                                    .load(std::sync::atomic::Ordering::SeqCst)
+                            } else {
+                                toggle_mode
+                            };
+                            if toggle {
                                 // Toggle shortcut: first press starts, the next
                                 // press stops. The release below is deliberately
                                 // ignored, or hold logic would cut the dictation
                                 // immediately.
-                                let recording = state
-                                    .recorder
-                                    .lock()
-                                    .unwrap()
-                                    .is_recording();
                                 if recording {
                                     hotkey_finalize(app);
                                 } else {
@@ -1694,8 +1872,12 @@ pub fn run() {
                         }
                         ShortcutState::Released => {
                             // Hold mode finalises on release. Toggle mode finished
-                            // in the press arm above.
-                            if !toggle_mode {
+                            // in the press arm above. The mode is the one the
+                            // recording started with, not the live config (NB-26).
+                            if !state
+                                .toggle_at_start
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                            {
                                 hotkey_finalize(app);
                             }
                         }
@@ -1722,6 +1904,7 @@ pub fn run() {
             overlay: Mutex::new(None),
             cancel_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             transcribing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            toggle_at_start: std::sync::atomic::AtomicBool::new(false),
         })
         .setup(|app| {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -1872,7 +2055,14 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Only the main window owns the app lifetime. The overlay is a
+                // second window: closing it must hide it, not kill dictation.
+                if window.label() != "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    return;
+                }
                 let app = window.app_handle();
                 if let Some(state) = app.try_state::<AppState>() {
                     let mut recorder = state.recorder.lock().unwrap();
@@ -1900,6 +2090,7 @@ pub fn run() {
             transcribe_audio_file,
             cancel_transcription,
             inject_text,
+            copy_to_clipboard,
             test_api_connection,
             get_offline_status,
             get_models_dir,

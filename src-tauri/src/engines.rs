@@ -158,7 +158,7 @@ fn installed_root() -> Option<PathBuf> {
 /// A downloaded engine file is usable only when it is a real, non-empty file.
 /// A symlink is refused: it would let a stray link in the config directory
 /// hand the app a binary it never verified.
-fn installed_at(path: PathBuf) -> Option<PathBuf> {
+pub(crate) fn installed_at(path: PathBuf) -> Option<PathBuf> {
     let metadata = fs::symlink_metadata(&path).ok()?;
     if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
         return None;
@@ -178,24 +178,73 @@ pub fn status(config_dir: &Path) -> Result<EngineStatus, String> {
             installed_bytes: 0,
         });
     };
-    status_at(&install_dir(config_dir, target), target)
+    // Dev builds and hand-installed copies keep their workers next to the
+    // executable, which is where `stt_local::helper_path` and
+    // `llm_local::server_path` fall back to. Report that reality too. Failing
+    // to locate the executable simply means there is no fallback root.
+    let fallback = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    status_with_fallback(&install_dir(config_dir, target), target, fallback.as_deref())
 }
 
+/// `status` for a single root — kept so the layout tests stay independent of
+/// the running executable's directory.
+#[cfg(test)]
 fn status_at(dir: &Path, target: &str) -> Result<EngineStatus, String> {
-    let stt = stt_path(dir);
-    let llama = llama_path(dir);
+    status_with_fallback(dir, target, None)
+}
+
+fn status_with_fallback(
+    dir: &Path,
+    target: &str,
+    fallback: Option<&Path>,
+) -> Result<EngineStatus, String> {
+    // Each engine resolves independently: the runtime prefers the installed
+    // root per worker too, so one downloaded engine must not hide the other's
+    // exe-dir fallback.
+    let stt = resolve(dir, fallback, stt_path)?;
+    let llama = resolve(dir, fallback, llama_path)?;
     // ponytail: existence and size only, honouring offline.rs:181 — re-hashing
     // 46 MB on every Settings open is exactly the freeze that comment exists to
     // prevent. The SHA-256 check happens once, in `download`, before anything is
-    // extracted; nothing here can mutate an installed engine afterwards.
-    let stt_bytes = present(&stt)?;
-    let llama_bytes = present(&llama)?;
+    // extracted; nothing here can mutate an installed engine afterwards. Count
+    // only the roots actually resolved, so a shared root is never counted twice.
     Ok(EngineStatus {
         target: target.to_string(),
-        stt_installed: stt_bytes.is_some(),
-        llama_installed: llama_bytes.is_some(),
-        installed_bytes: stt_bytes.unwrap_or(0) + dir_bytes(&dir.join(LLAMA_DIR)),
+        stt_installed: stt.is_some(),
+        llama_installed: llama.is_some(),
+        installed_bytes: stt.map(|(_, bytes)| bytes).unwrap_or(0)
+            + llama
+                .map(|(root, _)| dir_bytes(&root.join(LLAMA_DIR)))
+                .unwrap_or(0),
     })
+}
+
+/// Resolve one worker from the installed root, then from the exe-dir fallback,
+/// exactly like the two runtime path resolvers. A symlink or a non-file at the
+/// installed path keeps today's `present` result (absent, or `[ENG-006]`) —
+/// never a silent switch to the fallback.
+fn resolve(
+    dir: &Path,
+    fallback: Option<&Path>,
+    path_for: fn(&Path) -> PathBuf,
+) -> Result<Option<(PathBuf, u64)>, String> {
+    let primary = path_for(dir);
+    if let Some(bytes) = present(&primary)? {
+        return Ok(Some((dir.to_path_buf(), bytes)));
+    }
+    if fs::symlink_metadata(&primary)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let Some(fallback) = fallback else {
+        return Ok(None);
+    };
+    let path = path_for(fallback);
+    Ok(present(&path)?.map(|bytes| (fallback.to_path_buf(), bytes)))
 }
 
 /// The size of `path` when it is a regular, non-empty file; `None` when it is

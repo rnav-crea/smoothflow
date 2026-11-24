@@ -290,6 +290,7 @@ struct Config {
 | `reset_stats` | none | `Result<(), String>` — stats are derived, so this deletes all rows too |
 | `get_audio_file_path` | `file_name: String` | `Result<String, String>` — absolute path of a stored clip (`config_dir()/recordings/<file_name>`), for the History player via `convertFileSrc`; rejects `/`, `\`, `..`, `:` and empty names |
 | `inject_text` | `text: String` | `Result<(), String>` |
+| `copy_to_clipboard` | `text: String` | `Result<(), String>` — writes text to the OS clipboard for the history Copy button; shares the paste paths' clipboard epoch so an in-flight auto-paste restore cannot overwrite it (NB-05) |
 | `test_api_connection` | `base_url: String, api_key: String` | `Result<(), String>` |
 | `get_offline_status` | none | `ModelStatus` |
 | `get_engine_status` | none | `EngineStatus` — `{ target, stt_installed, llama_installed, installed_bytes }`, on-disk reality only (never a network call) |

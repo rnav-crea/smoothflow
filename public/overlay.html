@@ -186,6 +186,15 @@ if (invoke && transformCallback) {
     });
     listen('recording-error', (e) => showError(e.payload));
     listen('transcription-error', (e) => showError(e.payload));
+    listen('recording-state', (e) => {
+        if (e.payload === true) {
+            // A recording started after an error must not be hidden by the
+            // error bubble's auto-hide timer.
+            clearTimeout(hideTimer);
+            errEl.style.display = 'none';
+            vu.style.display = 'inline-flex';
+        }
+    });
     listen('transcription-state', (e) => {
         if (e.payload === 'working') {
             // a pending error auto-hide must not fire mid-run

@@ -133,7 +133,17 @@ const FN_KEYCODE: i64 = 63;
 /// (raw pointers aren't Send, which a `static Mutex` requires); the pointer
 /// round-trips losslessly. Mutex-guarded because the callback (run loop
 /// thread) and `stop_fn_tap` (shortcut thread) can race.
-static TAP: Mutex<Option<usize>> = Mutex::new(None);
+static TAP: Mutex<Option<TapState>> = Mutex::new(None);
+
+struct TapState {
+    port: usize,
+    user_info: usize,
+}
+
+/// Held for the duration of a callback's AppHandle clone, and by `stop_fn_tap`
+/// while it frees the box. `CFMachPortInvalidate` stops new callbacks; this
+/// mutex waits for any callback already in flight (NB-24).
+static USER_INFO_GUARD: Mutex<()> = Mutex::new(());
 
 pub fn is_running() -> bool {
     TAP.lock().unwrap().is_some()
@@ -150,8 +160,8 @@ pub fn start_fn_tap(app: AppHandle) -> Result<(), String> {
     if is_running() {
         return Ok(());
     }
-    // Leak the AppHandle for process lifetime; the callback reads it on the
-    // main run loop thread and never frees it.
+    // The callback reads this boxed AppHandle on the main run loop thread.
+    // Its pointer is stored beside the port so `stop_fn_tap` can free it (NB-24).
     let user_info = Box::into_raw(Box::new(app)) as *const std::ffi::c_void;
     let tap = unsafe {
         CGEventTapCreate(
@@ -174,22 +184,38 @@ pub fn start_fn_tap(app: AppHandle) -> Result<(), String> {
         CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
         CGEventTapEnable(tap, true);
     }
-    // ponytail: the run-loop source and the AppHandle box leak for process
-    // lifetime, matching the tap's own lifetime (the run loop also retains
-    // the source, so a later CFRelease of our reference is moot anyway).
-    *TAP.lock().unwrap() = Some(tap as usize);
+    // ponytail: the run-loop source leaks for process lifetime, matching the
+    // tap's own lifetime (the run loop also retains the source, so a later
+    // CFRelease of our reference is moot anyway).
+    *TAP.lock().unwrap() = Some(TapState {
+        port: tap as usize,
+        user_info: user_info as usize,
+    });
     Ok(())
 }
 
 pub fn stop_fn_tap() {
-    if let Some(port) = TAP.lock().unwrap().take() {
-        let port = port as CFMachPortRef;
+    // Drop the TAP guard before waiting on USER_INFO_GUARD: a callback handling
+    // TapDisabled* takes TAP, and holding both here would risk a deadlock.
+    let state = { TAP.lock().unwrap().take() };
+    if let Some(state) = state {
+        let port = state.port as CFMachPortRef;
         unsafe {
             CGEventTapEnable(port, false);
             CFMachPortInvalidate(port);
             CFRelease(port as *const std::ffi::c_void);
         }
+        // No new callbacks can start after Invalidate; wait for one already
+        // running to finish with the AppHandle, then reclaim the box.
+        let _guard = USER_INFO_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        drop(unsafe { Box::from_raw(state.user_info as *mut AppHandle) });
     }
+}
+
+/// Clone the boxed AppHandle while teardown cannot free it (NB-24).
+unsafe fn clone_user_info(user_info: *const std::ffi::c_void) -> AppHandle {
+    let _guard = USER_INFO_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    (*(user_info as *const AppHandle)).clone()
 }
 
 unsafe extern "C" fn tap_callback(
@@ -200,16 +226,17 @@ unsafe extern "C" fn tap_callback(
 ) -> CGEventRef {
     match etype {
         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
-            if let Some(port) = *TAP.lock().unwrap() {
-                unsafe { CGEventTapEnable(port as CFMachPortRef, true) };
+            if let Some(port) = TAP.lock().unwrap().as_ref() {
+                unsafe { CGEventTapEnable(port.port as CFMachPortRef, true) };
             }
             event
         }
         CGEventType::KeyDown | CGEventType::KeyUp => {
             let keycode = unsafe { CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) };
             if keycode == FN_KEYCODE {
-                // user_info is a leaked Box<AppHandle> — always valid here.
-                let app = (*(user_info as *const AppHandle)).clone();
+                // The boxed AppHandle is guarded by USER_INFO_GUARD — always
+                // valid while this callback holds it.
+                let app = unsafe { clone_user_info(user_info) };
                 if etype == CGEventType::KeyDown {
                     hotkey_start(&app);
                 } else {
@@ -235,8 +262,9 @@ unsafe extern "C" fn tap_callback(
             let flags = unsafe { CGEventGetFlags(event) };
             let pressed = ((flags & 0x8000_0000_0000_0000u64) == 0)
                 && (((flags & 0x0080_0000) != 0) || (((flags >> 16) & 0x20) != 0));
-            // user_info is a leaked Box<AppHandle> — always valid here.
-            let app = (*(user_info as *const AppHandle)).clone();
+            // The boxed AppHandle is guarded by USER_INFO_GUARD — always valid
+            // while this callback holds it.
+            let app = unsafe { clone_user_info(user_info) };
             if pressed {
                 hotkey_start(&app);
             } else {

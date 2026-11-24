@@ -185,8 +185,20 @@
         text-transform: uppercase; color: var(--color-text-secondary);
         opacity: 0.85; padding-top: 2px;
       }
+      /* Two-line row grid: name (+ pills) and size on line one, description and
+         the action button on line two. The size and action columns share a
+         fixed width so DOWNLOAD / RESUME / UNINSTALL / DOWNLOADING… all land on
+         the same vertical edge whatever the label says. */
       .model-row {
-        display: flex; align-items: center; gap: 12px;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        grid-template-areas:
+          "radio name   size"
+          "radio desc   action"
+          "radio prog   prog";
+        column-gap: 12px;
+        row-gap: 4px;
+        align-items: center;
         border: 1px solid var(--color-border);
         border-radius: 10px; padding: 10px 12px; background: transparent; cursor: pointer;
       }
@@ -194,12 +206,28 @@
       .model-row.is-selected { border-color: var(--color-accent); }
       .model-row.is-disabled { opacity: 0.45; cursor: default; }
       .model-row.is-disabled:hover { border-color: var(--color-border); }
-      .model-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+      .model-radio-input { grid-area: radio; align-self: center; }
+      .model-row-headline {
+        grid-area: name; display: flex; align-items: center; gap: 6px;
+        flex-wrap: wrap; min-width: 0;
+      }
       .model-row-name { font-family: var(--font-mono); font-size: 12px; font-weight: 600; color: var(--color-text-primary); }
-      /* "Recommended for this PC" chip. align-self keeps it chip-width inside
-         the column flex (§.model-row-main) instead of stretching full width. */
+      .model-row-size {
+        grid-area: size; justify-self: end; white-space: nowrap;
+        min-width: 116px; text-align: right;
+        font-family: var(--font-mono); font-size: 10.5px; color: var(--color-text-secondary);
+      }
+      .model-row-action { grid-area: action; justify-self: end; min-width: 116px; display: flex; justify-content: flex-end; }
+      .model-row-progress {
+        grid-area: prog; display: flex; flex-direction: row; align-items: center; gap: 8px;
+      }
+      .model-row-progress .model-card-bar { flex: 1; }
+      .model-row-progress-percent {
+        flex: 0 0 auto; text-align: right; min-width: 3ch; font-variant-numeric: tabular-nums;
+      }
+      /* "Recommended for this PC" chip. Sits inline in `.model-row-headline`
+         next to the model name, which is a row flex — no align-self needed. */
       .model-badge {
-        align-self: flex-start;
         display: inline-block;
         vertical-align: middle;
         padding: 1px 6px;
@@ -213,10 +241,17 @@
         text-transform: uppercase;
         color: var(--color-accent-hover, #d478ac);
       }
-      .model-row-desc { font-size: 11.5px; color: var(--color-text-secondary); margin: 0; line-height: 1.5; }
-      .model-row-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
-      .model-row-side { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+      .model-row-desc { grid-area: desc; font-size: 11.5px; color: var(--color-text-secondary); margin: 0; line-height: 1.5; }
       .model-metric { font-family: var(--font-mono); font-size: 10.5px; color: var(--color-text-secondary); text-align: right; }
+
+      /* Models toolbar: search field + two square icon buttons. The search
+         takes every pixel the buttons do not need. */
+      .model-panel-toolbar { display: flex; align-items: center; gap: 8px; }
+      .model-panel-search { flex: 1; min-width: 0; max-width: none; margin-top: 0; }
+      .model-panel-icon-btn {
+        flex: 0 0 auto; width: 34px; height: 34px;
+        display: inline-flex; align-items: center; justify-content: center;
+      }
       .engine-row { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--color-border-muted); border-radius: var(--radius-sm); }
 
       /* ── Models panel: two independent source cards ─────────────────────
@@ -640,9 +675,10 @@
               </div>
 
               <div class="source-panel" id="offline-speech-controls" hidden>
-                <div class="source-panel-actions">
-                  <input type="text" id="model-search" class="settings-input-custom" placeholder="Search models" style="max-width: 200px;" />
-                  <button id="refresh-models-btn" class="reset-cancel-btn" type="button" style="padding: 8px 12px; white-space: nowrap;">REFRESH</button>
+                <div class="source-panel-actions model-panel-toolbar">
+                  <input type="text" id="model-search" class="settings-input-custom model-panel-search" placeholder="Search models" />
+                  <button id="models-folder-btn" class="pill-icon-btn model-panel-icon-btn" type="button" aria-label="Choose where models are stored"></button>
+                  <button id="refresh-models-btn" class="pill-icon-btn model-panel-icon-btn" type="button" aria-label="Refresh model list" title="Refresh model list"></button>
                 </div>
 
                 <div id="model-table" class="model-table"></div>

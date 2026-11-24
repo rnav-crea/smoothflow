@@ -107,6 +107,7 @@ const cleanupProviderNote = document.getElementById("cleanup-provider-note");
 const cleanupFallbackNote = document.getElementById("cleanup-fallback-note");
 const deleteModelsBtn = document.getElementById("delete-models-btn");
 const refreshModelsBtn = document.getElementById("refresh-models-btn");
+const modelsFolderBtn = document.getElementById("models-folder-btn");
 const offlineModelStatus = document.getElementById("offline-model-status");
 const engineStatusEl = document.getElementById("engine-status");
 // One dialog owns every download: it is the only place that knows the folder
@@ -220,6 +221,16 @@ try {
   console.warn("hotkey-error listener setup failed:", err);
 }
 
+// NB-33: macOS focus failures are otherwise invisible in release builds.
+try {
+  listen("focus-error", (e) => {
+    if (settingsStatus) settingsStatus.textContent = e.payload;
+    log("Focus error: " + e.payload);
+  });
+} catch (err) {
+  console.warn("focus-error listener setup failed:", err);
+}
+
 const dictionaryTags = document.getElementById("dictionary-tags");
 const dictionaryInput = document.getElementById("dictionary-input");
 const dictionaryAddBtn = document.getElementById("dictionary-add-btn");
@@ -227,7 +238,6 @@ const dictionaryAddBtn = document.getElementById("dictionary-add-btn");
 let isRecording = false;
 let currentConfig = null;
 let offlineModelStatusData = null;
-let offlineModelProgress = new Map();
 let modelOperationRunning = false;
 let engineStatusData = null;
 
@@ -236,7 +246,11 @@ function applyTheme(themeName) {
   const finalTheme = themeName === "classic" ? "classic" : "retro";
   document.body.className = `theme-${finalTheme}`;
   if (themeSelect) themeSelect.value = finalTheme;
-  localStorage.setItem("smoothflow_theme", finalTheme);
+  try {
+    localStorage.setItem("smoothflow_theme", finalTheme);
+  } catch (err) {
+    // Storage blocked: the theme simply does not survive a restart.
+  }
 }
 
 const savedTheme = localStorage.getItem("smoothflow_theme") || "retro";
@@ -620,7 +634,19 @@ async function loadConfig() {
   }
 }
 
-async function saveConfig() {
+// NB-03: every save goes through one chain. Two toggles in the same turn used
+// to build their payloads from the same `currentConfig`, and whichever `invoke`
+// resolved last silently dropped the other change. A queued save reads the DOM
+// when it actually runs, so the last one always carries every change.
+let configSaveChain = Promise.resolve();
+
+function saveConfig() {
+  const run = () => applyConfigSave();
+  configSaveChain = configSaveChain.then(run, run);
+  return configSaveChain;
+}
+
+async function applyConfigSave() {
   if (!currentConfig) return;
   const speech = speechSource();
   const cleanup = cleanupSource();
@@ -658,7 +684,7 @@ async function saveConfig() {
     auto_paste: autopasteToggle.checked,
     launch_on_startup: startupToggle.checked,
     keep_audio_clips: !!keepClipsToggle?.checked,
-    dictionary: currentConfig.dictionary || [],
+    dictionary: [...(currentConfig.dictionary || [])],
     hotkey: hotkeyInput ? hotkeyInput.value : "Ctrl+Space",
     hotkey_mode: hotkeyModeSelect ? hotkeyModeSelect.value : "hold",
     // `stt_local` and `cleanup_engine` are the fields Rust actually reads;
@@ -773,8 +799,21 @@ function startDownloadPoll() {
   downloadPollTimer = setInterval(async () => {
     try {
       const snapshot = await invoke("get_download_progress");
+      // The request can land after the transfer ended and polling stopped; using
+      // it then would re-show a bar on a row that is already installed.
+      if (!downloadPollTimer) return;
       if (!snapshot || !snapshot.active) return;
       setDownloadDialogBarPercent(snapshot.percent);
+      // Same numbers onto the row: the poll cannot be dropped, so a lost event
+      // no longer freezes the row bar while the bytes keep arriving. The poll has
+      // no message of its own, so the last one from the event stream is kept
+      // rather than blanking the line twice a second.
+      if (pendingDownloadGroup) {
+        const kept = activeDownload && activeDownload.id === pendingDownloadGroup.id
+          ? activeDownload.message
+          : null;
+        setRowProgress(pendingDownloadGroup.id, snapshot.percent, kept);
+      }
       // Also the text, so "is it really downloading?" is answerable even when no
       // progress event ever arrives: a moving number cannot be mistaken for a
       // frozen dialog.
@@ -844,7 +883,9 @@ function closeDownloadDialog() {
   setTimeout(() => {
     downloadModal.classList.remove("closing");
     if (group) group.inFlight = false;
-    if (button) {
+    // A download that just started from this dialog owns the button now: the row
+    // shows DOWNLOADING… and re-enabling/labelling it here would clobber that.
+    if (button && !activeDownload) {
       button.disabled = false;
       button.textContent = "DOWNLOAD";
     }
@@ -869,91 +910,89 @@ function pickDownloadFolder() {
     });
 }
 
+// The dialog is a one-time "where should this go?" confirmation now: it closes
+// the moment CONTINUE is pressed and the row is the progress view from there on.
 async function startPendingDownload() {
   const group = pendingDownloadGroup;
-  if (!group || !downloadModal) return;
-  // The bar is revealed before anything can fail. It used to appear only after
-  // the engine step, so an engine failure left a dialog that looked like it did
-  // nothing at all.
-  if (downloadModalProgress) {
-    downloadModalProgress.hidden = false;
-    setDownloadDialogBarPercent(null);
-  }
+  if (!group) return;
+  // Disabled before the close so a second click on the fading dialog cannot
+  // start the same transfer twice.
+  if (downloadModalContinue) downloadModalContinue.disabled = true;
+  closeDownloadDialog();
+  await runModelDownload(group);
+}
+
+// The transfer itself. Never assumes the download dialog exists or is open: it
+// is reached straight from a row when the folder is already known, and from the
+// one-time dialog otherwise, so it reports through the row and
+// `#offline-model-status` only.
+async function runModelDownload(group) {
+  if (!group) return;
+  // One transfer at a time: the row button, the picker path and the dialog path
+  // can all reach this function.
+  if (modelOperationRunning) return;
+  // Read by the poller and the progress listeners for the whole transfer.
+  pendingDownloadGroup = group;
+  // Set by any step below and written to `#offline-model-status` only at the
+  // end: `setModelOperationRunning(false)` repaints that line with the summary,
+  // so an error written before it would be wiped a moment later.
+  let failure = "";
   // The engine goes first, but it is never a gate: engines and models are
   // separate downloads, and a broken engine supply must not block the model the
   // user actually asked for.
+  // NB-20: bind the row before the engine await. An engine download of tens of
+  // MB precedes the first model byte, and a dropped engine progress event must
+  // not leave the row with only the status line.
+  setRowProgress(group.id, 0, "Starting…");
   const engineMissing = !engineStatusData
     || !(engineStatusData.stt_installed && engineStatusData.llama_installed);
   if (engineMissing) {
-    if (downloadModalEngine) downloadModalEngine.textContent = "Downloading engine…";
-    if (downloadModalMessage) {
-      downloadModalMessage.textContent = "The engine is missing — downloading it first…";
-      downloadModalMessage.className = "settings-hint";
-    }
     setModelOperationRunning(true, "Downloading engine…");
     try {
       engineStatusData = await invoke("download_engines");
       renderEngineStatus();
-      if (downloadModalEngine) downloadModalEngine.textContent = engineDialogText();
       setModelOperationRunning(false);
     } catch (err) {
       // Never return here. The model download is what the user asked for and it
       // does not depend on the engine, so a failed engine fetch stays a visible
       // warning instead of silently cancelling the whole operation.
-      if (downloadModalEngine) downloadModalEngine.textContent = "Engine missing — download failed";
-      if (downloadModalMessage) {
-        downloadModalMessage.textContent = `The engine could not be downloaded (${err}). Continuing with the model — local dictation will not run until the engine is available.`;
-        downloadModalMessage.className = "settings-hint download-modal-message is-error";
-      }
       log(`Engine download failed: ${err}`);
+      failure = `The engine could not be downloaded (${err}). Local dictation will not run until the engine is available.`;
     }
   }
-  if (downloadModalCancel) {
-    downloadModalCancel.textContent = "CANCEL";
-    downloadModalCancel.disabled = false;
-  }
-  if (downloadModalContinue) downloadModalContinue.disabled = true;
   setModelOperationRunning(true, `Downloading ${group.name}…`);
-  // Replace the engine warning now that bytes are actually moving; the poll and
-  // the event stream both rewrite this line from here on.
-  if (downloadModalMessage) {
-    downloadModalMessage.textContent = `Downloading ${group.name}…`;
-    downloadModalMessage.className = "settings-hint";
-  }
-  setDownloadDialogBarPercent(0);
   startDownloadPoll();
   try {
     modelCatalogData = await invoke("download_model", { id: group.id });
     renderModelTables();
-    setDownloadDialogBarPercent(100);
-    if (downloadModalMessage) {
-      downloadModalMessage.textContent = `${group.name} installed`;
-      downloadModalMessage.className = "settings-hint download-modal-message is-ok";
-    }
-    if (downloadModalCancel) {
-      downloadModalCancel.textContent = "CLOSE";
-      downloadModalCancel.disabled = true;
-    }
-    if (downloadModalContinue) downloadModalContinue.disabled = true;
-    setTimeout(() => closeDownloadDialog(), 1400);
   } catch (err) {
-    if (downloadModalMessage) {
-      const cancelled = String(err).includes("cancelled");
-      downloadModalMessage.textContent = cancelled
-        ? "Download cancelled — the partial file is kept. Press DOWNLOAD to resume."
-        : `Model download failed: ${err}`;
-      downloadModalMessage.className = cancelled
-        ? "settings-hint download-modal-message is-ok"
-        : "settings-hint download-modal-message is-error";
-    }
-    if (downloadModalCancel) {
-      downloadModalCancel.textContent = "CLOSE";
-      downloadModalCancel.disabled = true;
-    }
-    if (downloadModalContinue) downloadModalContinue.disabled = false;
+    const cancelled = String(err).includes("cancelled");
+    log(`Model download failed: ${err}`);
+    // No dialog is open on this path, so the always-visible status line is the
+    // only place a failure or a cancel can be reported.
+    failure = cancelled
+      ? `Download of ${group.name} was cancelled — the partial file is kept. Press RESUME to continue.`
+      : `Model download failed: ${err}`;
   } finally {
     stopDownloadPoll();
+    group.inFlight = false;
+    // Rust deletes a corrupt `.part` on size/hash failure. Re-read the catalog
+    // so the row button reads DOWNLOAD, not a stale RESUME for a file that is
+    // no longer there. A failed read just leaves the old label in place.
+    if (failure) {
+      try {
+        modelCatalogData = await invoke("get_model_catalog");
+        renderModelTables();
+      } catch (err) {
+        log(`Could not refresh model catalog after failure: ${err}`);
+      }
+    }
+    // No row may keep a moving bar once no transfer is running.
     setModelOperationRunning(false);
+    // After the running flag, so the row button comes back enabled and reads
+    // DOWNLOAD/RESUME again (on success the re-render already made it UNINSTALL).
+    clearRowProgress();
+    if (failure) setOfflineModelError(failure);
   }
 }
 
@@ -983,9 +1022,10 @@ async function cancelPendingDownload() {
 
 function setupDownloadModal() {
   if (downloadModalClose) downloadModalClose.addEventListener("click", closeDownloadDialog);
+  // backdrop only: a click inside the panel (CONTINUE, CANCEL, the ✕) used to
+  // close the dialog mid-download and hide every progress update.
   document.addEventListener("click", (e) => {
-    const target = e.target && e.target.closest ? e.target.closest("#download-modal") : null;
-    if (target) closeDownloadDialog();
+    if (e.target === downloadModal) closeDownloadDialog();
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && downloadModal && downloadModal.classList.contains("open")) closeDownloadDialog();
@@ -1121,9 +1161,9 @@ if (confirmModalConfirm) confirmModalConfirm.addEventListener("click", async () 
   if (!action) return;
   await action();
 });
+// backdrop only, same as the download dialog: a click on REMOVE must not also close it.
 document.addEventListener("click", (e) => {
-  const target = e.target && e.target.closest ? e.target.closest("#confirm-modal") : null;
-  if (target) closeRemoveModelsModal();
+  if (e.target === confirmModal) closeRemoveModelsModal();
 });
 
 // Models panel: which machine runs each stage.
@@ -1272,13 +1312,31 @@ function refreshModelRows(rec = currentModelRecommendation()) {
     if (!kind || !id) continue;
     // `.is-disabled` is already the row's own answer to "supported".
     const supported = !row.classList.contains("is-disabled");
-    row.classList.toggle("is-selected", supported && id === (kind === "stt" ? sttSelected : llmSelected));
+    const selectedNow = supported && id === (kind === "stt" ? sttSelected : llmSelected);
+    row.classList.toggle("is-selected", selectedNow);
+    const inUseNow = selectedNow && row.dataset.installed === "1";
+    // Both chips live inside `.model-row-headline`, so the order there is
+    // name, IN USE, RECOMMENDED no matter which one is added later.
+    const headline = row.querySelector(".model-row-headline");
     const existing = row.querySelector(".model-badge");
     const wanted = supported && id === (kind === "stt" ? rec.stt : rec.llm);
-    if (wanted && !existing) {
-      row.querySelector(".model-row-name")?.after(createModelBadge());
+    if (wanted && !existing && headline) {
+      headline.appendChild(createModelBadge());
     } else if (!wanted && existing) {
       existing.remove();
+    }
+    // The IN USE pill follows the installed model actually in use, same
+    // in-place repaint as the badge above: switching the radio or finishing an
+    // install moves the label without rebuilding the table. The selected border
+    // still follows the plain selection. `.model-tag` keeps it out of the
+    // `.model-badge` queries.
+    const inUse = row.querySelector(".model-tag.is-in-use");
+    if (inUseNow && !inUse && headline) {
+      // Second child, i.e. straight after the name, so it stays ahead of the
+      // RECOMMENDED badge even when the badge is already there.
+      headline.insertBefore(createInUseTag(), headline.children[1] || null);
+    } else if (!inUseNow && inUse) {
+      inUse.remove();
     }
   }
 }
@@ -1430,7 +1488,8 @@ for (const radio of document.querySelectorAll('input[name="speech-source"], inpu
   radio.addEventListener("change", () => { renderModelPanel(); saveConfig(); });
 }
 
-// Models folder: the resolved path shown in the download dialog.
+// Models folder: the resolved path shown in the download dialog, and the only
+// value the folder button's tooltip can be built from.
 let modelsDirResolved = "";
 let modelsDirIsCustom = false;
 
@@ -1439,6 +1498,13 @@ async function loadModelsDir() {
     const location = await invoke("get_models_dir");
     modelsDirResolved = location?.resolved || "";
     modelsDirIsCustom = !!location?.is_custom;
+    // The tooltip is the only place the current folder is visible, so it is set
+    // on load and again after the picker returns.
+    if (modelsFolderBtn) {
+      modelsFolderBtn.title = modelsDirResolved
+        ? `Models folder: ${modelsDirResolved}`
+        : "Choose where models are stored";
+    }
   } catch (err) {
     log(`Models folder error: ${err}`);
   }
@@ -1482,6 +1548,8 @@ function setModelOperationRunning(running, message = "") {
   modelOperationRunning = running;
   if (deleteModelsBtn) deleteModelsBtn.disabled = running;
   if (refreshModelsBtn) refreshModelsBtn.disabled = running;
+  // Moving the models folder mid-transfer would send the bytes somewhere else.
+  if (modelsFolderBtn) modelsFolderBtn.disabled = running;
   // Switching the source mid-transfer would change what the download is for.
   for (const radio of document.querySelectorAll('input[name="speech-source"], input[name="cleanup-source"]')) {
     radio.disabled = running;
@@ -1494,6 +1562,10 @@ function setModelOperationRunning(running, message = "") {
   } else {
     renderOfflineModelStatus();
   }
+  // Row action buttons follow the same flag: `applyRowProgress` disables the
+  // DOWNLOAD/RESUME/UNINSTALL of every row while an operation is running, so a
+  // second click cannot slip in mid-transfer.
+  repaintRowProgress();
 }
 
 async function loadOfflineModelStatus(operationError = "") {
@@ -1504,7 +1576,6 @@ async function loadOfflineModelStatus(operationError = "") {
   offlineModelStatus.style.color = "#cdafa0";
   try {
     offlineModelStatusData = await invoke("get_offline_status");
-    offlineModelProgress.clear();
     renderOfflineModelStatus();
     if (operationError) setOfflineModelError(operationError);
   } catch (err) {
@@ -1643,6 +1714,13 @@ function hotkeyCaptureKeydown(e) {
     return;
   }
   const combo = [...mods, plain].join("+");
+  if (!mods.length) {
+    // NB-25: a bare key would be registered as a system-wide trigger and fire
+    // on every keystroke in every app. Keep capturing so the user can finish
+    // the chord instead of saving an invalid shortcut.
+    if (hotkeyChip) hotkeyChip.textContent = "Add Ctrl / Alt / Shift / Win";
+    return;
+  }
   endHotkeyCapture(false);
   if (hotkeyInput) hotkeyInput.value = combo;
   renderHotkeyChip(combo);
@@ -1751,6 +1829,125 @@ function modelRowMatches(group, query) {
   return haystack.includes(needle);
 }
 
+// ── Row-level transfer progress ────────────────────────────────────────────
+// The download dialog is optional: it can be closed, backgrounded, or simply
+// never noticed, while the transfer keeps running. `activeDownload` mirrors the
+// one transfer the table cares about, so the row itself reports what is
+// happening and a re-render mid-download rebuilds the bar from real state
+// instead of forgetting that anything is moving.
+let activeDownload = null;
+// The row is the only progress view now, so it is also the only cancel control.
+let cancellingDownload = false;
+
+// The "IN USE" pill marks the installed model that dictation actually runs on,
+// never a selected but uninstalled model. It is a
+// `.model-tag` and not a `.model-badge` on purpose: `refreshModelRows` queries
+// `.model-badge` for RECOMMENDED, and the two chips must be findable apart.
+function createInUseTag() {
+  const tag = document.createElement("span");
+  tag.className = "model-tag is-in-use";
+  tag.textContent = "IN USE";
+  return tag;
+}
+
+// The bar + percentage strip that belongs to the row. One line: the bar takes
+// the space, the percent sits right after it.
+function createRowProgress() {
+  const block = document.createElement("div");
+  block.className = "model-card-progress model-row-progress";
+  const bar = document.createElement("div");
+  bar.className = "model-card-bar";
+  bar.appendChild(document.createElement("i"));
+  const percent = document.createElement("span");
+  percent.className = "model-card-saving model-row-progress-percent";
+  block.appendChild(bar);
+  block.appendChild(percent);
+  return block;
+}
+
+// Paint one row's progress block from `activeDownload`. Single source of truth
+// for what the block looks like, so the live path (`setRowProgress`) and a fresh
+// render (`createModelRow`) can never disagree. A `null`/non-numeric percent
+// keeps the bar's indeterminate slide, exactly like `setDownloadDialogBarPercent`.
+function applyRowProgress(row) {
+  const block = row.querySelector(".model-row-progress");
+  const actionBtn = row.querySelector(".model-row-action button");
+  if (!block) return;
+  const isActive = !!activeDownload && activeDownload.id === row.dataset.modelId;
+  // The row button is the cancel control while its transfer runs. Only the
+  // DOWNLOAD/RESUME button has an idleLabel; UNINSTALL keeps its own behaviour.
+  if (actionBtn) {
+    const ownButton = !!actionBtn.dataset.idleLabel;
+    actionBtn.disabled = isActive ? (cancellingDownload || !ownButton) : modelOperationRunning;
+    if (isActive && ownButton) {
+      actionBtn.textContent = cancellingDownload ? "CANCELLING…" : "CANCEL";
+    } else {
+      actionBtn.textContent = actionBtn.dataset.idleLabel || actionBtn.textContent;
+    }
+  }
+  // Inline, not the `hidden` attribute: `.model-card-progress` sets
+  // `display: flex`, which overrides the UA `[hidden]` rule — the same trap
+  // `.model-card-details[hidden]` works around in index.html.
+  block.style.display = isActive ? "flex" : "none";
+  if (!isActive) return;
+  const bar = block.querySelector(".model-card-bar");
+  const fill = bar ? bar.querySelector("i") : null;
+  const percentEl = block.querySelector(".model-row-progress-percent");
+  const percent = activeDownload.percent;
+  if (typeof percent !== "number" || Number.isNaN(percent)) {
+    if (bar) bar.classList.remove("is-determinate");
+    if (fill) fill.style.removeProperty("width");
+    if (percentEl) percentEl.textContent = "";
+  } else {
+    const clamped = Math.max(0, Math.min(100, percent));
+    if (bar) bar.classList.add("is-determinate");
+    if (fill) fill.style.setProperty("width", `${clamped.toFixed(0)}%`);
+    if (percentEl) percentEl.textContent = `${clamped.toFixed(0)}%`;
+  }
+  // The step message ("Downloading encoder.onnx") has no line of its own any
+  // more: the row is exactly two lines, so it lives on the hover title.
+  block.title = activeDownload.message || "";
+}
+
+// Repaint every row in place. Re-rendering the table instead would drop the
+// focused radio mid-download, which is why this never touches `renderModelTables`.
+function repaintRowProgress() {
+  for (const row of document.querySelectorAll(".model-row")) applyRowProgress(row);
+}
+
+function setRowProgress(id, percent, message) {
+  activeDownload = { id, percent, message: message || null };
+  repaintRowProgress();
+}
+
+function clearRowProgress() {
+  activeDownload = null;
+  cancellingDownload = false;
+  repaintRowProgress();
+}
+
+// The dialog's CANCEL is unreachable once it closes on CONTINUE, so the running
+// row's own button does the cancelling. On success the transfer's [DL-009] error
+// drives the existing finally block, which clears the row and reports the kept
+// partial file. Only a failure needs a message from here.
+async function cancelActiveDownload() {
+  if (!activeDownload || cancellingDownload) return;
+  cancellingDownload = true;
+  repaintRowProgress();
+  try {
+    await invoke("cancel_downloads");
+    // The transfer may already have ended while the command was in flight.
+    if (!activeDownload) {
+      cancellingDownload = false;
+      repaintRowProgress();
+    }
+  } catch (err) {
+    cancellingDownload = false;
+    repaintRowProgress();
+    setOfflineModelError(`Could not cancel the download: ${err}`);
+  }
+}
+
 function createModelRow(group) {
   const row = document.createElement("label");
   const supported = !!group.supported;
@@ -1767,6 +1964,7 @@ function createModelRow(group) {
   // (a rebuild would drop keyboard focus mid-arrow-key navigation).
   row.dataset.modelKind = group.kind;
   row.dataset.modelId = group.id;
+  row.dataset.installed = group.installed ? "1" : "";
   if (group.id === selected && supported) row.classList.add("is-selected");
   if (!supported) row.classList.add("is-disabled");
 
@@ -1784,46 +1982,57 @@ function createModelRow(group) {
   // attached here.
   input.addEventListener("change", () => updateOfflineConfig());
 
-  const main = document.createElement("div");
-  main.className = "model-row-main";
+  const headline = document.createElement("div");
+  headline.className = "model-row-headline";
+  // Measured numbers only, and only on hover: the row is a two-line grid now,
+  // so the benchmark lives in the tooltip instead of costing a third line.
+  const benchmark = modelBenchmarkLine(group);
+  if (benchmark) headline.title = benchmark;
   const name = document.createElement("span");
   name.className = "model-row-name";
   name.textContent = group.name;
-  const desc = document.createElement("span");
-  desc.className = "model-row-desc";
-  desc.textContent = group.description;
-  main.appendChild(name);
+  headline.appendChild(name);
+  // The installed model actually in use is labelled in words, not only by the
+  // selected border: a border is easy to miss in a list of ten radios, and a
+  // selection that is not installed cannot be in use. Placed right after the
+  // name so it sits next to RECOMMENDED when the in-use model is also the pick.
+  if (supported && group.installed && group.id === selected) {
+    headline.appendChild(createInUseTag());
+  }
   // Hardware-aware pick for this kind (null when the catalog has no usable
   // option, and never on an unsupported group).
   if (supported && group.id === modelRecommendedId(group.kind)) {
-    main.appendChild(createModelBadge());
+    headline.appendChild(createModelBadge());
   }
-  main.appendChild(desc);
+
+  // Size cell. "Installed" is the section heading's job, not the cell's, and a
+  // cancelled transfer needs the partial byte count spelled out: only *finished*
+  // files count towards `installed_bytes`, so `RESUME (0/4)` alone read as if
+  // nothing had been fetched at all.
+  const downloaded = (Number(group.installed_bytes) || 0) + (Number(group.partial_bytes) || 0);
+  const resumable = downloaded > 0 && !group.installed;
+  const size = document.createElement("span");
+  size.className = "model-row-size";
+  if (group.size_bytes > 0) {
+    size.textContent = resumable
+      ? `${formatCatalogBytes(downloaded)} of ${formatCatalogBytes(group.size_bytes)}`
+      : formatCatalogBytes(group.size_bytes);
+  }
+
+  // Description and languages share one line: the languages used to be a row of
+  // their own, which made every row taller for no extra information.
   const meta = modelRowLanguages(group);
-  if (meta) {
-    const tags = document.createElement("span");
-    tags.className = "model-row-meta";
-    tags.style.fontSize = "10px";
-    tags.style.color = "var(--color-text-secondary)";
-    tags.textContent = meta;
-    main.appendChild(tags);
-  }
+  const desc = document.createElement("span");
+  desc.className = "model-row-desc";
+  desc.textContent = meta ? `${group.description} · ${meta}` : group.description;
 
-  const side = document.createElement("div");
-  side.className = "model-row-side";
-  const benchmark = modelBenchmarkLine(group);
-  if (benchmark) {
-    const metric = document.createElement("span");
-    metric.className = "model-metric";
-    metric.textContent = benchmark;
-    side.appendChild(metric);
-  }
-
+  const actionCell = document.createElement("div");
+  actionCell.className = "model-row-action";
   if (!supported) {
     const note = document.createElement("span");
     note.className = "model-metric";
     note.textContent = "Not available yet";
-    side.appendChild(note);
+    actionCell.appendChild(note);
   } else if (group.installed) {
     // Same slot as DOWNLOAD: once the model is on disk the action flips to
     // UNINSTALL, so removing one model never requires hunting for another menu.
@@ -1839,37 +2048,48 @@ function createModelRow(group) {
       if (modelOperationRunning) return;
       openUninstallModelModal(group);
     });
-    side.appendChild(remove);
-    const installedNote = document.createElement("span");
-    installedNote.className = "model-metric";
-    installedNote.textContent = "Installed";
-    side.appendChild(installedNote);
+    actionCell.appendChild(remove);
   } else {
     const action = document.createElement("button");
     action.type = "button";
     action.className = "reset-cancel-btn";
     action.style.cssText = "padding: 8px 12px; white-space: nowrap;";
-    action.textContent = group.partial
-      ? `RESUME (${group.installed_file_count}/${group.file_count})`
+    // A cancel in the middle of the *first* file leaves zero finished files, so
+    // `group.partial` (finished files > 0) is false even though hundreds of MB
+    // are on disk. `.part` bytes count as a resumable start too.
+    action.textContent = resumable
+      ? (group.installed_file_count > 0
+        ? `RESUME (${group.installed_file_count}/${group.file_count})`
+        : "RESUME")
       : "DOWNLOAD";
+    // Kept so a finished/cancelled transfer can put the real label back: the
+    // active row shows CANCEL while bytes move (see `applyRowProgress`).
+    action.dataset.idleLabel = action.textContent;
     action.disabled = modelOperationRunning;
     action.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      if (activeDownload && activeDownload.id === group.id) {
+        cancelActiveDownload();
+        return;
+      }
       downloadModelGroup(group, action);
     });
-    side.appendChild(action);
-    const size = document.createElement("span");
-    if (group.size_bytes > 0) {
-      size.className = "model-metric";
-      size.textContent = formatCatalogBytes(group.size_bytes);
-      side.appendChild(size);
-    }
+    actionCell.appendChild(action);
   }
 
   row.appendChild(input);
-  row.appendChild(main);
-  row.appendChild(side);
+  row.appendChild(headline);
+  row.appendChild(size);
+  row.appendChild(desc);
+  row.appendChild(actionCell);
+  // Always built, shown only for the model whose transfer is running: a rebuild
+  // mid-download then keeps the real bar instead of a row that looks idle.
+  row.appendChild(createRowProgress());
+  // Fill the block from whatever transfer is running right now: a rebuild during
+  // a download must show the real bar and percent, and a rebuild when nothing is
+  // running must start hidden.
+  applyRowProgress(row);
   return row;
 }
 
@@ -1934,13 +2154,19 @@ async function loadModelCatalog() {
   }
 }
 
-// DOWNLOAD starts with the OS folder picker: the byte destination is the
-// user's decision, and asking for it up front means the confirm dialog only
-// has to report it. Cancelling the picker leaves nothing behind.
+// DOWNLOAD asks for the models folder exactly once. The byte destination is the
+// user's decision, so the first download leads with the OS folder picker and a
+// one-time confirm dialog; after that the folder is known, and pressing DOWNLOAD
+// starts the transfer immediately with the progress in the row.
 async function downloadModelGroup(group, button) {
   if (modelOperationRunning || group.inFlight) return;
   group.inFlight = true;
   group.rowButton = button;
+  if (modelsDirIsCustom) {
+    // Folder already chosen: no picker, no dialog.
+    await runModelDownload(group);
+    return;
+  }
   button.disabled = true;
   button.textContent = "CHOOSE FOLDER...";
   let picked = false;
@@ -1952,7 +2178,7 @@ async function downloadModelGroup(group, button) {
   if (!picked) {
     group.inFlight = false;
     button.disabled = false;
-    button.textContent = "DOWNLOAD";
+    button.textContent = button.dataset.idleLabel || "DOWNLOAD";
     return;
   }
   openDownloadDialog(group);
@@ -1991,7 +2217,26 @@ for (const btn of document.querySelectorAll(".model-card-more")) {
     btn.textContent = panel.hidden ? "show more" : "show less";
   });
 }
-if (refreshModelsBtn) refreshModelsBtn.addEventListener("click", () => loadOfflineModelStatus());
+// Static icon markup only — no user data ever goes through innerHTML.
+const ICON_MODELS_FOLDER = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2Z"></path></svg>`;
+const ICON_MODELS_REFRESH = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>`;
+
+// The folder button is the only way to see — and change — where models land.
+// It also has to be the way to answer the picker up front, without downloading
+// something first.
+if (modelsFolderBtn) {
+  modelsFolderBtn.innerHTML = ICON_MODELS_FOLDER;
+  modelsFolderBtn.addEventListener("click", async () => {
+    if (modelOperationRunning) return;
+    const picked = await pickDownloadFolder();
+    if (!picked) return;
+    modelsFolderBtn.title = `Models folder: ${modelsDirResolved}`;
+  });
+}
+if (refreshModelsBtn) {
+  refreshModelsBtn.innerHTML = ICON_MODELS_REFRESH;
+  refreshModelsBtn.addEventListener("click", () => loadOfflineModelStatus());
+}
 
 if (deleteModelsBtn) {
   deleteModelsBtn.addEventListener("click", async () => {
@@ -2003,7 +2248,6 @@ if (deleteModelsBtn) {
 try {
   listen("model-download-progress", ({ payload }) => {
     if (!payload?.id) return;
-    offlineModelProgress.set(payload.id, { status: payload.status, message: payload.message });
     renderOfflineModelStatus();
     if (payload.status === "failed") setOfflineModelError(`Model download failed: ${payload.message || "Unknown error"}`);
   }).catch((err) => setOfflineModelError(`Could not listen for model download progress: ${err}`));
@@ -2014,8 +2258,14 @@ try {
 try {
   listen("model-group-download-progress", ({ payload }) => {
     if (!payload?.id) return;
-    offlineModelProgress.set(payload.id, { status: payload.status, message: payload.message });
     renderOfflineModelStatus();
+    // The row reports for itself, dialog or no dialog. This is the fast path
+    // (one event per chunk); the poller is the one that cannot be dropped.
+    if (payload.status === "starting" || payload.status === "progress") {
+      setRowProgress(payload.id, payload.percent, payload.message);
+    } else if (payload.status === "complete") {
+      clearRowProgress();
+    }
     if (downloadModal && downloadModal.classList.contains("open")) {
       if (payload.status === "progress" && payload.message) {
         if (downloadModalMessage) downloadModalMessage.textContent = payload.message;
@@ -2091,7 +2341,10 @@ function renderDictionary(words) {
 
 function removeDictionaryWord(word) {
   if (!currentConfig) return;
-  currentConfig.dictionary = currentConfig.dictionary.filter(w => w !== word);
+  currentConfig = {
+    ...currentConfig,
+    dictionary: currentConfig.dictionary.filter(w => w !== word),
+  };
   renderDictionary(currentConfig.dictionary);
   saveConfig();
 }
@@ -2104,7 +2357,7 @@ function addDictionaryWord() {
     dictionaryInput.value = "";
     return;
   }
-  currentConfig.dictionary.push(word);
+  currentConfig = { ...currentConfig, dictionary: [...currentConfig.dictionary, word] };
   renderDictionary(currentConfig.dictionary);
   dictionaryInput.value = "";
   saveConfig();
@@ -2363,7 +2616,9 @@ function buildHistoryRow(entry) {
   if (copyBtn) {
     copyBtn.addEventListener("click", async () => {
       try {
-        await navigator.clipboard.writeText(text);
+        // Native copy: shares the paste paths' clipboard epoch, so a restore
+        // that is still in flight cannot overwrite what the user just copied.
+        await invoke("copy_to_clipboard", { text });
         copyBtn.innerHTML = ICON_CHECK;
         copyBtn.classList.add("is-copied");
         setTimeout(() => {
@@ -2731,6 +2986,7 @@ async function checkForUpdates() {
         await invoke("restart_app");
       } catch (err) {
         log(`Update failed: ${err}`);
+
         updateBtn.disabled = false;
         updateBtn.textContent = "CONFIRM";
       }
