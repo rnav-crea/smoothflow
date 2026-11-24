@@ -1537,10 +1537,15 @@ mod tests {
     /// A path that does not exist, so `status()` reports "not installed" without
     /// touching the real models folder or the network.
     fn missing_models_root() -> (PathBuf, String) {
-        (
-            std::env::temp_dir().join("smoothflow-group-catalog-test"),
-            String::new(),
-        )
+        // Unique per test so parallel tests can't race over the same dir
+        // (one test's stand-in files can otherwise read as partial for
+        // another).
+        let root = std::env::temp_dir().join(format!(
+            "smoothflow-group-catalog-test-{:?}",
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        (root, String::new())
     }
 
     #[test]
