@@ -53,7 +53,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlGNDcwRkZCQzQwRTk4RTAKUldUZ21BN0UrdzlIbjNiaEVuT3VDdDVkaEwrTkNCdy9OcXlXM2VQK3VRT0IrZE5qZUNWOEdIUEoK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUyMjgwOTNENjlDNTM4RDAKUldUUU9NVnBQUWtvNGd6ZFJ3RWx2aVdiNkVSZVRQb0RNK0RERDFhanRqS2tZQ2wyalJhT3N4Q3IK",
       "endpoints": ["https://github.com/rnav-crea/smoothflow/releases/latest/download/latest.json"]
     }
   }

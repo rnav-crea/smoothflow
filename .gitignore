@@ -26,6 +26,9 @@ src-tauri/icons/ios/
 # generated Tauri schema
 src-tauri/gen/
 
+# private signing key — lives in the repo as a GitHub Actions secret, not committed
+src-tauri/src-tauri/keys/
+
 # STT benchmark fixtures + binary
 src-tauri/test_data/
 src-tauri/src/bin/
