@@ -1692,6 +1692,9 @@ mod tests {
     #[test]
     fn every_group_size_is_the_sum_of_its_file_specs() {
         let (root, custom) = missing_models_root();
+        // The assertion below assumes an empty models root; another test may
+        // have left files there if they run in parallel.
+        let _ = std::fs::remove_dir_all(&root);
         let catalog = group_catalog(&root, &custom).unwrap();
         assert_eq!(catalog.len(), GROUPS.len());
         for status in &catalog {

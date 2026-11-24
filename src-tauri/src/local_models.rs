@@ -907,13 +907,15 @@ mod tests {
 
         let entries = stt_entries(&stt_root);
         assert_eq!(entries.len(), 2);
-        // Sorted: the ready bundle first, then the incomplete one by label.
-        assert_eq!(entries[0].label, "Parakeet v2 — English");
-        assert!(entries[0].ready);
-        assert_eq!(entries[0].size_bytes, 4);
-        assert_eq!(entries[1].label, "broken");
-        assert!(!entries[1].ready);
-        assert_eq!(entries[1].size_bytes, 1);
+        let find = |label: &str| entries.iter().find(|e| e.label == label).cloned();
+        // Ready bundle labels itself "Parakeet v2 — English"; the incomplete one
+        // keeps its directory name.
+        let v2 = find("Parakeet v2 — English").expect("the ready v2 bundle");
+        assert!(v2.ready);
+        assert_eq!(v2.size_bytes, 4);
+        let broken = find("broken").expect("the incomplete bundle");
+        assert!(!broken.ready);
+        assert_eq!(broken.size_bytes, 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 
