@@ -894,8 +894,9 @@ mod tests {
     #[test]
     fn folder_scan_lists_ready_and_incomplete_bundles() {
         let root = temp_dir("scan-bundles");
-        let ready = root.join("v2");
-        let broken = root.join("broken");
+        let stt_root = root.join("stt");
+        let ready = stt_root.join("v2");
+        let broken = stt_root.join("broken");
         std::fs::create_dir_all(&ready).unwrap();
         std::fs::create_dir_all(&broken).unwrap();
         bundle(
@@ -904,7 +905,7 @@ mod tests {
         );
         bundle(&broken, &["encoder.onnx"]);
 
-        let entries = stt_entries(&root);
+        let entries = stt_entries(&stt_root);
         assert_eq!(entries.len(), 2);
         // Sorted: the ready bundle first, then the incomplete one by label.
         assert_eq!(entries[0].label, "Parakeet v2 — English");

@@ -165,6 +165,8 @@ const FLUSH_CHARS: usize = 80;
 
 fn should_flush(pending: &str) -> bool {
     pending.chars().count() >= FLUSH_CHARS
+        // A trailing newline ends a sentence ("however it arrives").
+        || matches!(pending.chars().last(), Some('\n'))
         || matches!(
             pending.trim_end().chars().last(),
             Some('.' | '!' | '?' | '\n')

@@ -1635,12 +1635,15 @@ mod tests {
     #[test]
     fn delete_group_removes_only_that_models_files() {
         let (root, custom) = missing_models_root();
-        let _ = std::fs::remove_dir_all(&root);
+        // `delete_group` looks under `models_dir(root, custom)`, so the stand-in
+        // files have to be created there too.
+        let models = models_dir(&root, &custom);
+        let _ = std::fs::remove_dir_all(&models);
         // Stand-in files: sizes do not matter here, only which paths survive.
         for spec in CATALOG.iter().filter(|spec| {
             spec.directory == "v2" || spec.directory == "whisper-medium"
         }) {
-            let path = target_path(&root, spec).unwrap();
+            let path = target_path(&models, spec).unwrap();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, b"x").unwrap();
         }
@@ -1657,12 +1660,12 @@ mod tests {
 
         // The removed model is gone, folder included, and the other model keeps
         // every byte it had.
-        assert!(!target_path(&root, v2_encoder).unwrap().exists());
-        assert!(!root.join("stt").join("v2").exists(), "empty v2 folder must be removed");
-        assert!(target_path(&root, whisper_encoder).unwrap().exists());
+        assert!(!target_path(&models, v2_encoder).unwrap().exists());
+        assert!(!models.join("stt").join("v2").exists(), "empty v2 folder must be removed");
+        assert!(target_path(&models, whisper_encoder).unwrap().exists());
         assert_eq!(catalog.len(), GROUPS.len());
         assert!(delete_group("not-a-model", &root, &custom).is_err());
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&models);
     }
 
     /// The placeholder rows exist so the picker shows the whole menu. That is only
