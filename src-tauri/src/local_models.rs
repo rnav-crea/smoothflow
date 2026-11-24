@@ -396,8 +396,8 @@ fn is_catalog_llm_id(id: &str) -> bool {
 /// name.
 fn stt_label(id: &str) -> String {
     match id.trim().to_ascii_lowercase().as_str() {
-        "v2" => "Parakeet v2 - English".to_string(),
-        "v3" => "Parakeet v3 - 25 languages".to_string(),
+        "v2" => "Parakeet v2 — English".to_string(),
+        "v3" => "Parakeet v3 — 25 languages".to_string(),
         "parakeet-unified-en" => "Parakeet Unified EN".to_string(),
         "canary-180m-flash" => "Canary 180M Flash".to_string(),
         "whisper-medium" => "Whisper Medium".to_string(),
@@ -770,7 +770,14 @@ fn quant_token_len(rest: &[u8]) -> Option<usize> {
         return None;
     }
     let mut end = prefix;
-    while end < rest.len() && (rest[end].is_ascii_digit() || rest[end].is_ascii_uppercase()) {
+    while end < rest.len() {
+        const OK: &[u8] = &[b'_'];
+        if !rest[end].is_ascii_digit()
+            && !rest[end].is_ascii_uppercase()
+            && !OK.contains(&rest[end])
+        {
+            break;
+        }
         end += 1;
     }
     // A token cannot run straight into another word (`F16GGUF` is not a quant).

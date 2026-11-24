@@ -2167,8 +2167,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_hotkey_lowercase_letter() {
-        let (_, code) = parse_hotkey_str("a").expect("single lowercase letter should parse");
+    fn parse_hotkey_rejects_a_bare_key() {
+        // NB-25: a bare key like `a` would register a hotkey on every keystroke
+        // in every app, so the parser requires a modifier (macOS Fn excepted).
+        assert!(parse_hotkey_str("a").is_err());
+        let (_, code) = parse_hotkey_str("Ctrl+a").expect("Ctrl+A should parse");
         assert_eq!(code, Code::KeyA);
     }
 

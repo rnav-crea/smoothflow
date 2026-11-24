@@ -418,12 +418,6 @@ const PARAKEET_V3_LANGUAGES: &[&str] = &[
     "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk",
 ];
 
-/// SenseVoice's headline five. The model card advertises "50+ languages" but
-/// does not enumerate a verified 50-code set, and nothing in this repo pins one
-/// down, so inventing the other 45 would be a lie in the UI. The full set lands
-/// with engine support (phase 3); until then `supported: false` greys the row.
-const SENSEVOICE_LANGUAGES: &[&str] = &["yue", "zh", "en", "ja", "ko"];
-
 const GROUPS: &[ModelGroup] = &[
     ModelGroup {
         id: "v2",
@@ -478,7 +472,10 @@ const GROUPS: &[ModelGroup] = &[
         // as "not available yet" instead of offering a download that cannot work.
         file_ids: &[],
         supported: false,
-        languages: SENSEVOICE_LANGUAGES,
+        // Placeholder rows claim no languages: `bundle_ids` rejects `sv`, so
+        // there is no engine path yet to verify any of the five candidates
+        // against. Inventing codes would be a lie in the UI.
+        languages: &[],
         streaming: false,
         // SenseVoice ships a language-ID head; unwired until phase 3.
         language_detection: true,

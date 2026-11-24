@@ -1454,8 +1454,9 @@ mod tests {
         };
         assert!(fast_path_applies(&c, "yes"));
         assert!(fast_path_applies(&c, "sure thing"));
-        assert!(fast_path_applies(&c, "send it now")); // exactly at 4
-        assert!(!fast_path_applies(&c, "send it now please")); // 5
+        assert!(fast_path_applies(&c, "send it now")); // 3 of 4
+        assert!(fast_path_applies(&c, "send it now please")); // 4 = at threshold
+        assert!(!fast_path_applies(&c, "send it now please right now")); // 5 over
     }
 
     #[test]
