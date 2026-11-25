@@ -34,7 +34,20 @@ message(STATUS "Prebuilt sherpa-onnx libs: ${SHERPA_ONNX_PREBUILT_LIBS}")
 add_executable(smoothflow-stt src/main.cpp)
 target_compile_features(smoothflow-stt PRIVATE cxx_std_17)
 target_include_directories(smoothflow-stt PRIVATE "${SHERPA_ONNX_SOURCE_DIR}")
-target_link_libraries(smoothflow-stt PRIVATE ${SHERPA_ONNX_PREBUILT_LIBS})
+if(MSVC)
+  target_link_libraries(smoothflow-stt PRIVATE ${SHERPA_ONNX_PREBUILT_LIBS})
+elseif(APPLE)
+  # ld64 has no --start-group; the cross-archive references resolve on the
+  # macOS runners without it.
+  target_link_libraries(smoothflow-stt PRIVATE ${SHERPA_ONNX_PREBUILT_LIBS})
+else()
+  # GNU ld scans each archive once, in order. libsherpa-onnx-cxx-api.a
+  # references C-API symbols (e.g. SherpaOnnxDestroyOfflineDiacritization)
+  # that live in libsherpa-onnx-c-api.a, which the glob can list earlier —
+  # a rescan group makes the references resolve regardless of order.
+  target_link_libraries(smoothflow-stt PRIVATE
+    "-Wl,--start-group" ${SHERPA_ONNX_PREBUILT_LIBS} "-Wl,--end-group")
+endif()
 
 # The static bundle is /MT, so the helper must be /MT too or the CRTs mismatch.
 # The property is MSVC-only; GCC/Clang have no equivalent and do not need one.
