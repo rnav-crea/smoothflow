@@ -195,7 +195,7 @@ const std::vector<FlagOwner>& FlagOwners() {
   return owners;
 }
 
-bool FlagWasSet(const std::string& flag, const Options& options) {
+bool FlagWasSet(const std::string& flag, Options& options) {
   if (flag == "--hotwords-score") {
     return options.hotwords_score_set;
   }

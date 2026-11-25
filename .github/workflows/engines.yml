@@ -124,7 +124,12 @@ jobs:
           mkdir -p deps
           curl -fsSL -o deps/sherpa-src.tar.gz \
             "https://github.com/k2-fsa/sherpa-onnx/archive/refs/tags/v${SHERPA_ONNX_VERSION}.tar.gz"
-          tar -xzf deps/sherpa-src.tar.gz -C deps
+          # The v1.13.8 tag tarball ships a few dangling symlinks upstream
+          # ("Cannot create symlink to ..."). The build only needs the
+          # headers, so tolerate extraction errors; the dir check below
+          # catches a genuinely broken download.
+          tar -xzf deps/sherpa-src.tar.gz -C deps 2>&1 || true
+          test -d "deps/sherpa-onnx-${SHERPA_ONNX_VERSION}" || { echo "sherpa source dir missing"; exit 1; }
 
       - name: Fetch sherpa-onnx prebuilt static libs
         shell: bash
