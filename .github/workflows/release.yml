@@ -86,8 +86,34 @@ jobs:
           files: release/*
           generate_release_notes: true
 
+  verify-signing:
+    runs-on: ubuntu-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Write the CI private key to a temp file
+        run: printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > /tmp/ci-signing.key
+
+      - name: Print the CI key SHA256 + length (compare with local src-tauri/keys/app.key)
+        run: |
+          sha256sum /tmp/ci-signing.key
+          wc -c < /tmp/ci-signing.key
+          node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json')).plugins.updater.pubkey"
+
+      - name: Test-sign a dummy file (decrypts the key with the password)
+        run: |
+          npm ci
+          echo smoke > /tmp/smoke.txt
+          npx tauri signer sign /tmp/smoke.txt
+
   manifest:
-    needs: build
+    needs: [build, verify-signing]
     runs-on: ubuntu-latest
     permissions:
       contents: write
