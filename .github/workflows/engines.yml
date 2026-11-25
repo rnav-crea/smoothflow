@@ -87,7 +87,13 @@ jobs:
           # copyFileSync dereferenced upstream's soname symlinks), and forcing
           # symlink storage would produce an archive that cannot be extracted on
           # Windows.
-          zip -qr "../smoothflow-llama-${{ matrix.target }}.zip" .
+          if [ -x "$(command -v zip)" ]; then
+            zip -qr "../smoothflow-llama-${{ matrix.target }}.zip" .
+          else
+            # windows-latest has no zip in PATH — PowerShell's Compress-Archive
+            # makes the same .zip.
+            pwsh -NoProfile -Command "Get-ChildItem -Force -File | Compress-Archive -DestinationPath '../smoothflow-llama-${{ matrix.target }}.zip' -Force"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -168,7 +174,13 @@ jobs:
           fi
           cp "$bin" "out/${{ matrix.target }}/"
           cd "out/${{ matrix.target }}"
-          zip -qr "../smoothflow-stt-${{ matrix.target }}.zip" .
+          if [ -x "$(command -v zip)" ]; then
+            zip -qr "../smoothflow-stt-${{ matrix.target }}.zip" .
+          else
+            # windows-latest has no zip in PATH — PowerShell's Compress-Archive
+            # makes the same .zip the app extracts.
+            pwsh -NoProfile -Command "Get-ChildItem -Force -File | Compress-Archive -DestinationPath '../smoothflow-stt-${{ matrix.target }}.zip' -Force"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
