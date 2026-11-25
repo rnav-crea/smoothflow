@@ -63,7 +63,7 @@ jobs:
 
       - name: Fetch upstream llama.cpp ${{ env.LLAMA_BUILD }}
         run: |
-          mkdir -p upstream out
+          mkdir -p upstream/extracted out
           curl -fsSL -o "upstream/${{ matrix.asset }}" \
             "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_BUILD}/${{ matrix.asset }}"
           case "${{ matrix.asset }}" in
