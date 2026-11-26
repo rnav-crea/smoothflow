@@ -61,8 +61,15 @@ find_package(Threads REQUIRED)
 target_link_libraries(smoothflow-stt PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 
 if(APPLE)
-  # onnxruntime's static archive references Accelerate for its CPU kernels.
-  target_link_libraries(smoothflow-stt PRIVATE "-framework Accelerate")
+  # onnxruntime's static archive references Accelerate for its CPU kernels,
+  # Foundation for NSLog (apple_log_sink.mm.o) and CoreFoundation for
+  # __CFConstantStringClassReference plus absl's cctz local_time_zone()
+  # (_CFTimeZoneGetName). Missing Foundation/CoreFoundation fails the link with
+  # "symbol(s) not found for architecture arm64/x86_64".
+  target_link_libraries(smoothflow-stt PRIVATE
+    "-framework Accelerate"
+    "-framework Foundation"
+    "-framework CoreFoundation")
 endif()
 
 install(TARGETS smoothflow-stt RUNTIME DESTINATION bin)
