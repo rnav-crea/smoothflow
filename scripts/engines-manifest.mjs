@@ -55,15 +55,21 @@ for (const file of readdirSync(args.dir).sort()) {
   });
 }
 
-// Every target must have both engines. A half-populated manifest would ship an
-// app that downloads a runtime it cannot pair with a model.
+// Every platform the app can actually run engines on must have both engines. A
+// half-populated manifest would ship an app that downloads a runtime it cannot
+// pair with a model.
+//
+// macOS is deliberately excluded: stt_local.rs / llm_local.rs still return
+// "not available on macOS" for every spawn, and the macOS STT legs are
+// best-effort in the workflow (retired runner labels, unproven link). Whatever
+// macOS archives do arrive are listed in the manifest anyway; a macOS user
+// without an entry gets `[ENG-003] ... lists no stt build for macos-*`, which is
+// the same outcome as the spawn error they hit today.
+const REQUIRED_TARGETS = ["win-x64", "linux-x64"];
 const have = new Set(engines.map((engine) => `${engine.kind}:${engine.target}`));
 const missing = [];
-for (const target of TARGETS) {
+for (const target of REQUIRED_TARGETS) {
   for (const kind of KINDS) {
-    // Windows/Linux arm64 have no runner in the build matrix yet; only require
-    // the targets we can actually produce.
-    if (target.endsWith("arm64") && !target.startsWith("macos")) continue;
     if (!have.has(`${kind}:${target}`)) missing.push(`${kind}:${target}`);
   }
 }

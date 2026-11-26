@@ -104,6 +104,13 @@ jobs:
   stt:
     name: stt helper (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # A leg that fails (or never gets a runner) must not block `publish`: the
+    # app only runs local STT on Windows and Linux today, and stt_local.rs
+    # returns a clear "not available" error on macOS. macOS legs are best-effort
+    # until those spawn paths land, so they are marked `optional`.
+    continue-on-error: ${{ matrix.optional == true }}
+    # A hung compile is a bug, not a reason to hold the run open for hours.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -114,11 +121,18 @@ jobs:
           - target: linux-x64
             os: ubuntu-latest
             prebuilt: sherpa-onnx-v1.13.8-linux-x64-static-no-tts-lib.tar.bz2
+          # Runner labels, not OS versions: `macos-13` was retired and
+          # `macos-14` was retired on 2026-11-02, so jobs on those labels sit
+          # queued forever or cancel instantly. `macos-15` is arm64;
+          # `macos-15-intel` is the x64 image (plain `macos-14` was x64 too, so
+          # the old "arm64" leg never produced an arm64 binary).
           - target: macos-arm64
-            os: macos-14
+            os: macos-15
+            optional: true
             prebuilt: sherpa-onnx-v1.13.8-osx-arm64-static-no-tts-lib.tar.bz2
           - target: macos-x64
-            os: macos-13
+            os: macos-15-intel
+            optional: true
             prebuilt: sherpa-onnx-v1.13.8-osx-x64-static-no-tts-lib.tar.bz2
     steps:
       - uses: actions/checkout@v4
@@ -192,6 +206,10 @@ jobs:
     name: publish engines
     needs: [llama, stt]
     runs-on: ubuntu-latest
+    # `!cancelled()` rather than the default `success()`: a failed macOS leg is
+    # tolerated (it is marked optional above), and the manifest step below is
+    # what decides whether the artifacts that did arrive are publishable.
+    if: ${{ !cancelled() }}
     steps:
       - uses: actions/checkout@v4
 
